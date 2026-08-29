@@ -1,0 +1,20 @@
+{
+  "sheets": {
+    "titres_mary":   "1pItBk1boYtu2yKCmdFFeWpayuzKYEVBd-eFtjS8059E",
+    "lives_mary":    "1W7Z88CALqMn6DH4Nwm7Gjd_64T-fW3m7kbLRPABIFqY",
+    "titres_laurent":"1c_NGYSZiuHbrdRlWCFl5gZDcldxsSGifN_zzu87Cchs",
+    "titres_paps":   "1oyno96M7-i9PjgEPv2sQTIh2BK80mY7y",
+    "titres_vince":  "1DCet51SmBWYMxHoMEw-6F1Z2hfgGNydtdVodiwXeMiI"
+  },
+  "azuracast": {
+    "base_url":   "https://azuracast.2026.airvs.fr",
+    "api_key":    "5e256834da4da4cf:1cadd3936115612949a795cd5a48e12d",
+    "ssh_host":   "sebastien@azuracast.2026.airvs.fr",
+    "ssh_port":   "2022",
+    "sshfs_root": "/home/sebastien/music_azuracast6_7",
+    "stations": [
+      {"id": 7, "nom": "Station 7"},
+      {"id": 6, "nom": "Station 6"}
+    ]
+  }
+}

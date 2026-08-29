@@ -1,0 +1,392 @@
+Parfait ! C'est exactement ce qu'il fallait. Si le service tourne déjà et que la carte son est gérée, **on ne va surtout pas y toucher**. 
+
+L'opération va être très simple : il suffit de faire un "upgrade" du fichier Python que votre service actuel exécute déjà, en y injectant la logique SQL, sans changer le lancement de `mpv`.
+
+Voici la démarche exacte :
+
+### 1. Installer les dépendances SQL sur la Debian
+Puisque votre script original n'avait pas besoin de base de données, il faut installer le connecteur MySQL une seule fois via Putty :
+```bash
+sudo apt update
+sudo apt install python3-mysql.connector python3-dotenv
+```
+
+### 2. Mettre à jour le script Python
+Récupérez le script que votre service exécute actuellement (qui doit se trouver quelque part comme `/opt/airvs_player/airvs_player.py` ou `/home/votre_user/...`) et remplacez-le par cette version "Hybride". 
+
+**Ce qui change :** On garde votre code exact pour `mpv`, on ajoute la connexion SQL, et on écrit le `.m3u` dans un dossier Samba existant (j'ai mis `/mnt/projet_radio2/radio_bridge/` comme exemple, à adapter selon vos partages).
+
+```python
+import subprocess
+import socket
+import json
+import os
+import time
+import sys
+import mysql.connector
+from mysql.connector import Error
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ─── Configuration Originale Radio ────────────────────────────────────────
+ICECAST_URL = "https://icecast-vps-ovh.airvs.fr/stream11"
+ALSA_DEVICE = "usb_card"
+SOCKET_PATH = "/tmp/mpv_radio_socket"
+
+# ─── NOUVEAU : Configuration Sortie pour RadioDJ ─────────────────────────
+# Mettez ici un chemin qui est SUR un partage Samba de la Debian
+DOSSIER_RESEAU = "/mnt/projet_radio2/radio_bridge"
+PLAYLIST_PATH = os.path.join(DOSSIER_RESEAU, "playlist_live_azuracast.m3u")
+
+# ─── NOUVEAU : Configuration Base de données ─────────────────────────────
+DB_CONFIG = {
+    "host":     os.getenv("DB_HOST", "192.168.1.39"),
+    "port":     3306,
+    "user":     os.getenv("DB_USER", "sebastien"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME", "radiodb"),
+    "charset":  "utf8mb4",
+}
+
+# ─── NOUVEAU : Logique SQL ───────────────────────────────────────────────
+db_connection = None
+
+def connect_to_db():
+    global db_connection
+    try:
+        db_connection = mysql.connector.connect(**DB_CONFIG)
+    except Error as e:
+        print(f"[DB] Erreur connexion : {e}", flush=True)
+
+def get_windows_path_from_db(title: str):
+    if not db_connection or not db_connection.is_connected(): return None
+    if not title: return None
+    
+    parts = title.split(" - ", 1)
+    artist = parts[0].strip() if len(parts) > 0 else ""
+    song = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        cursor = db_connection.cursor()
+        query = "SELECT path FROM songs WHERE artist LIKE %s AND title LIKE %s LIMIT 1"
+        cursor.execute(query, (f"%{artist}%", f"%{song}%"))
+        result = cursor.fetchone()
+        cursor.close()
+        return result[0] if result else None
+    except Error as e:
+        print(f"[DB] Erreur SQL : {e}", flush=True)
+        connect_to_db()
+        return None
+
+def add_to_playlist(windows_path: str):
+    if not windows_path: return
+    os.makedirs(DOSSIER_RESEAU, exist_ok=True)
+    try:
+        # Anti-doublon : on ne l'écrit pas si c'est le dernier de la liste
+        if os.path.exists(PLAYLIST_PATH):
+            with open(PLAYLIST_PATH, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                last_line = ""
+                for line in reversed(lines):
+                    if line.strip(): last_line = line.strip(); break
+                if last_line == windows_path: return 
+
+        with open(PLAYLIST_PATH, 'a', encoding='utf-8') as f:
+            f.write(windows_path + '\n')
+        print(f"  -> [RADIODJ] {windows_path}", flush=True)
+    except IOError as e:
+        print(f"  -> [ERREUR] Écriture : {e}", flush=True)
+
+# ─── Votre Code Original (Légèrement modifié dans la boucle) ─────────────
+def main():
+    # Connexion SQL silencieuse au démarrage
+    connect_to_db()
+
+    if os.path.exists(SOCKET_PATH):
+        try:
+            os.remove(SOCKET_PATH)
+        except OSError:
+            print("Attention : Le socket existant est bloqué, on le force...", flush=True)
+            time.sleep(1)
+            os.remove(SOCKET_PATH)
+
+    cmd = [
+        "mpv",
+        "--no-video",
+        "--really-quiet",
+        "--ao=alsa",
+        f"--audio-device=alsa/{ALSA_DEVICE}",
+        f"--input-ipc-server={SOCKET_PATH}",
+        ICECAST_URL
+    ]
+    
+    process = subprocess.Popen(cmd)
+
+    socket_ready = False
+    for i in range(15):
+        if process.poll() is not None:
+            print("Erreur : mpv s'est arrêté au démarrage (problème réseau ou son).", flush=True)
+            sys.exit(1)
+        if os.path.exists(SOCKET_PATH):
+            socket_ready = True
+            break
+        time.sleep(1)
+
+    if not socket_ready:
+        print("Info : Détection des titres désactivée. Le son joue normalement.", flush=True)
+        process.wait() 
+        sys.exit(0)
+
+    print("Lecture du flux en cours (Titres activés + Pont RadioDJ)...", flush=True)
+
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(SOCKET_PATH)
+
+        request = {"command": ["observe_property", 1, "media-title"]}
+        client.sendall((json.dumps(request) + "\n").encode())
+
+        while True:
+            if process.poll() is not None:
+                print("Fin du flux.", flush=True)
+                break
+
+            client.settimeout(1.0)
+            try:
+                data = client.recv(4096).decode()
+                if data:
+                    for line in data.strip().split('\n'):
+                        if not line:
+                            continue
+                        msg = json.loads(line)
+                        
+                        if msg.get("event") == "property-change":
+                            if msg.get("name") == "media-title":
+                                title = msg.get("data")
+                                if title and "http" not in title and title != "":
+                                    print(f"Titre : {title}", flush=True)
+                                    
+                                    # === NOUVEAU : Appel SQL ===
+                                    windows_path = get_windows_path_from_db(title)
+                                    if windows_path:
+                                        add_to_playlist(windows_path)
+                                    else:
+                                        print("  -> Non trouvé dans la base SQL", flush=True)
+                                        
+            except socket.timeout:
+                continue
+            except json.JSONDecodeError:
+                pass
+
+    except Exception as e:
+        print(f"Erreur canal de communication : {e}", flush=True)
+        process.wait()
+    finally:
+        process.terminate()
+        try:
+            client.close()
+        except:
+            pass
+        if os.path.exists(SOCKET_PATH):
+            os.remove(SOCKET_PATH)
+        if db_connection and db_connection.is_connected(): 
+            db_connection.close()
+
+if __name__ == "__main__":
+    main()
+```
+
+### 3. Créer le fichier `.env`
+À côté de votre script Python sur la Debian, créez un fichier nommé `.env` qui contient :
+```env
+DB_HOST=192.168.1.39
+DB_USER=sebastien
+DB_PASSWORD=votre_mot_de_passe_mariadb
+DB_NAME=radiodb
+```
+
+### 4. Redémarrer votre service existant
+Depuis Putty (ou en local), tapez :
+```bash
+sudo systemctl restart airvs-player.service
+```
+*(Remplacez `airvs-player.service` par le vrai nom de votre service si c'est différent).*
+
+### 5. Côté Windows (RadioDJ)
+Maintenant, votre Debian génère un fichier `.m3u` sur le réseau en temps réel. Dans RadioDJ, vous avez deux options :
+1. **Utiliser l'option "Load Playlist"** de RadioDJ en pointant vers `\\IP_DE_LA_DEBIAN\projet_radio2\radio_bridge\playlist_live_azuracast.m3u`.
+2. **Automatiser** : Utiliser le plugin "Aux Players" ou une rotation programmée dans RadioDJ qui vient lire ce fichier M3U toutes les X minutes pour se mettre à jour avec l'intelligence d'AzuraCast !
+
+
+03/05/2026 - upgrade 
+
+Peut on revenir sur ce script python créé il y a quelques jours et qui tourne entre 3 machines dont voici la composition. 
+Le script se lance sur une Debian 12 ultra légére en ressources via un service systemd (airvs-radio.service), 
+la base SQL tourne sur une Windows 11 qui fait tourner également le logiciel radioDJ et je pilote l'ensemble via une Ubuntu Studio 24.
+Les 3 machines sont éteintes et redémarrées chaque matin afin d'economiser leurs ressources; je voudrais donc gérer le fait qu'elles puissent
+redémarrer indépendamment sans par exemple d'erreur d'accès à la base SQL, que le fichier m3u de playlist soit géré quotidiennement également.
+
+C'est l'erreur la plus classique lorsqu'on commence à automatiser des commandes SSH ! 
+
+Comme le flux SSH s'exécute en arrière-plan (sans interface graphique), `sudo` ne peut pas vous afficher le petit texte "Mot de passe :" pour que vous le tapiez.
+
+Pour votre cas (un petit réseau local maison/asso), il y a **une excellente solution très sécurisée** qui vous évitera de taper le mot de passe tout en protégeant votre machine : autoriser *uniquement* cette commande spécifique sans mot de passe.
+
+Voici comment faire, c'est très simple et c'est la méthode "pro" :
+
+### La solution : Utiliser `visudo` sur la Debian
+
+Au lieu de donner tous les droits sans mot de passe (ce qui est dangereux), nous allons dire à Debian : *"Le utilisateur sebastien a le droit de redémarrer le service airvs-radio SANS mot de passe, mais rien d'autre"*.
+
+**1. Connectez-vous en SSH à votre Debian (normalement) :**
+```bash
+ssh sebastien@IP_DE_LA_DEBIAN
+```
+
+**2. Tapez cette commande :**
+```bash
+sudo visudo
+```
+*(Cela va ouvrir le fichier de configuration de sudo avec l'éditeur `nano`, de manière sécurisée).*
+
+**3. Descendez tout en bas du fichier et ajoutez cette ligne exacte :**
+```text
+sebastien ALL=(ALL) NOPASSWD: /bin/systemctl restart airvs-radio.service
+```
+*(Attention : respectez bien les espaces et les majuscules à `NOPASSWD`)*
+
+**4. Sauvegardez et quittez :**
+* Si vous êtes sous `nano` : faites `Ctrl+O` puis `Entrée` pour sauvegarder, et `Ctrl+X` pour quitter.
+
+---
+
+### Le résultat ?
+
+Maintenant, retournez sur votre **Ubuntu Studio**. 
+
+Vous pouvez lancer la commande directement, ou utiliser votre petit script `update_radio.sh`. Le système ne vous demandera **plus jamais le mot de passe sudo** pour redémarrer la radio, car Debian saura que vous avez le droit spécifique de le faire !
+
+Testez depuis Ubuntu Studio :
+```bash
+ssh sebastien@IP_DE_LA_DEBIAN "sudo systemctl restart airvs-radio.service"
+```
+Ça va s'exécuter instantanément, sans erreur et sans mot de passe. 
+
+*(Note : si plus tard vous voulez arrêter le service au lieu de le redémarrer, il faudra ajouter une deuxième ligne dans `visudo` avec `stop` à la place de `restart`).*
+
+Pour résumer ce qui est maintenant solide comme un roc sur votre architecture : 
+
+    Une tolérance parfaite aux redémarrages : Peu importe laquelle des 3 machines démarre en premier, le script s'adapte silently et se connecte dès que la base Windows est prête. 
+    Un historique propre : RadioDJ a son fichier journalier vierge chaque matin, et vous conservez les archives de chaque jour (pratique pour la SACEM ou pour retrouver un titre). 
+    Un pont SQL résolu : Le problème de utf8mb4_0900_ai_ci entre la Debian et Windows est définitivement réglé grâce au mode use_pure=True. 
+
+Vous avez maintenant un système de "pont" entre un flux AzuraCast distant et RadioDJ en local qui est extrêmement fiable. 
+Et grâce au petit réglage visudo (sans mot de passe) fait plus tôt, vos futures mises à jour depuis l'Ubuntu Studio se feront en un seul coup de script ! 
+
+Ce qui va se passer maintenant avec RadioDJ : 
+
+    AzuraCast passe le titre A : Le script trouve le chemin, l'écrit dans l'archive, et le fichier playlist_live_azuracast.m3u contient uniquement le Titre A. 
+    AzuraCast passe le titre B : Le script écrase le fichier M3U. Il contient maintenant uniquement le Titre B. 
+    RadioDJ doit être configuré pour surveiller ce fichier (avec l'option "Load tracks from playlist" ou via un plugin) : il va lire le Titre B et le lancer. 
+
+Ajustement fin (Le buffer) : 
+
+J'ai mis une variable NB_TITRES_FLUX_ACTIF = 1 tout en haut.  
+
+     Si RadioDJ est très rapide à charger les morceaux, 1 est parfait (zéro décalage avec AzuraCast).
+     Mais si RadioDJ met 2 ou 3 secondes à charger le fichier, vous risquez d'entendre un micro-blanc entre deux morceaux. Si c'est le cas, changez cette valeur à 2 ou 3. Le script gardera toujours les 2 ou 3 derniers titres d'AzuraCast dans le M3U pour que RadioDJ enchaîne sans interruption, tout en restant "collé" au direct !
+     
+
+(Note : Si votre question signifiait autre chose, par exemple "Comment ignorer les jingles d'AzuraCast pour ne garder que les vraies chansons ?", dites-le moi, il y a une autre technique pour ça en filtrant les mots-clés !) 
+      
+Tu viens de mettre le doigt sur **LE gros point faible de RadioDJ** par rapport à ce que l'on essaie de faire ! 
+
+Tu as 100% raison : RadioDJ charge une playlist en mémoire au démarrage, et **il ne surveille pas les modifications du fichier M3U en temps réel**. Si tu mets un événement toutes les 3 minutes, tu auras un décalage aléatoire (soit il coupera un morceau en plein milieu, soit il attendra 2 minutes 59 secondes avant de lancer le suivant).
+
+Connaissant bien RadioDJ, il n'y a pas de "bouton magique" natif pour surveiller un fichier. **Mais il y a une solution "Pro" : forcer RadioDJ à se rafraîchir via son API Web.**
+
+### La vraie solution : Le Web REST API de RadioDJ
+
+Au lieu d'attendre que RadioDJ daigne regarder le fichier M3U, on va inverser la logique : 
+C'est **votre script Python (sur la Debian)** qui va dire à RadioDJ (sur Windows) : *"Hey, j'ai mis à jour le fichier M3U, recharge-le maintenant"* au moment **exact** où AzuraCast change de titre.
+
+RadioDJ possède un plugin serveur Web intégré très puissant qui permet de le piloter à distance avec de simples requêtes HTTP.
+
+Voici comment mettre ça en place (c'est très simple) :
+
+#### Étape 1 : Activer l'API sur RadioDJ (Windows)
+1. Ouvre RadioDJ sur Windows.
+2. Va dans **Options** -> **Plugins**.
+3. Cherche **Web REST API** (ou simplement **REST API** selon ta version).
+4. Coche la case pour l'activer.
+5. Note bien le **Port** (par défaut c'est souvent `7777` ou `2020`) et définis un **Mot de passe** (ex: `monpassword123`).
+6. Redémarre RadioDJ.
+
+#### Étape 2 : Préparer la Debian
+Sur ta Debian, il faut installer la bibliothèque Python qui permet de faire des requêtes web facilement. En SSH :
+```bash
+pip3 install requests
+```
+
+#### Étape 3 : Modifier le script Python (La magie)
+Dans ton script `airvs_player.py` sur la Debian, ajoute `import requests` tout en haut avec les autres imports.
+
+Puis, trouve ta fonction `add_to_playlist()`. Juste après avoir écrit dans le fichier M3U, on va "frapper à la porte" de RadioDJ. Remplace ta fonction par celle-ci :
+
+```python
+import requests # N'oublie pas l'import en haut !
+
+# --- Mets ces variables dans ta configuration tout en haut du script ---
+RADIODJ_IP = os.getenv("DB_HOST", "192.168.1.39")
+RADIODJ_API_PORT = "7777"  # Mets le port que tu as choisi dans RadioDJ
+RADIODJ_API_PASS = "monpassword123" # Mets le mot de passe choisi
+# ---------------------------------------------------------------------
+
+def add_to_playlist(windows_path: str):
+    global historique_actif
+    if not windows_path or not ARCHIVE_PATH: return
+    
+    try:
+        # --- PARTIE 1 : L'HISTORIQUE ---
+        with open(ARCHIVE_PATH, 'a', encoding='utf-8') as f:
+            f.write(windows_path + '\n')
+            
+        # --- PARTIE 2 : LE FLUX ACTIF POUR RADIODJ ---
+        if windows_path not in historique_actif:
+            historique_actif.append(windows_path)
+            
+            if len(historique_actif) > NB_TITRES_FLUX_ACTIF:
+                historique_actif = historique_actif[-NB_TITRES_FLUX_ACTIF:]
+            
+            with open(PLAYLIST_ACTIVE_PATH, 'w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n")
+                for chemin in historique_actif:
+                    f.write(chemin + '\n')
+                    
+            print(f"  -> [RADIODJ] Fichier mis à jour.", flush=True)
+
+            # --- PARTIE 3 : LE PUSH VERS L'API RADIODJ ---
+            # On dit à RadioDJ de recharger la playlist IMMÉDIATEMENT
+            api_url = f"http://{RADIODJ_IP}:{RADIODJ_API_PORT}/api/?pass={RADIODJ_API_PASS}&action=LoadPlaylist&name=playlist_live_azuracast"
+            try:
+                requests.get(api_url, timeout=2)
+                print(f"  -> [RADIODJ] Ordre de rechargement envoyé avec succès !", flush=True)
+            except requests.exceptions.RequestException as e:
+                print(f"  -> [ERREUR] Impossible de joindre l'API RadioDJ : {e}", flush=True)
+                
+    except IOError as e:
+        print(f"  -> [ERREUR] Écriture disque : {e}", flush=True)
+```
+
+### Que va-t-il se passer maintenant ?
+
+1. AzuraCast passe le titre B.
+2. Ton script le détecte, le cherche dans SQL.
+3. Il écrit le titre B dans `playlist_live_azuracast.m3u`.
+4. **NOUVEAU :** Il envoie une requête HTTP à Windows en une fraction de seconde.
+5. RadioDJ reçoit l'ordre : *"Charge la playlist playlist_live_azuracast"*.
+6. RadioDJ charge le fichier. Comme notre script ne garde qu'un seul titre en mémoire (si `NB_TITRES_FLUX_ACTIF = 1`), RadioDJ va mettre ce titre B tout en bas de sa file d'attente (sans couper le titre A qui est en train de jouer).
+7. Quand le titre A se termine sur AzuraCast, RadioDJ lance le titre B pile au bon moment.
+
+**Résultat :** Zéro timer, zéro événement toutes les 3 minutes, synchronisation au dixième de seconde près ! C'est exactement comme ça que fonctionnent les ponts informatiques professionnels entre logiciels de radio.

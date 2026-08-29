@@ -1,0 +1,274 @@
+import subprocess
+import socket
+import json
+import os
+import time
+import re
+import sys
+import mysql.connector
+from mysql.connector import Error
+from dotenv import load_dotenv
+from datetime import date
+
+load_dotenv()
+
+# ─── Configuration Originale Radio ────────────────────────────────────────
+ICECAST_URL = "https://icecast-vps-ovh.airvs.fr/stream11"
+ALSA_DEVICE = "usb_card"
+SOCKET_PATH = "/tmp/mpv_radio_socket"
+
+# ─── Configuration Sortie pour RadioDJ ─────────────────────────────────
+DOSSIER_RESEAU = "/home/sebastien/radio_bridge"
+# Fichier lu par RadioDJ (Vidé chaque jour)
+PLAYLIST_ACTIVE_PATH = os.path.join(DOSSIER_RESEAU, "playlist_live_azuracast.m3u")
+# Combien de titres RadioDJ doit-il avoir d'avance ? (1 = strictement synchronisé, 2 ou 3 pour éviter les coupures)
+NB_TITRES_FLUX_ACTIF = 10
+
+# ─── Configuration Base de données ─────────────────────────────────────
+DB_CONFIG = {
+    "host":     os.getenv("DB_HOST", "192.168.1.39"),
+    "port":     3306,
+    "user":     os.getenv("DB_USER", "sebastien"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME", "radiodb"),
+    "charset":  "utf8mb4",
+    "collation": "utf8mb4_general_ci", 
+    "use_pure": True,  # <-- LE BOUCLIER FINAL : Force le respect des ordres
+    "connection_timeout": 5 
+}
+
+# ─── Variables globales ────────────────────────────────────────────────
+db_connection = None
+ARCHIVE_PATH = None # Sera défini au démarrage
+
+# ─── Logique SQL Résiliante ───────────────────────────────────────────
+def ensure_db_connected():
+    """Vérifie si la connexion est active, sinon tente de se connecter."""
+    global db_connection
+    
+    # Si on a une connexion, on vérifie qu'elle n'est pas tombée
+    if db_connection is not None:
+        try:
+            db_connection.ping(reconnect=True, attempts=1)
+            return True
+        except Error:
+            db_connection = None # La connexion est morte, on la réinitialise
+
+    # Tentative de nouvelle connexion
+    try:
+        db_connection = mysql.connector.connect(**DB_CONFIG)
+        print("[DB] Connexion à la base SQL établie.", flush=True)
+        return True
+    except Error as e:  # <-- ATTENTION AU "as e" ICI
+        print(f"[DB] IMPOSSIBLE DE SE CONNECTER. Raison exacte : {e}", flush=True)
+        return False
+    
+def get_windows_path_from_db(title: str):
+    global db_connection
+    if not title: return None
+    if not ensure_db_connected(): return None
+    
+    parts = title.split(" - ", 1)
+    raw_artist = parts[0].strip() if len(parts) > 0 else ""
+    song = parts[1].strip() if len(parts) > 1 else ""
+
+    # --- NETTOYAGE DE L'ARTISTE ---
+    separateurs = r'[;,/&]|feat\.?|ft\.?|vs\.?'  # <-- Le "a" est bien là
+    artistes_propres = re.split(separateurs, raw_artist, flags=re.IGNORECASE) # <-- Et là aussi
+    artist = artistes_propres[0].strip() 
+    
+    # Supprime les espaces en trop au cas où (ex: "Artiste  Titre")
+    artist = re.sub(r'\s+', ' ', artist)
+    song = re.sub(r'\s+', ' ', song)
+    # -----------------------------
+
+    try:
+        cursor = db_connection.cursor()
+        query = "SELECT path FROM songs WHERE artist LIKE %s AND title LIKE %s LIMIT 1"
+        cursor.execute(query, (f"%{artist}%", f"%{song}%"))
+        result = cursor.fetchone()
+        cursor.close()
+        
+        if result:
+            return result[0]
+        else:
+            # Plan B : Si ça ne trouve toujours pas, on cherche avec SEULEMENT le titre
+            cursor = db_connection.cursor()
+            query_title_only = "SELECT path FROM songs WHERE title LIKE %s LIMIT 1"
+            cursor.execute(query_title_only, (f"%{song}%",))
+            result_title = cursor.fetchone()
+            cursor.close()
+            return result_title[0] if result_title else None
+            
+    except Error as e:
+        print(f"[DB] Erreur lors de la requête, réinitialisation... ({e})", flush=True)
+        db_connection = None
+        return None
+            
+# ─── Logique de gestion des fichiers ──────────────────────────────────
+def manage_daily_playlist():
+    global ARCHIVE_PATH
+    global historique_actif  # On ajoute une liste en mémoire pour gérer le flux actif
+    historique_actif = []    # Cette liste va contenir les X derniers chemins Windows
+    
+    os.makedirs(DOSSIER_RESEAU, exist_ok=True)
+    
+    # 1. Création de l'archive du jour (inchangé)
+    today_str = date.today().strftime("%Y-%m-%d")
+    ARCHIVE_PATH = os.path.join(DOSSIER_RESEAU, f"archive_{today_str}.m3u")
+    
+    if not os.path.exists(ARCHIVE_PATH):
+        try:
+            with open(ARCHIVE_PATH, 'w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n")
+            print(f"[HISTORIQUE] Nouvelle archive créée : archive_{today_str}.m3u", flush=True)
+        except IOError as e:
+            print(f"[ERREUR] Création archive : {e}", flush=True)
+
+    # 2. On s'assure que le fichier actif existe (vide) au démarrage du service
+    if not os.path.exists(PLAYLIST_ACTIVE_PATH):
+        try:
+            with open(PLAYLIST_ACTIVE_PATH, 'w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n")
+        except IOError as e:
+            print(f"[ERREUR] Création playlist active : {e}", flush=True)
+
+
+def add_to_playlist(windows_path: str):
+    global historique_actif
+    if not windows_path or not ARCHIVE_PATH: return
+    
+    try:
+        # --- PARTIE 1 : L'HISTORIQUE (On garde tout, on ajoute à la fin) ---
+        with open(ARCHIVE_PATH, 'a', encoding='utf-8') as f:
+            f.write(windows_path + '\n')
+            
+        # --- PARTIE 2 : LE FLUX ACTIF POUR RADIODJ (ÉCRITURE ATOMIQUE) ---
+        
+        # On évite d'écrire 50 fois le même morceau si Icecast envoie l'info en boucle
+        if windows_path not in historique_actif:
+            historique_actif.append(windows_path)
+            
+            # On ne garde que les X derniers titres en mémoire
+            if len(historique_actif) > NB_TITRES_FLUX_ACTIF:
+                historique_actif = historique_actif[-NB_TITRES_FLUX_ACTIF:]
+            
+            # ÉCRITURE ATOMIQUE : On écrit dans un fichier temporaire d'abord
+            temp_path = PLAYLIST_ACTIVE_PATH + ".tmp"
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n")
+                for chemin in historique_actif:
+                    f.write(chemin + '\n')
+            
+            # Puis on remplace le vrai fichier de manière atomique (instantané)
+            os.replace(temp_path, PLAYLIST_ACTIVE_PATH)
+            print(f"  -> [RADIODJ] Mise à jour du flux direct : {os.path.basename(windows_path)}", flush=True)
+            
+    except IOError as e:
+        print(f"  -> [ERREUR] Écriture disque : {e}", flush=True)
+        # En cas d'erreur d'écriture, on s'assure de ne pas laisser de fichier .tmp traîner
+        temp_path = PLAYLIST_ACTIVE_PATH + ".tmp"
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+                print(f"  -> [ERREUR] Écriture disque playlist active : {e}", flush=True)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path) # On nettoie le fichier temporaire en cas d'erreur
+                    
+    # ─── Boucle Principale ────────────────────────────────────────────────
+def main():
+    manage_daily_playlist()
+
+    if os.path.exists(SOCKET_PATH):
+        try:
+            os.remove(SOCKET_PATH)
+        except OSError:
+            time.sleep(1)
+            os.remove(SOCKET_PATH)
+
+    cmd = [
+        "mpv",
+        "--no-video",
+        "--really-quiet",
+        "--ao=alsa",
+        f"--audio-device=alsa/{ALSA_DEVICE}",
+        f"--input-ipc-server={SOCKET_PATH}",
+        ICECAST_URL
+    ]
+    
+    process = subprocess.Popen(cmd)
+
+    socket_ready = False
+    for i in range(15):
+        if process.poll() is not None:
+            print("Erreur : mpv s'est arrêté au démarrage.", flush=True)
+            sys.exit(1)
+        if os.path.exists(SOCKET_PATH):
+            socket_ready = True
+            break
+        time.sleep(1)
+
+    if not socket_ready:
+        print("Info : Détection des titres désactivée.", flush=True)
+        process.wait() 
+        sys.exit(0)
+
+    print("Lecture du flux en cours (Mode Résilient + Historique)...", flush=True)
+
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(SOCKET_PATH)
+
+        request = {"command": ["observe_property", 1, "media-title"]}
+        client.sendall((json.dumps(request) + "\n").encode())
+
+        while True:
+            if process.poll() is not None:
+                print("Fin du flux.", flush=True)
+                break
+
+            client.settimeout(1.0)
+            try:
+                data = client.recv(4096).decode()
+                if data:
+                    for line in data.strip().split('\n'):
+                        if not line: continue
+                        msg = json.loads(line)
+                        
+                        if msg.get("event") == "property-change":
+                            if msg.get("name") == "media-title":
+                                title = msg.get("data")
+                                if title and " - " in title and "http" not in title:
+                                    print(f"Titre : {title}", flush=True)
+                                    
+                                    windows_path = get_windows_path_from_db(title)
+                                    if windows_path:
+                                        add_to_playlist(windows_path)
+                                    else:
+                                        if db_connection is None:
+                                            print("  -> En attente de la base Windows...", flush=True)
+                                        else:
+                                            print("  -> Non trouvé dans la base SQL", flush=True)
+                                        
+            except socket.timeout:
+                continue
+            except json.JSONDecodeError:
+                pass
+    except Exception as e:
+        print(f"Erreur canal de communication : {e}", flush=True)
+        process.wait()
+    finally:
+        process.terminate()
+        try:
+            client.close()
+        except:
+            pass
+        if os.path.exists(SOCKET_PATH):
+            os.remove(SOCKET_PATH)
+        if db_connection and db_connection.is_connected(): 
+            db_connection.close()
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,16 @@
+services:
+  liquidsoap:
+    image: savonet/liquidsoap:v2.4.2
+    container_name: liquidsoap
+    restart: always
+    command: /etc/liquidsoap/script.liq
+    volumes:
+      - /home/ubuntu/projet_radio/Musique:/music
+      - /home/ubuntu/projet_radio-docker/script.liq:/etc/liquidsoap/script.liq
+    networks:
+      airvs-network:
+        aliases:
+          - liquidsoap.my
+networks:
+  airvs-network:
+

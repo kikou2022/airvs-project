@@ -1,0 +1,34 @@
+# Enregistrement local d'une pige mp3 chaque heure pleine dans /var/www/pige/azuracast5 pour différents flux azuracast
+# (à adapter selon le nom du flux azuracast)
+# (à adapter selon le répertoire de stockage des pige)
+# (à adapter selon le bitrate souhaité)
+
+## PIGE AZURACAST 5
+pige_az5 = fallback([azuracast5, blank()], 
+  track_sensitive=false,
+  replay_metadata=false,
+  id="pige_az5")
+
+output.file(%mp3(bitrate=96),
+    { time.string("/var/www/pige/azuracast5/%Y-%m-%d/%Hh%M_%S_%z.mp3") },
+    mksafe(pige_az5),
+    reopen_when = { 0m }
+)
+## PIGE AZURACAST 7
+pige_az7 = fallback([azuracast7, blank()],
+  track_sensitive=false,
+  replay_metadata=false,
+  id="pige_az7")
+
+output.file(%mp3(bitrate=96),
+    { time.string("/var/www/pige/azuracast7/%Y-%m-%d/%Hh%M_%S_%z.mp3") },
+    mksafe(pige_az7),
+    reopen_when = { 0m }
+)
+# PIGE RADIO REALISÉE PAR LE FLUX RADIO PRINCIPAL AIRVS
+    output.file(%mp3(bitrate=96),
+    { time.string("/var/www/pige/%Y-%m-%d/%Hh%M_%S_%z.mp3") },
+    #mix,
+    mksafe(radio),
+    reopen_when = { 0m }
+    )

@@ -1,0 +1,52 @@
+Je te laisse analyser mon projet de scripts liquidsoap permettant la diffusion de plusieurs sources radio via playlist et azuracast. 
+C'est le fruit de notre précédent échange du jour.
+L'idée est de trouver comment faire que semaine musicale prenne le relais dès qu'azuracast se coupe pour maintenance. 
+Azuracast tourne sur un serveur dédié, le script liquidsoap qui globalise les différentes sources et les lance 
+vers un lecteur web sur un autre serveur vps, afin de compartimenter
+
+Ah ! Je vois exactement ce que tu as fait. Tu as anticipé le problème du buffer et du timeout, c'est une excellente réflexion. 
+
+**MAIS, il y a un piège mortel avec cette méthode, et je suis presque certain que c'est ce qui t'empêche de faire fonctionner le basculement automatique.**
+
+### Le problème du "Double Fallback" avec `blank()`
+
+Dans Liquidsoap, la fonction `fallback` ne se déclenche **que si la source tombe en erreur (unavailable)**. 
+
+Regarde ce qui se passe avec ta logique actuelle quand AzuraCast se coupe :
+1. `azuracast7_raw` perd la connexion.
+2. Ton mini-fallback detecte ça et bascule sur `blank()`.
+3. Pour ton script principal (`grille`), la source `azuracast7` **n'est pas en erreur** : elle diffuse gentiment du silence (le `blank()`).
+4. Le fallback principal voit que `azuracast7` fonctionne (elle émet du 0 dB), **il ne bascule donc JAMAIS sur `semaine_musicale`**. Tes auditeurs entendent juste un silence total jusqu'à ce qu'AzuraCast revienne !
+
+### La solution : Supprimer les mini-fallbacks
+
+Tu n'as pas besoin d'encapsuler tes sources dans des mini-fallbacks. Liquidsoap gère cela de manière native. Si un `input.http` tombe en erreur (ce qu'il fera très vite grâce à ton `timeout=3.0`), il envoie un signal "fin de piste/indisponible" que le fallback principal de ton script principal attrapera immédiatement.
+
+Voici ton fichier **`entrees.liq` corrigé et simplifié** :
+
+
+### Ce qui va se passer maintenant (le scénario parfait) :
+
+1. AzuraCast s'éteint pour maintenance.
+2. Au bout de 3 secondes, `azuracast7` lève une erreur interne (le `on_error` écrit dans tes logs).
+3. Ton fallback principal (dans ton script précédent) voit que `azuracast7` est "mort".
+4. Comme tu as mis `track_sensitive=true` sur le fallback principal, il autorise la transition en milieu de morceau (car la source est physiquement coupée, il n'y a pas le choix).
+5. Il déclenche ta fonction `crossfade_2s` entre le silence d'AzuraCast et `studio1` (ou `semaine_musicale`).
+6. La musique de secours démarre avec un joli fondu.
+7. Quand AzuraCast redémarre, `azuracast7` se reconnecte. Le fallback principal attend la fin du morceau de `semaine_musicale` et refait un fondu pour revenir proprement sur AzuraCast.
+
+**Attention à une petite subtilité de syntaxe :** Selon ta version de Liquidsoap, le paramètre peut s'appeler `max_buffer` ou `buffer`. Si Liquidsoap râle au lancement sur `max_buffer`, remplace-le simplement par `buffer=0.5`.
+
+Remplace ton `entrees.liq` par ça, relance ton script, et coupe AzuraCast pour tester. Tu verras, le basculement sera immédiat !
+
+C'est une erreur classique de typage en Liquidsoap ! 
+
+Tu as utilisé le mot `log` comme nom de variable dans ta fonction (`fun(log) -> ...`). Le problème, c'est que `log` est **déjà une fonction système de Liquidsoap**. En faisant ça, tu écrases la fonction système, et Liquidsoap ne comprend plus ce que tu veux faire d'où l'erreur `Top-level variable log is overridden!`.
+
+Il suffit de renommer la variable reçue par la fonction. On l'appelle généralement `msg` (pour message) ou `err` (pour erreur).
+
+Voici ton fichier **`entrees.liq` corrigé** :
+
+*(Note : j'ai ajouté `#{msg}` à la fin du texte du log. Comme ça, dans tes logs, tu verras non seulement que la source est coupée, mais aussi **la raison technique** (ex: connection timeout, refused, etc.), ce qui est super pratique pour le débug).*
+
+Relance ton script avec ça, tu n'auras plus l'erreur. Et tu pourras tester ta maintenance AzuraCast !

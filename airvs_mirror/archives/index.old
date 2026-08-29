@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AIRVS - Consultation déportée</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; background-color: #f4f6f9; margin: 0; padding: 10px; }
+        .header { text-align: center; margin-bottom: 15px; color: #333; }
+        .search-box { width: 100%; padding: 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; }
+        
+        /* --- NOUVEAU : Style pour le filtre AzuraCast --- */
+        .filter-row { text-align: center; margin-bottom: 10px; }
+        .filter-row label { font-size: 0.9em; color: #555; cursor: pointer; }
+        .filter-row input[type="checkbox"] { transform: scale(1.2); margin-right: 5px; }
+        /* ---------------------------------------------- */
+
+        .stats { text-align: center; font-size: 0.9em; color: #666; margin-bottom: 15px; }
+        .song-list { list-style: none; padding: 0; }
+        .song-item { background: white; margin-bottom: 8px; padding: 12px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 4px solid #0d6efd; }
+        .song-artist { font-weight: bold; color: #333; font-size: 1.1em; }
+        .song-title { color: #555; }
+        .song-year { display: inline-block; background: #198754; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; margin-left: 8px; }
+        
+        /* Styles des infos supplémentaires */
+        .song-id { float: right; font-size: 0.8em; color: #888; font-family: monospace; margin-top: 4px; }
+        .song-date { display: inline-block; font-size: 0.8em; color: #666; margin-left: 8px; }
+        .song-path { display: block; margin-top: 6px; padding-top: 6px; border-top: 1px dashed #eee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.8em; color: #999; font-family: monospace; cursor: pointer; }
+        
+        /* --- NOUVEAU : Style du Badge AzuraCast --- */
+        .badge-azura { display: inline-block; background: #0dcaf0; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7em; margin-left: 8px; font-weight: bold; }
+        /* -------------------------------------------- */
+
+        .loading { text-align: center; color: #888; font-style: italic; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h2>🎙️ DISCOTHÈQUE AIRVS 🎙️</h2>
+        <p style="margin:0; font-size:0.9em;">Consultation en ligne de la base de données de la discothèque</p>
+    </div>
+
+    <input type="text" id="searchInput" class="search-box" placeholder="Rechercher un artiste ou un titre...">
+    
+    <!-- NOUVEAU : Filtre Flux Tendu -->
+    <div class="filter-row">
+        <label><input type="checkbox" id="filterAzura"> Afficher uniquement les titres dans <b>AzuraCast</b> (Titres à l'antenne)</label>
+    </div>
+
+    <div id="stats" class="stats">Chargement de la base...</div>
+    
+    <ul id="songList" class="song-list">
+        <li class="loading">Connexion au miroir en cours...</li>
+    </ul>
+
+    <script>
+        let dbData = [];
+
+        fetch('db.json?t=' + new Date().getTime())
+            .then(response => {
+                if (!response.ok) throw new Error("Fichier JSON introuvable");
+                return response.json();
+            })
+            .then(data => {
+                dbData = data;
+                document.getElementById('stats').innerText = `${data.length} titres en mémoire.`;
+                afficherResultats(data);
+            })
+            .catch(error => {
+                document.getElementById('songList').innerHTML = `<li class="loading">Erreur : ${error.message}</li>`;
+                document.getElementById('stats').innerText = "Miroir non synchronisé.";
+            });
+
+        // --- NOUVEAU : Logique de filtre combiné (Texte + Checkbox) ---
+        document.getElementById('searchInput').addEventListener('input', appliquerFiltres);
+        document.getElementById('filterAzura').addEventListener('change', appliquerFiltres);
+
+        function appliquerFiltres() {
+            const recherche = document.getElementById('searchInput').value.toLowerCase();
+            const onlyAzura = document.getElementById('filterAzura').checked;
+
+            let resultats = dbData;
+
+            // Filtre texte
+            if (recherche) {
+                resultats = resultats.filter(item => 
+                    item.artist.toLowerCase().includes(recherche) || 
+                    item.title.toLowerCase().includes(recherche)
+                );
+            }
+
+            // Filtre AzuraCast
+            if (onlyAzura) {
+                resultats = resultats.filter(item => item.comments === "IN_AZURACAST");
+            }
+
+            afficherResultats(resultats);
+        }
+        // ---------------------------------------------------------------
+
+        function afficherResultats(resultats) {
+            const liste = document.getElementById('songList');
+            liste.innerHTML = '';
+
+            if (resultats.length === 0) {
+                liste.innerHTML = '<li class="loading">Aucun résultat.</li>';
+                return;
+            }
+
+            const aAfficher = resultats.slice(0, 100); 
+            
+            aAfficher.forEach(item => {
+                const li = document.createElement('li');
+                li.className = 'song-item';
+                
+                const dateFormatee = item.date_added ? item.date_added.split(' ')[0] : '';
+                
+                // --- NOUVEAU : Création du Badge AzuraCast ---
+                const azuraBadge = item.comments === "IN_AZURACAST" ? '<span class="badge-azura">IN_AZURACAST</span>' : '';
+                // ---------------------------------------------
+
+                li.innerHTML = `
+                    <div class="song-artist">${item.artist} <span class="song-id">#${item.id}</span></div>
+                    <div class="song-title">${item.title} <span class="song-year">${item.year}</span> <span class="song-date">${dateFormatee}</span> ${azuraBadge}</div>
+                    <div class="song-path" title="${item.path}">${item.path}</div>
+                `;
+                liste.appendChild(li);
+            });
+
+            if (resultats.length > 100) {
+                const msg = document.createElement('li');
+                msg.className = 'loading';
+                msg.innerText = `... et ${resultats.length - 100} autres résultats`;
+                liste.appendChild(msg);
+            }
+        }
+    </script>
+</body>
+</html>

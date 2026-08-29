@@ -1,0 +1,39 @@
+services:
+  secours:
+    image: savonet/liquidsoap:v2.4.2
+    container_name: liquidsoap-secours
+    restart: always
+    command: /etc/liquidsoap/secours.liq
+    ports:
+      - "127.0.0.1:1236:1236"
+    volumes:
+      - /home/ubuntu/projet_radio/Musique:/music:ro
+      - /home/ubuntu/projet_radio-docker/secours.liq:/etc/liquidsoap/secours.liq
+      - /usr/lib/ladspa:/usr/lib/ladspa:ro
+    environment:
+      - LADSPA_PATH=/usr/lib/ladspa
+    networks:
+      airvs-network:
+        aliases:
+          - secours.my
+
+  station6:
+    image: savonet/liquidsoap:v2.4.2
+    container_name: liquidsoap-station6
+    restart: always
+    command: /etc/liquidsoap/station6.liq
+    ports:
+      - "127.0.0.1:1237:1237"
+    volumes:
+      - /home/ubuntu/projet_radio/Musique:/music:ro
+      - /home/ubuntu/projet_radio-docker/station6.liq:/etc/liquidsoap/station6.liq
+      - /usr/lib/ladspa:/usr/lib/ladspa:ro
+    environment:
+      - LADSPA_PATH=/usr/lib/ladspa
+    networks:
+      airvs-network:
+        aliases:
+          - station6.my
+
+networks:
+  airvs-network:

@@ -1,0 +1,28 @@
+################################################# SORTIES VERS DIFFÉRENTS FLUX ICECAST ###########################################
+
+#Paramétrage des différentes sorties matérielles et logicielles
+
+    output.icecast(%vorbis, # ou bien mp3, wav, flac, cf. https://www.liquidsoap.info/doc-1.4.0/encoding_formats.html
+        host = "icecast-vps-ovh.airvs.site",
+        port = 8000,
+        name = "AIRVS", description = "La Radio en 1 CLIC !", genre = "INCROYABLE", url = "stream3",
+        password = "idylle2013@SL",
+        mount = "stream3", 
+        mksafe(buffer(radio))
+    )
+    output.icecast(%mp3(bitrate=128), # ou bien vorbis, wav, flac, cf. https://www.liquidsoap.info/doc-1.4.0/encoding_formats.html
+        host = "icecast-vps-ovh.airvs.site",
+        port = 8000,
+        name = "AIRVS", description = "La Radio en 1 CLIC !", genre = "GENIALE", url = "stream2",
+        password = "idylle2013@SL",
+        mount = "stream2", 
+        mksafe(buffer(radio))
+    )
+    output.icecast(%mp3(bitrate=192), # ou bien vorbis, wav, flac, cf. https://www.liquidsoap.info/doc-1.4.0/encoding_form>
+        host = "icecast-vps-ovh.airvs.site",
+        port = 8000,
+        name = "AIRVS", description = "La Radio en 1 CLIC !", genre = "UNIQUE", url = "stream4",
+        password = "idylle2013@SL",
+        mount = "stream4", 
+        mksafe(buffer(radio))
+    )

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.env
+
+# Secrets
+credentials.json
+*.pem
+*.key
+
+# Bases de données
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+logs_prefill/
+
+# Backups
+*.bak.*
+*.tar.gz
+*.zip
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+*~
+
+# Node
+node_modules/
+
+# Temp
+data/
+tmp/
+.cache/
