@@ -92,15 +92,25 @@ def _persister_manquants_shazam(not_found, source_type):
         cur_m = db_m.cursor()
         nb = 0
         for item in not_found:
-            art = str(item.get('artist') or '')[:500]
-            tit = str(item.get('title') or '')[:500]
+            # Normaliser : strip + NFC pour garantir la cohérence
+            # avec l'UNIQUE INDEX uq_art_titre_src (artiste(255), titre(255), source)
+            art = unicodedata.normalize('NFC', str(item.get('artist') or '').strip())[:500]
+            tit = unicodedata.normalize('NFC', str(item.get('title') or '').strip())[:500]
             if not art and not tit:
                 continue
             anim = str(item.get('animateur') or '').strip() or None
             orig = str(item.get('source') or '').strip() or None
             try:
+                # Vérification explicite avant INSERT (belt & suspenders)
                 cur_m.execute(
-                    "INSERT IGNORE INTO airvs_manquants "
+                    "SELECT 1 FROM airvs_manquants "
+                    "WHERE artiste = %s AND titre = %s AND source = %s LIMIT 1",
+                    (art, tit, source_type)
+                )
+                if cur_m.fetchone():
+                    continue  # déjà présent, on saute
+                cur_m.execute(
+                    "INSERT INTO airvs_manquants "
                     "(artiste, titre, source, animateur, origine) "
                     "VALUES (%s, %s, %s, %s, %s)",
                     (art, tit, source_type, anim, orig)

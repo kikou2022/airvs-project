@@ -97,7 +97,9 @@
             // 1) Ensure parent section is visible
             if (parentId) {
                 var parentPane = document.querySelector(parentId);
-                if (parentPane && !parentPane.classList.contains('active')) {
+                // Vérifier la visibilité RÉELLE (style.display) plutôt que la classe 'active'
+                // car la classe peut être présente alors que le pane est caché
+                if (parentPane && (parentPane.style.display === 'none' || !parentPane.classList.contains('show'))) {
                     var parentBtn = sbNav.querySelector(':scope > li > .sb-link[data-target="' + parentId + '"]');
                     if (parentBtn) {
                         activateSection(parentId, parentBtn.id);
