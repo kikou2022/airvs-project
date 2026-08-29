@@ -111,12 +111,34 @@
                     }
                 }
             }
-            // 2) Activate sub-pill in Pont card (these ARE in proper Bootstrap pill structure)
+            // 2) Activate sub-pill (these ARE in proper Bootstrap pill structure)
             if (pillId) {
                 setTimeout(function() {
                     var pillBtn = document.getElementById(pillId);
                     console.log('[SB-DEBUG] pill activation, pillId=', pillId, 'pillBtn=', !!pillBtn);
                     if (pillBtn) {
+                        // --- Fix Bug 3 : panneaux simultanés ---
+                        // Avant de laisser Bootstrap activer le pill cible,
+                        // on désactive explicitement TOUS les pills/panes frères.
+                        // Cela évite que Bootstrap laisse un ancien pane visible
+                        // quand le déclencheur est hors du <ul class="nav">.
+                        var targetSel = pillBtn.getAttribute('data-bs-target');
+                        if (targetSel) {
+                            var navList = pillBtn.closest('[role="tablist"]');
+                            if (navList) {
+                                // Retirer 'active' de tous les boutons frères
+                                navList.querySelectorAll(':scope > .nav-item > .nav-link').forEach(function(b) {
+                                    b.classList.remove('active');
+                                });
+                                // Cacher tous les panes frères
+                                var content = navList.nextElementSibling;
+                                if (content) {
+                                    content.querySelectorAll(':scope > .tab-pane').forEach(function(pane) {
+                                        pane.classList.remove('active', 'show');
+                                    });
+                                }
+                            }
+                        }
                         try {
                             bootstrap.Tab.getOrCreateInstance(pillBtn).show();
                             console.log('[SB-DEBUG] bootstrap.Tab.show() OK for', pillId);
