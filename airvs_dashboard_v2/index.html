@@ -6575,6 +6575,14 @@ document.addEventListener('DOMContentLoaded', function() {
     _fetchManquantsStats();
     setInterval(_fetchManquantsStats, 60000);
 
+    // Exposer sur window pour que les onclick HTML dynamiques fonctionnent
+    // (ces fonctions sont locales au callback DOMContentLoaded)
+    window._resolveManquant = _resolveManquant;
+    window._deleteManquant = _deleteManquant;
+    window._loadManquants = _loadManquants;
+    window._mqPage = _mqPage;
+    window._fetchManquantsStats = _fetchManquantsStats;
+
     // Load manquants when tab is shown
     (function() {
         var manqTab = document.getElementById('push-manquants-tab');
