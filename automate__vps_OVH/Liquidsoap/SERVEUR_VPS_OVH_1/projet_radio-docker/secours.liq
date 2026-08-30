@@ -55,21 +55,21 @@ radio = blank.skip(radio, max_blank=2., threshold=-60.)
         mount = "stream12",
         mksafe(buffer(radio))
     )
-    output.icecast(%ffmpeg(format="adts", %audio(codec="libfdk_aac", samplerate=44100, channels=2, b="48k",
-    profile="aac_he_v2", afterburner=0)),
-        host = "icecast-vps-ovh.airvs.fr",
-        port = 8000,
-        name = "AIRVS", description = "La Radio en 1 CLIC !", genre = "GENIALE", url = "stream11",
-        password = "idylle2013@SL",
-        mount = "stream11",
-        mksafe(buffer(radio))
-    )
-    output.icecast(%ffmpeg(format="adts", %audio(codec="libfdk_aac", samplerate=44100, channels=2, b="96k",
-    profile="aac_he_v2", afterburner=0)),
-        host = "icecast-vps-ovh.airvs.fr",
-        port = 8000,
-        name = "AIRVS", description = "La Radio en 1 CLIC !", genre = "GENIALE", url = "stream13",
-        password = "idylle2013@SL",
-        mount = "stream13",
-        mksafe(buffer(radio))
-    )
+    # output.icecast(%ffmpeg(format="adts", %audio(codec="libfdk_aac", samplerate=44100, channels=2, b="48k",
+    # profile="aac_he_v2", afterburner=0)),
+    #     host = "icecast-vps-ovh.airvs.fr",
+    #     port = 8000,
+    #     name = "AIRVS", description = "La Radio en 1 CLIC !", genre = "GENIALE", url = "stream11",
+    #     password = "idylle2013@SL",
+    #     mount = "stream11",
+    #     mksafe(buffer(radio))
+    # )
+    # output.icecast(%ffmpeg(format="adts", %audio(codec="libfdk_aac", samplerate=44100, channels=2, b="96k",
+    # profile="aac_he_v2", afterburner=0)),
+    #     host = "icecast-vps-ovh.airvs.fr",
+    #     port = 8000,
+    #     name = "AIRVS", description = "La Radio en 1 CLIC !", genre = "GENIALE", url = "stream13",
+    #     password = "idylle2013@SL",
+    #     mount = "stream13",
+    #     mksafe(buffer(radio))
+    # )
