@@ -215,21 +215,9 @@
         <fallback-mount>/stream2</fallback-mount>
         <fallback-override>1</fallback-override>
     </mount>
-    <!-- stream11 (AAC 48k / Docker) -> stream2 -->
-    <mount type="normal">
-        <mount-name>/stream11</mount-name>
-        <fallback-mount>/stream2</fallback-mount>
-        <fallback-override>1</fallback-override>
-    </mount>
     <!-- stream12 (AAC 64k / Docker) -> stream2 -->
     <mount type="normal">
         <mount-name>/stream12</mount-name>
-        <fallback-mount>/stream2</fallback-mount>
-        <fallback-override>1</fallback-override>
-    </mount>
-    <!-- stream13 (AAC 96k / Docker) -> stream2 -->
-    <mount type="normal">
-        <mount-name>/stream13</mount-name>
         <fallback-mount>/stream2</fallback-mount>
         <fallback-override>1</fallback-override>
     </mount>
