@@ -102,10 +102,11 @@ def _persister_manquants_shazam(not_found, source_type):
             orig = str(item.get('source') or '').strip() or None
             try:
                 # Vérification explicite avant INSERT (belt & suspenders)
+                # Dédupe sur (artiste, titre) uniquement — la source ne doit pas créer de doublon
                 cur_m.execute(
                     "SELECT 1 FROM airvs_manquants "
-                    "WHERE artiste = %s AND titre = %s AND source = %s LIMIT 1",
-                    (art, tit, source_type)
+                    "WHERE artiste = %s AND titre = %s LIMIT 1",
+                    (art, tit)
                 )
                 if cur_m.fetchone():
                     continue  # déjà présent, on saute

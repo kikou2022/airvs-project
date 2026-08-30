@@ -504,7 +504,7 @@ def _assurer_schema_airvs_avance():
               id_import       INT          DEFAULT NULL,
               resolu_le       DATETIME     DEFAULT NULL,
               date_creation   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-              UNIQUE INDEX uq_art_titre_src (artiste(255), titre(255), source),
+              UNIQUE INDEX uq_art_titre (artiste(255), titre(255)),
               INDEX idx_statut (statut),
               INDEX idx_source (source)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
