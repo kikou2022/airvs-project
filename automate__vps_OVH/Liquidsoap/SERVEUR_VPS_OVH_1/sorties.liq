@@ -2,14 +2,14 @@
 
 #Paramétrage des différentes sorties matérielles et logicielles
 
-    output.icecast(%vorbis, 
-        host = "icecast-vps-ovh.airvs.fr",
-        port = 8000,
-        name = "AIRVS", description = "La Radio en 1 CLIC !", genre = "INCROYABLE", url = "stream3",
-        password = "idylle2013@SL",
-        mount = "stream3", 
-        mksafe(buffer(radio))
-    )
+    # output.icecast(%vorbis, 
+    #     host = "icecast-vps-ovh.airvs.fr",
+    #     port = 8000,
+    #     name = "AIRVS", description = "La Radio en 1 CLIC !", genre = "INCROYABLE", url = "stream3",
+    #     password = "idylle2013@SL",
+    #     mount = "stream3", 
+    #     mksafe(buffer(radio))
+    # )
     output.icecast(%mp3(bitrate=128), 
         host = "icecast-vps-ovh.airvs.fr",
         port = 8000,

@@ -25,6 +25,7 @@ studio1 = input.http(
   "https://icecast-vps-ovh.airvs.fr/stream9", 
   #start=false,
   #timeout=3.0,      
-  max_buffer=15.,   
+  max_buffer=15., 
+  poll_delay=30.,  
   on_error=fun(msg) -> log("⚠️ STUDIO 1 HORS LIGNE : #{msg}")
 )
