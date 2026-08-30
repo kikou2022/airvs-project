@@ -1,6 +1,6 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════════════════════════════
-# Déploiement du Dashboard AIRVS vers Windows (port 5001)
+# Déploiement du Dashboard AIRVS vers Windows (port 5000)
 # ════════════════════════════════════════════════════════════════════════════════
 # Workflow :
 #   1. Source : dossier courant (ce script doit être à la racine de l'app)
@@ -9,6 +9,10 @@
 #   3. Nettoyage des fichiers obsolètes côté Windows
 #   4. Vérification MD5 post-copie
 #   5. Backup rotatif (3 max)
+#
+# Fichiers de config déployés (jamais supprimés par le nettoyage) :
+#   - config.json          (config générale du dashboard)
+#   - flux_radio.json      (flux Icecast actif + liste disponible)
 # ════════════════════════════════════════════════════════════════════════════════
 
 set -u
@@ -62,6 +66,7 @@ STATIC_DIR="static"
 # Fichiers CONFIG (jamais supprimés par le nettoyage)
 CONFIG_FILES=(
     "config.json"
+    "flux_radio.json"
 )
 
 # ─── Couleurs ANSI ───────────────────────────────────────────────────────────
