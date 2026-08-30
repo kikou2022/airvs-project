@@ -46,14 +46,14 @@ def api_flux_config():
         if not os.path.exists(FLUX_CONFIG_PATH):
             # Auto-création avec un flux par défaut pour éviter le dropdown vide
             config_defaut = {
-                "flux_actif": "stream11",
+                "flux_actif": "stream12",
                 "flux_disponibles": [
                     {
-                        "id": "stream11",
+                        "id": "stream12",
                         "nom": "AIRVS Principal",
-                        "url": "https://icecast-vps-ovh.airvs.fr/stream11",
+                        "url": "https://icecast-vps-ovh.airvs.fr/stream12",
                         "codec": "AAC HE-AAC v2",
-                        "bitrate": 48,
+                        "bitrate": 64,
                         "detail": "libfdk_aac / aac_he_v2 / 44100Hz / Stéréo"
                     }
                 ]
