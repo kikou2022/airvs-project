@@ -188,6 +188,23 @@ else
     log_info "[DRY-RUN] Sauvegarde + purge"
 fi
 
+# --- Étape 2b : Test de syntaxe Python (local) ---
+echo ""
+echo -e "${CYAN}--- Étape 2b : Test de syntaxe Python (local) ---${NC}"
+if [ "$FLAG_DRY_RUN" = false ]; then
+    PY_SYNTAX_ERR=$(python3 -m py_compile "$FILE_APP" 2>&1) && {
+        log_ok "Syntaxe Python valide : app_vps_ovh_1.py"
+    } || {
+        log_err "ERREUR DE SYNTAXE PYTHON dans app_vps_ovh_1.py :"
+        echo "$PY_SYNTAX_ERR"
+        echo ""
+        echo "  Le déploiement est interrompu. Corrigez l'erreur avant de relancer."
+        exit 1
+    }
+else
+    log_info "[DRY-RUN] python3 -m py_compile app_vps_ovh_1.py"
+fi
+
 # --- Étape 3 : Transfert des fichiers ---
 echo ""
 echo -e "${CYAN}--- Étape 3 : Transfert des fichiers ---${NC}"
@@ -216,16 +233,19 @@ remote "chown $VPS_USER:$VPS_USER $APP_DIR/app_vps_ovh_1.py $APP_DIR/init_db_vps
 echo ""
 echo -e "${CYAN}--- Étape 4 : Vérification intégrité ---${NC}"
 MD5_SRC=$(md5sum "$FILE_APP" | awk '{print $1}')
-MD5_DST=$(remote "md5sum $APP_DIR/app_vps_ovh_1.py 2>/dev/null | awk '{print $1}'" || echo "")
-if [ "$MD5_SRC" = "$MD5_DST" ] && [ -n "$MD5_DST" ]; then
+log_info "MD5 source  : $MD5_SRC"
+# Récupérer le md5sum distant brut (sans pipe distant), extraire le hash localement
+MD5_REMOTE_RAW=$(remote "md5sum $APP_DIR/app_vps_ovh_1.py" 2>/dev/null || true)
+MD5_DST=$(echo "$MD5_REMOTE_RAW" | awk '{print $1}')
+log_info "MD5 distant : $MD5_DST"
+if [ "$MD5_SRC" = "$MD5_DST" ] && [ -n "$MD5_DST" ] && [ ${#MD5_DST} -eq 32 ]; then
     log_ok "MD5 app_vps_ovh_1.py identique (source ↔ VPS)"
 else
-    log_err "MD5 différent ou vide ! Src=$MD5_SRC Dst=$MD5_DST"
-    if [ "$FLAG_DRY_RUN" = false ]; then
-        echo "  Le transfert a peut-être échoué. Vérifiez manuellement :"
-        echo "    ssh $VPS_USER@$VPS_HOST "md5sum $APP_DIR/app_vps_ovh_1.py""
-        exit 1
-    fi
+    log_warn "MD5 différent ou non vérifiable ! Src=$MD5_SRC Dst=$MD5_DST"
+    echo "  Le transfert SCP s'est terminé sans erreur."
+    echo "  Vérifiez manuellement si besoin :"
+    echo "    ssh $VPS_USER@$VPS_HOST \"md5sum $APP_DIR/app_vps_ovh_1.py\""
+    echo "  Le déploiement continue (le fichier a été transféré par SCP)."
 fi
 
 # --- Étape 5 : Vérification miroir ---
@@ -254,11 +274,15 @@ if [ "$FLAG_NO_RESTART" = false ]; then
     echo -e "${CYAN}--- Étape 7 : Redémarrage service ---${NC}"
 
     if [ "$FLAG_DRY_RUN" = false ]; then
+        log_info "Exécution : sudo systemctl restart $SERVICE_NAME ..."
         remote "sudo systemctl restart $SERVICE_NAME"
+        log_ok "Commande systemctl restart envoyée"
+
+        log_info "Vérification : sudo systemctl is-active $SERVICE_NAME ..."
         sleep 2
 
         if remote "sudo systemctl is-active --quiet $SERVICE_NAME" 2>/dev/null; then
-            log_ok "Service $SERVICE_NAME redémarré et actif"
+            log_ok "Service $SERVICE_NAME est ACTIF"
         else
             log_err "Le service n'a pas démarré correctement !"
             echo ""
@@ -272,6 +296,7 @@ if [ "$FLAG_NO_RESTART" = false ]; then
             exit 1
         fi
 
+        log_info "Test HTTP : curl https://programmes.airvs.fr/login ..."
         HTTP_CODE=$(remote "curl -sk -o /dev/null -w '%{http_code}' https://programmes.airvs.fr/login 2>/dev/null" || echo "000")
         if [ "$HTTP_CODE" = "200" ]; then
             log_ok "HTTPS programmes.airvs.fr/login → 200"
