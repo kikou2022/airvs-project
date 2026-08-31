@@ -315,7 +315,7 @@ def nettoyer_artiste_shazam(artiste: str) -> str:
     return artiste.strip()
 
 # ============================================================
-# Matching 5 passes (version JSON en mémoire)
+# Matching 3 passes (version JSON en mémoire)
 # ============================================================
 
 def _normaliser_pour_recherche(texte: str) -> str:
@@ -366,12 +366,6 @@ def _extraire_nu(texte: str) -> str:
     return texte
 
 
-def _mots_cles(texte: str) -> set:
-    """Extrait les mots significatifs (>= 3 car.) d'un texte normalisé."""
-    n = _normaliser_pour_recherche(texte)
-    return {m for m in n.split() if len(m) >= 3}
-
-
 def _get_artist(song: dict) -> str:
     return song.get('artist') or song.get('artiste') or ''
 
@@ -382,10 +376,14 @@ def _get_title(song: dict) -> str:
 
 def match_all(artiste: str, titre: str, max_results: int = 10) -> list[dict]:
     """
-    Algorithme de matching 5 passes sur le miroir en mémoire.
+    Algorithme de matching 3 passes sur le miroir en mémoire.
     Retourne TOUTES les variantes trouvées (doublons RadioDJ, remasters, feat...),
     classées par passe de la meilleure à la plus faible.
     Gère les clés 'artist'/'artiste' et 'title'/'titre' du db.json.
+    Passe 1 : stricte (lowercase exact)
+    Passe 2 : principale (sans feat) + nue (sans parenthèses)
+    Passe 3 : normalisée avec contains (variante nu uniquement)
+    Passe 4 : inversion artiste/titre (stricte uniquement, si aucun résultat)
     """
     load_mirror()  # Hot-reload si db.json a été mis à jour sur disque
     if not mirror_data:
@@ -429,91 +427,31 @@ def match_all(artiste: str, titre: str, max_results: int = 10) -> list[dict]:
                 if s_art == art_n and s_tit == tit_n:
                     _add(song, "2b")
 
-    # Passe 3 : normalisée avec contains
-    art_norm = _normaliser_pour_recherche(artiste)
-    tit_norm = _normaliser_pour_recherche(titre)
-    art_p_norm = _normaliser_pour_recherche(_extraire_principal(artiste))
-    tit_p_norm = _normaliser_pour_recherche(_extraire_principal(titre))
+    # Passe 3 : normalisée avec contains (variante nu uniquement, max 2 résultats)
     art_n_norm = _normaliser_pour_recherche(_extraire_nu(artiste))
     tit_n_norm = _normaliser_pour_recherche(_extraire_nu(titre))
-    pass3_count = 0
-    for a_search, t_search in [
-        (art_n_norm, tit_n_norm),
-        (art_p_norm, tit_p_norm),
-        (art_norm, tit_norm),
-    ]:
-        if a_search and t_search:
-            for song in mirror_data:
-                s_art = _normaliser_pour_recherche(_get_artist(song))
-                s_tit = _normaliser_pour_recherche(_get_title(song))
-                if a_search in s_art and t_search in s_tit:
-                    _add(song, 3)
-                    pass3_count += 1
-                    if pass3_count >= 3:
-                        break
-            if pass3_count >= 3:
+    if art_n_norm and tit_n_norm:
+        pass3_count = 0
+        for song in mirror_data:
+            if len(results) >= max_results:
                 break
-
-    # Passe 4 : mots-clés (max 2 résultats)
-    if len(results) < max_results:
-        art_mots = _mots_cles(_extraire_nu(artiste))
-        tit_mots = _mots_cles(_extraire_nu(titre))
-        if len(art_mots) + len(tit_mots) >= 2:
-            art_best = max(art_mots, key=len) if art_mots else ""
-            tit_best = max(tit_mots, key=len) if tit_mots else ""
-            pass4_count = 0
-            for song in mirror_data:
-                if len(results) >= max_results:
+            s_art = _normaliser_pour_recherche(_get_artist(song))
+            s_tit = _normaliser_pour_recherche(_get_title(song))
+            if art_n_norm in s_art and tit_n_norm in s_tit:
+                _add(song, 3)
+                pass3_count += 1
+                if pass3_count >= 2:
                     break
-                s_art_mots = _mots_cles(_extraire_nu(_get_artist(song)))
-                s_tit_mots = _mots_cles(_extraire_nu(_get_title(song)))
-                score = 0
-                if art_best and art_best in s_art_mots:
-                    score += 1
-                if tit_best and tit_best in s_tit_mots:
-                    score += 1
-                if score >= 2:
-                    _add(song, 4)
-                    pass4_count += 1
-                    if pass4_count >= 2:
-                        break
 
-    # Passe 5 : inversion artiste ↔ titre
+    # Passe 4 : inversion artiste ↔ titre (stricte uniquement)
     # Si aucune passe n'a donné de résultat, tente en inversant les deux champs.
     # Utile quand l'utilisateur saisit "Titre - Artiste" au lieu de "Artiste - Titre".
     if not results:
-        # 5a : stricte inversée
         for song in mirror_data:
             if (_get_artist(song).lower() == tit_low and
                     _get_title(song).lower() == art_low):
-                _add(song, '5a')
-
-        # 5b : principale inversée (sans feat)
-        if not results and (art_p != art_low or tit_p != tit_low):
-            for song in mirror_data:
-                s_art = _extraire_principal(_get_artist(song)).lower()
-                s_tit = _extraire_principal(_get_title(song)).lower()
-                if s_art == tit_p and s_tit == art_p:
-                    _add(song, '5b')
-
-        # 5c : normalisée inversée
-        if not results:
-            for a_search, t_search in [
-                (tit_n_norm, art_n_norm),
-                (tit_p_norm, art_p_norm),
-                (tit_norm, art_norm),
-            ]:
-                if a_search and t_search:
-                    found_5c = False
-                    for song in mirror_data:
-                        s_art = _normaliser_pour_recherche(_get_artist(song))
-                        s_tit = _normaliser_pour_recherche(_get_title(song))
-                        if a_search in s_art and t_search in s_tit:
-                            _add(song, '5c')
-                            found_5c = True
-                            break
-                    if found_5c:
-                        break
+                _add(song, 4)
+                break
 
     return results[:max_results]
 
@@ -1297,6 +1235,18 @@ FORMULAIRE_TEMPLATE = '''<!DOCTYPE html>
   .vt-info{display:flex;flex-direction:column;gap:.15rem}
   .vt-play{color:#38bdf8;font-size:.8rem}
   .vt-url{color:#64748b;font-size:.7rem;word-break:break-all;max-width:320px}
+  .search-status{display:none;align-items:center;gap:.5rem;padding:.6rem .9rem;border-radius:6px;font-size:.84rem;margin-bottom:.6rem;min-height:2.4rem;transition:background .2s,border-color .2s}
+  .search-status.active{display:flex}
+  .search-status.searching{background:#1e3a5f;border:1px solid #38bdf8;color:#38bdf8}
+  .search-status.found{background:#064e3b;border:1px solid #10b981;color:#6ee7b7}
+  .search-status.notfound{background:#1e293b;border:1px solid #334155;color:#94a3b8}
+  .spinner-sm{width:14px;height:14px;border:2px solid transparent;border-top-color:currentColor;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  button.submit:disabled{opacity:.5;cursor:not-allowed}
+  .btn-cancel-search{background:rgba(56,189,248,.1);border:1px solid #38bdf8;color:#38bdf8;padding:.3rem .8rem;border-radius:4px;cursor:pointer;font-size:.8rem;margin-left:auto;white-space:nowrap;font-weight:500}
+  .btn-cancel-search:hover{background:#38bdf8;color:#0f172a}
+  .btn-reset-form{background:none;border:1px solid #475569;color:#94a3b8;padding:.35rem .7rem;border-radius:4px;cursor:pointer;font-size:.78rem}
+  .btn-reset-form:hover{background:#334155;color:#e2e8f0}
 </style>
 </head>
 <body>
@@ -1323,10 +1273,18 @@ FORMULAIRE_TEMPLATE = '''<!DOCTYPE html>
   <div class="field"><label for="videoUrl">Vid\u00e9o (YouTube, Vimeo...)</label><input type="url" id="videoUrl" placeholder="https://www.youtube.com/watch?v=..." value="{{ edit_data.video_url or "" }}" ></div>
   <input type="hidden" id="editMode" value="{{ edit_id or "" }}">
   <div class="video-preview" id="videoPreview" style="display:none"></div>
+  <div class="search-status" id="searchStatus">
+    <div class="spinner-sm" id="searchSpinner"></div>
+    <span id="searchStatusText"></span>
+    <button class="btn-cancel-search" id="btnCancelSearch" type="button">Annuler la recherche</button>
+  </div>
   <div class="match-result" id="matchResult"></div>
-  <div style="margin-top:1rem;text-align:right">
-    {% if edit_data %}<a href="/" class="btn-cancel-edit" id="btnCancelEdit" style="display:inline-block;text-decoration:none">Annuler</a>
+  <div style="margin-top:1rem;display:flex;justify-content:space-between;align-items:center">
+    <button class="btn-reset-form" id="btnResetForm" type="button">Réinitialiser</button>
+    <div>
+    {% if edit_data %}<a href="/" class="btn-cancel-edit" id="btnCancelEdit" style="display:inline-block;text-decoration:none;margin-right:.5rem">Annuler</a>
     <button class="submit" type="button" id="btnSubmit">{{ "Mettre \u00e0 jour" if not edit_locked else "Enregistrer (vid\u00e9o/commentaire)" }}</button>{% else %}<button class="submit" type="button" id="btnSubmit">Enregistrer</button>{% endif %}
+    </div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -1352,10 +1310,18 @@ function selectChoice(idx,fillField){
   if(fillField)$('#titre').value=m.title;
   document.querySelectorAll('.match-choice').forEach((el,i)=>{el.classList.toggle('active',i===idx);el.querySelector('input').checked=i===idx})}
 
+let searchController=null;
+function setSearchStatus(state,text){const el=$('#searchStatus'),txt=$('#searchStatusText'),btn=$('#btnCancelSearch'),sp=$('#searchSpinner');el.className='search-status active '+(state==='searching'?'searching':state==='found'?'found':'notfound');txt.textContent=text;btn.style.display=state==='searching'?'inline-block':'none';sp.style.display=state==='searching'?'block':'none';if(state!=='searching')setTimeout(()=>el.classList.remove('active'),state==='found'?5000:4000)}
+function cancelSearch(){if(searchController){searchController.abort();searchController=null}setSearchStatus('notfound','Recherche annul\u00e9e')}
+function resetForm(){if(searchController){searchController.abort();searchController=null}$('#artiste').value='';$('#titre').value='';$('#commentaire').value='';$('#videoUrl').value='';$('#videoPreview').style.display='none';$('#matchResult').style.display='none';$('#searchStatus').classList.remove('active');selectedSongId=null;matchArtist=null;matchTitle=null;matchesData=[];$('#btnSubmit').disabled=false}
 async function doMatch(){
   const a=$('#artiste').value.trim(),t=$('#titre').value.trim(),r=$('#matchResult');
-  if(a.length<2||t.length<2){r.style.display='none';return}
-  try{const res=await fetch('/api/match',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({artiste:a,titre:t})});
+  if(a.length<2||t.length<2){r.style.display='none';$('#searchStatus').classList.remove('active');return}
+  if(searchController){searchController.abort();searchController=null}
+  searchController=new AbortController();const{signal}=searchController;
+  setSearchStatus('searching','Recherche en cours...');
+  $('#btnSubmit').disabled=true;
+  try{const res=await fetch('/api/match',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({artiste:a,titre:t}),signal});
   const data=await res.json();
   if(data.mirror_age!==null)$('#mirrorInfo').textContent='Base locale : '+(data.mirror_count||0)+' titres (mise \u00e0 jour il y a '+data.mirror_age+' min)';
   else $('#mirrorInfo').textContent='Base locale non disponible';
@@ -1369,9 +1335,11 @@ async function doMatch(){
       html+='<div class="match-choices">';
       ms.forEach((m,i)=>{html+=choiceHTML(m,i,i===0)});
       html+='</div>'}
-    r.className='match-result match-ok';r.style.display='block';r.innerHTML=html
-  }else{selectedSongId=null;matchArtist=null;matchTitle=null;r.className='match-result match-ko';r.style.display='block';r.innerHTML='Nouveau titre &mdash; en attente de v\u00e9rification studio'}}
-  catch(e){console.error(e)}}
+    r.className='match-result match-ok';r.style.display='block';r.innerHTML=html;
+    setSearchStatus('found',ms.length+' version(s) trouv\u00e9e(s)')
+  }else{selectedSongId=null;matchArtist=null;matchTitle=null;r.className='match-result match-ko';r.style.display='block';r.innerHTML='Nouveau titre &mdash; en attente de v\u00e9rification studio';setSearchStatus('notfound','Aucun r\u00e9sultat')}
+  }catch(e){if(e.name!=='AbortError')console.error(e);if(e.name==='AbortError')return;r.style.display='none';setSearchStatus('notfound','Erreur de recherche')}
+  finally{$('#btnSubmit').disabled=false;searchController=null}}
 function previewVideo(url){
   const vp=$('#videoPreview');if(!vp)return;
   if(!url||!url.match(/^https?:\/\//)){vp.style.display='none';return}
@@ -1430,10 +1398,12 @@ function cancelEdit(){window.location.href='/'}
 
 // Submit handler (creation ou edition) — défini AVANT le bloc init pour être toujours disponible
 document.getElementById('btnSubmit').addEventListener('click',async function(){
+  const btn=this;if(btn.disabled)return;
   const a=$('#artiste').value.trim(),t=$('#titre').value.trim();
   if(a.length<2||t.length<2){toast('Artiste et titre requis (min 2 car.)',false);return}
   const artisteFinal=matchArtist||a;const titreFinal=matchTitle||t;
   const payload={artiste:artisteFinal,titre:titreFinal,genre:$('#genre').value,source:$('#source').value,commentaire:$('#commentaire').value,video_url:$('#videoUrl').value,song_id:selectedSongId};
+  const origText=btn.textContent;btn.disabled=true;btn.textContent='Enregistrement...';
   try{
     let url='/api/soumettre';
     if($('#editMode').value){url='/api/soumissions/'+$('#editMode').value+'/edit'}
@@ -1445,17 +1415,18 @@ document.getElementById('btnSubmit').addEventListener('click',async function(){
         toast('Soumission mise à jour'+(corrige?' (corrigée)':''),true);
         setTimeout(()=>window.location.href='/historique',800)
       }else{
-        matchArtist=null;matchTitle=null;selectedSongId=null;matchesData=[];$('#artiste').value='';$('#titre').value='';$('#genre').value='';$('#commentaire').value='';$('#videoUrl').value='';$('#matchResult').style.display='none';$('#videoPreview').style.display='none';toast('Soumission enregistrée'+(corrige?' (corrigée)':''),true)
+        matchArtist=null;matchTitle=null;selectedSongId=null;matchesData=[];$('#artiste').value='';$('#titre').value='';$('#genre').value='';$('#commentaire').value='';$('#videoUrl').value='';$('#matchResult').style.display='none';$('#videoPreview').style.display='none';$('#searchStatus').classList.remove('active');toast('Soumission enregistrée'+(corrige?' (corrigée)':''),true)
       }
     }
     else if(data.status==='duplicate')toast(data.message,false);
     else toast(data.error||'Erreur',false);
-  }catch(e){toast('Erreur réseau',false)}});
+  }catch(e){toast('Erreur réseau',false)}
+  finally{btn.disabled=false;btn.textContent=origText}});
 </script>
 <script>
 // Event listeners + Init (bloc séparé : une erreur ici n'empêche pas le submit handler ci-dessus)
 try{
-let debounce;$('#videoUrl').addEventListener('input',function(){previewVideo(this.value)});
+let debounce;$('#btnCancelSearch').addEventListener('click',cancelSearch);$('#btnResetForm').addEventListener('click',resetForm);$('#videoUrl').addEventListener('input',function(){previewVideo(this.value)});
 $('#artiste').addEventListener('input',()=>{matchArtist=null;selectedSongId=null;clearTimeout(debounce);debounce=setTimeout(doMatch,400)});
 $('#titre').addEventListener('input',()=>{matchTitle=null;selectedSongId=null;clearTimeout(debounce);debounce=setTimeout(doMatch,400)});
 // Init{% if edit_data and not edit_locked %}
