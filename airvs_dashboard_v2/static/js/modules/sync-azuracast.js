@@ -1,3 +1,5 @@
+// PATCH 01/09/2026 v2 — Sécurité frontend (ne pas écraser dossiers si résultat suspect)
+// + Message « Scan worker en cours… » (le bouton délègue maintenant au worker qui scanne SSHFS)
 // [P3-S4] Phase 3 Étape 4 — Extraction JS sync-azuracast
 /**
  * sync-azuracast.js — Module AzuraCast
@@ -612,6 +614,16 @@ function loadActionFolders() {
         .then(function(r) { return r.json(); })
         .then(function(folders) {
             if (!Array.isArray(folders)) return;
+            // Sécurité (310826) : ne pas remplacer la liste si le résultat est suspect
+            var existingCount = 0;
+            ['action_dossier_cible', 'action_playlist_dossier'].forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el) existingCount = Math.max(existingCount, el.options.length);
+            });
+            if (folders.length <= 1 && existingCount > 3) {
+                console.warn('[loadActionFolders] Résultat suspect (' + folders.length + ' vs ' + existingCount + ' existants) — liste conservée.');
+                return;
+            }
             let html = '<option value="">-- Sélectionner un dossier --</option>';
             // Grouper par niveau pour affichage indenté
             folders.forEach(function(f) {
@@ -636,6 +648,9 @@ function loadActionFolders() {
                     if (opts.indexOf(defaut) >= 0) el.value = defaut;
                 }
             });
+        })
+        .catch(function(err) {
+            console.warn('[loadActionFolders] Erreur réseau/API:', err);
         });
 }
 
@@ -647,6 +662,12 @@ function loadPushFolders() {
         .then(function(r) { return r.json(); })
         .then(function(folders) {
             if (!Array.isArray(folders)) return;
+            // Sécurité (310826) : ne pas remplacer si résultat suspect
+            var el = document.getElementById('push_dossier_cible');
+            if (folders.length <= 1 && el && el.options.length > 3) {
+                console.warn('[loadPushFolders] Résultat suspect (' + folders.length + ' vs ' + el.options.length + ' existants) — liste conservée.');
+                return;
+            }
             let html = '<option value="">-- Sélectionner un dossier --</option>';
             folders.forEach(function(f) {
                 let depth = f.split('/').length - 1;
@@ -655,12 +676,14 @@ function loadPushFolders() {
                 html += '<option value="' + f + '">' + indent + arrow + f + '</option>';
             });
             html += '<option value="__new_folder__">+ Nouveau dossier…</option>';
-            var el = document.getElementById('push_dossier_cible');
             if (el) {
                 el.innerHTML = html;
                 var opts = Array.from(el.options).map(function(o) { return o.value; });
                 if (opts.indexOf('imports_push') >= 0) el.value = 'imports_push';
             }
+        })
+        .catch(function(err) {
+            console.warn('[loadPushFolders] Erreur réseau/API:', err);
         });
 }
 
@@ -2630,6 +2653,63 @@ function surveillerFinPlaylist() {
             updatePushCount();
         });
     })();
+
+    // ── Bouton Rafraîchir les dossiers AzuraCast ──
+    (function() {
+        // Lier le bouton du panneau Action (explorateur)
+        var btnAction = document.getElementById('btn_refresh_action_folders');
+        if (btnAction) {
+            btnAction.addEventListener('click', function() {
+                _refreshAzuraFolders(this);
+            });
+        }
+        // Lier le bouton du panneau Pont (push)
+        var btnPush = document.getElementById('btn_refresh_push_folders');
+        if (btnPush) {
+            btnPush.addEventListener('click', function() {
+                _refreshAzuraFolders(this);
+            });
+        }
+    })();
+
+    /** Rafraîchit le cache des dossiers AzuraCast et recharge les selects.
+     *  Appelé par les boutons « Rafraîchir les dossiers » (Action + Pont).
+     *  [PATCH 01/09/2026 v2] Délègue au worker qui scanne API + SSHFS (quelques secondes). */
+    function _refreshAzuraFolders(btnEl) {
+        var originalText = btnEl.textContent;
+        btnEl.disabled = true;
+        btnEl.textContent = 'Scan en cours…';
+
+        fetch('/api/azuracast/refresh-folders', {method: 'POST'})
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                btnEl.disabled = false;
+                btnEl.textContent = originalText;
+                if (data.status === 'ok') {
+                    // Recharger les deux séries de dossiers
+                    loadActionFolders();
+                    loadPushFolders();
+                    // Toast de succès avec source
+                    if (window.showToast) {
+                        var source = data.source || '';
+                        var msg = data.count + ' dossier(s)';
+                        if (source) msg += ' (' + source + ')';
+                        window.showToast(msg, 'success');
+                    }
+                } else {
+                    if (window.showToast) {
+                        window.showToast('Erreur : ' + (data.message || 'inconnue'), 'danger');
+                    }
+                }
+            })
+            .catch(function(err) {
+                btnEl.disabled = false;
+                btnEl.textContent = originalText;
+                if (window.showToast) {
+                    window.showToast('Erreur réseau : ' + err.message, 'danger');
+                }
+            });
+    }
 
     // ── Exports vers window (utilisés par le monolithe ou d'autres modules) ──
     window._onShazamMatchResult = populatePushPreviewFromShazam;

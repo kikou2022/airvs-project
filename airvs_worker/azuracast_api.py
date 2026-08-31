@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PATCH 31/08/2026 ~17h00 — Ajout list_directories() pour découvrir dossiers vides
 """
 AzuraCast REST API Client - Module AIRVS
 
@@ -19,6 +20,7 @@ Endpoints AzuraCast utilisés :
   - POST   /api/station/{id}/playlist/{pid}/import → Importer M3U/PLS
   - PUT    /api/station/{id}/playlist/{pid}/shuffle → Mélanger la playlist
   - GET    /api/station/{id}/files              → Lister les médias
+  - GET    /api/station/{id}/files/directories → Lister les répertoires
   - GET    /api/station/{id}/file/{fid}         → Détails d'un média
   - PUT    /api/station/{id}/file/{fid}         → Modifier un média
 """
@@ -326,6 +328,26 @@ class AzuraCastAPI:
             timeout=60  # Peut être long si beaucoup de fichiers
         )
         return self._handle_response(response, "Lister les médias")
+
+    def list_directories(self):
+        """
+        Liste tous les répertoires de la station via l'API AzuraCast.
+        Découvre les dossiers vides (sans fichiers) que list_media ne peut pas voir.
+
+        Returns:
+            list: Liste des chemins de répertoires (ex: ['NOUVELLES_ENTREES', 'imports_push/rock'])
+        """
+        response = self.session.get(
+            self._url('/files/directories'),
+            timeout=30
+        )
+        data = self._handle_response(response, "Lister les répertoires")
+        # L'API peut retourner une liste directe ou un dict avec clé 'rows'
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get('rows', data.get('directories', []))
+        return []
 
     def get_media(self, media_id):
         """

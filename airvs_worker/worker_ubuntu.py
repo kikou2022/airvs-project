@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PATCH 31/08/2026 ~17h00 — Fix sync différentielle dossiers AzuraCast (plus de vidage)
 # ═══════════════════════════════════════════════════════════════════
 # WORKER_VERSION : à incrémenter à chaque modification significative.
 # Le worker loggue cette version en base au démarrage, ce qui permet
@@ -4035,6 +4036,11 @@ def executer_sync_azura_status(tache_id, parametres):
       - station_ids: liste d'IDs de stations à interroger (ex: [6, 7]).
                      Si absent → toutes les stations de config.json.
       - badge_global: True (défaut) → badge si présent dans au moins une station.
+
+    Sécurité dossiers (v2026.08.31) :
+      - Utilise /files/directories pour découvrir les dossiers vides
+      - Sync différentielle : INSERT nouveaux, DELETE absents (avec seuil de sécurité)
+      - Ne JAMAIS vider le cache si l'API retourne trop peu de résultats
     """
     # Résoudre la liste des stations à interroger
     station_ids = parametres.get('station_ids')
@@ -4052,6 +4058,7 @@ def executer_sync_azura_status(tache_id, parametres):
     all_azura_files = set()
     all_folders = set()  # Dossiers agrégés (les 2 stations partagent sshfs_root)
     total_rows = 0
+    api_ok_count = 0  # Nombre de stations dont l'API a répondu avec succès
 
     for sid in station_ids:
         try:
@@ -4067,6 +4074,7 @@ def executer_sync_azura_status(tache_id, parametres):
             rows = data if isinstance(data, list) else data.get("rows", [])
             logger(tache_id, f"[station {sid}] {len(rows)} fichier(s) récupéré(s)")
             total_rows += len(rows)
+            api_ok_count += 1
 
             for morceau in rows:
                 if not isinstance(morceau, dict):
@@ -4088,10 +4096,71 @@ def executer_sync_azura_status(tache_id, parametres):
             logger(tache_id, f"[station {sid}] ERREUR API: {e}")
             continue
 
-    all_folders.add('imports_push')  # Dossier par défaut
-    logger(tache_id, f"Total agrégé: {total_rows} fichier(s) sur {len(station_ids)} station(s), {len(all_folders)} dossier(s) uniques")
+    # 1b. Découvrir les dossiers via /files/directories (dossiers ayant contenu des médias)
+    dirs_ok_count = 0
+    for sid in station_ids:
+        try:
+            api_url, api_key = _url_key_for_station(sid)
+            # Remplacer /files par /files/directories
+            dirs_url = api_url.replace('/files', '/files/directories', 1)
+            if dirs_url == api_url:
+                # Fallback si le remplacement n'a pas fonctionné
+                base = api_url.rsplit('/files', 1)[0]
+                dirs_url = base + '/files/directories'
+            headers = {"Authorization": f"Bearer {api_key}"}
+            resp = requests.get(dirs_url, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                dirs_data = resp.json()
+                dirs_list = dirs_data if isinstance(dirs_data, list) else dirs_data.get('rows', dirs_data.get('directories', []))
+                for d in dirs_list:
+                    if isinstance(d, dict):
+                        path = d.get('path', d.get('name', ''))
+                    elif isinstance(d, str):
+                        path = d
+                    else:
+                        continue
+                    if path and path.strip():
+                        all_folders.add(path.strip().strip('/'))
+                dirs_ok_count += 1
+                logger(tache_id, f"[station {sid}] {len(dirs_list)} répertoire(s) via /directories")
+            else:
+                logger(tache_id, f"[station {sid}] /directories indisponible (code {resp.status_code}), folders extraits des fichiers uniquement")
+        except Exception as e:
+            logger(tache_id, f"[station {sid}] /directories erreur: {e}")
 
-    # 2. Mettre à jour le cache des dossiers (table azuracast_folders_cache)
+    # 1c. Scanner le filesystem SSHFS (dossiers vides JAMAIS scannés par AzuraCast)
+    #     Attrape les dossiers créés via interface AzuraCast, SSHFS, SFTP, etc.
+    fs_folders_count = 0
+    try:
+        if os.path.isdir(AZURA_SSHFS_ROOT):
+            for entry in os.scandir(AZURA_SSHFS_ROOT):
+                if entry.is_dir(follow_symlinks=False) and not entry.name.startswith('.'):
+                    all_folders.add(entry.name)
+                    fs_folders_count += 1
+                    # Scanner aussi les sous-dossiers (ex: NOUVELLES_ENTREES/SEMAINE_36)
+                    try:
+                        for sub in os.scandir(entry.path):
+                            if sub.is_dir(follow_symlinks=False) and not sub.name.startswith('.'):
+                                all_folders.add(entry.name + '/' + sub.name)
+                                fs_folders_count += 1
+                    except PermissionError:
+                        pass
+            logger(tache_id, f"[filesystem] {fs_folders_count} répertoire(s) trouvés via SSHFS ({AZURA_SSHFS_ROOT})")
+        else:
+            logger(tache_id, f"[filesystem] SSHFS non monté ({AZURA_SSHFS_ROOT}), scan ignoré")
+    except Exception as e:
+        logger(tache_id, f"[filesystem] erreur scan SSHFS: {e}")
+
+    all_folders.add('imports_push')  # Dossier par défaut
+    logger(tache_id, f"Total agrégé: {total_rows} fichier(s) sur {api_ok_count}/{len(station_ids)} station(s) OK, {len(all_folders)} dossier(s) uniques")
+
+    # 2. Mettre à jour le cache des dossiers (SYNC DIFFÉRENTIELLE avec sécurité)
+    #    ── Ne plus utiliser DELETE + INSERT (trop risqué) ──
+    #    Nouvelle stratégie :
+    #      a) Lire les dossiers existants en cache
+    #      b) INSÉRER les nouveaux dossiers
+    #      c) SUPPRIMER les dossiers qui n'existent plus dans AzuraCast
+    #         (seulement si au moins 1 station API a répondu ET le ratio est acceptable)
     try:
         db = pymysql.connect(**DB_CONFIG)
         cursor = db.cursor(pymysql.cursors.DictCursor)
@@ -4131,21 +4200,66 @@ def executer_sync_azura_status(tache_id, parametres):
             except Exception as e:
                 logger(tache_id, f"Migration folders impossible: {e}")
 
-        # Vider les dossiers des stations synchronisées et réinsérer
+        # ── SYNC DIFFÉRENTIELLE ──
         for sid in station_ids:
+            # 2a. Lire les dossiers actuels en cache pour cette station
             cursor.execute(
-                "DELETE FROM azuracast_folders_cache WHERE station_id = %s",
+                "SELECT folder_path FROM azuracast_folders_cache WHERE station_id = %s",
                 (sid,)
             )
-            for folder in sorted(all_folders):
-                cursor.execute(
-                    "INSERT IGNORE INTO azuracast_folders_cache (folder_path, station_id) VALUES (%s, %s)",
-                    (folder, sid)
-                )
+            existing_rows = cursor.fetchall()
+            existing_folders = set()
+            for row in existing_rows:
+                if isinstance(row, dict):
+                    existing_folders.add(row.get('folder_path', ''))
+                elif isinstance(row, (list, tuple)):
+                    existing_folders.add(row[0])
+
+            # 2b. Insérer les NOUVEAUX dossiers (ceux qui ne sont pas encore en cache)
+            new_folders = all_folders - existing_folders
+            inserted = 0
+            for folder in sorted(new_folders):
+                try:
+                    cursor.execute(
+                        "INSERT IGNORE INTO azuracast_folders_cache (folder_path, station_id) VALUES (%s, %s)",
+                        (folder, sid)
+                    )
+                    if cursor.rowcount > 0:
+                        inserted += 1
+                except Exception:
+                    pass
+
+            # 2c. Supprimer les dossiers obsolètes (présents en cache mais plus dans AzuraCast)
+            #     Sécurité : ne supprimer QUE si :
+            #       - Au moins 1 station a répondu à l'API fichiers
+            #       - Le nouveau set n'est pas trop petit vs l'ancien (seuil 50%)
+            deleted = 0
+            if api_ok_count > 0 and len(all_folders) > 0:
+                # Seuil de sécurité : si le nouveau set a moins de 50% des anciens dossiers,
+                # c'est probablement une erreur API → on ne supprime rien
+                ratio = len(all_folders) / max(len(existing_folders), 1)
+                if ratio >= 0.5:
+                    obsolete = existing_folders - all_folders
+                    for folder in sorted(obsolete):
+                        try:
+                            cursor.execute(
+                                "DELETE FROM azuracast_folders_cache WHERE folder_path = %s AND station_id = %s",
+                                (folder, sid)
+                            )
+                            deleted += cursor.rowcount
+                        except Exception:
+                            pass
+                else:
+                    logger(tache_id, f"[SECURITE] Ratio dossiers {ratio:.0%} < 50% pour station {sid} — suppression obsolètes ANNULÉE (API probablement incomplète)")
+            else:
+                logger(tache_id, f"[SECURITE] Aucune station API OK — suppression obsolètes ANNULÉE pour station {sid}")
+
+            logger(tache_id, f"[station {sid}] Cache dossiers: +{inserted} nouveaux, -{deleted} obsolètes, {len(all_folders)} total")
+
         db.commit()
         cursor.close()
         db.close()
-        logger(tache_id, f"Cache dossiers mis à jour: {len(all_folders)} dossier(s) × {len(station_ids)} station(s)")
+        logger(tache_id, f"Cache dossiers mis à jour: {len(all_folders)} dossier(s) × {len(station_ids)} station(s) (sync différentielle)")
     except Exception as e:
         logger(tache_id, f"ERREUR cache dossiers: {e}")
 

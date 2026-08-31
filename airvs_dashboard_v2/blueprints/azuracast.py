@@ -1,3 +1,12 @@
+# [PATCH 2026-09-01 v2] azuracast.py — Insertion cache dossier + refresh-folders via worker
+# Génération : 2026-08-31 18:29:16
+# Modifications :
+#   1. Ajout _assurer_table_folders_cache(cursor) : crée/migre la table si nécessaire
+#   2. Ajout _inserer_dossier_cache(folder_path, station_id) : insère dossier + parents dans le cache
+#   3. lancer_push_azura : appel _inserer_dossier_cache quand dossier_cible est nouveau
+#   4. refresh-folders : délègue au worker (SYNC_AZURA_STATUS) qui scanne API + SSHFS
+#      Attend le worker (timeout 25s), lit le cache à jour. Fallback sur cache existant.
+#
 """blueprints/azuracast.py -- Routes AzuraCast (push, sync, stations, folders, playlists, M3U, bulk schedule, diagnostic, mark).
 
 Routes extraites de app.py pour le blueprint azuracast_bp.
@@ -199,6 +208,93 @@ def _azura_api_get(path, params=None, timeout=8):
             import json as _json
             return _json.loads(resp.read().decode('utf-8'))
         return None
+
+
+# ══════════════════════════════════════════
+# CACHE DOSSIERS AZURACAST — HELPERS
+# Ajoutés [PATCH 2026-09-01] pour insertion immédiate
+# quand un dossier est ciblé par un push/copie.
+# ══════════════════════════════════════════
+
+def _assurer_table_folders_cache(cursor):
+    """S'assure que azuracast_folders_cache existe et a la colonne station_id.
+    Réutilisable par refresh-folders et l'insertion push."""
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS azuracast_folders_cache ("
+        "  id INT AUTO_INCREMENT PRIMARY KEY,"
+        "  folder_path VARCHAR(500) NOT NULL,"
+        "  station_id TINYINT NOT NULL DEFAULT 7,"
+        "  date_sync DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "  UNIQUE KEY uq_folder_station (folder_path, station_id)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    )
+    # Vérifier/migrer la colonne station_id
+    try:
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = 'azuracast_folders_cache' "
+            "AND column_name = 'station_id'"
+        )
+        col_check = cursor.fetchone()
+        has_station_col = False
+        if isinstance(col_check, dict):
+            has_station_col = col_check.get('COUNT(*)', 0) > 0
+        elif isinstance(col_check, (list, tuple)):
+            has_station_col = col_check[0] > 0
+        if not has_station_col:
+            cursor.execute(
+                "ALTER TABLE azuracast_folders_cache "
+                "ADD COLUMN station_id TINYINT NOT NULL DEFAULT 7"
+            )
+    except Exception:
+        pass  # La colonne existe probablement déjà
+
+
+def _inserer_dossier_cache(folder_path, station_id):
+    """Insère un dossier et tous ses parents dans azuracast_folders_cache.
+
+    Exemple : 'NOUVELLES_ENTREES/SEMAINE_36' insère aussi 'NOUVELLES_ENTREES'.
+    Utilise INSERT IGNORE pour ne pas planter si le dossier existe déjà.
+    Appelé depuis lancer_push_azura quand un nouveau dossier est ciblé.
+    """
+    if not folder_path or folder_path.strip('/') == 'imports_push':
+        return  # Dossier par défaut, déjà dans le cache
+    folder_path = folder_path.strip('/')
+
+    # Collecter le dossier lui-même + tous ses parents
+    folders_a_inserer = []
+    parts = folder_path.split('/')
+    for i in range(1, len(parts) + 1):
+        folders_a_inserer.append('/'.join(parts[:i]))
+
+    try:
+        db = get_db_connection()
+        if not db:
+            _logger.warning("[azuracast] _inserer_dossier_cache : connexion DB impossible")
+            return
+        cursor = db.cursor()
+        _assurer_table_folders_cache(cursor)
+
+        inserted = 0
+        for fp in folders_a_inserer:
+            cursor.execute(
+                "INSERT IGNORE INTO azuracast_folders_cache (folder_path, station_id) "
+                "VALUES (%s, %s)",
+                (fp, station_id)
+            )
+            if cursor.rowcount > 0:
+                inserted += 1
+
+        db.commit()
+        cursor.close()
+        db.close()
+        if inserted > 0:
+            _logger.info(f"[azuracast] _inserer_dossier_cache : {inserted} dossier(s) inséré(s) "
+                         f"pour station {station_id} : {folder_path}")
+    except Exception as e:
+        _logger.error(f"[azuracast] _inserer_dossier_cache erreur : {e}")
+
+
 
 
 def _valider_requete_push(requete):
@@ -749,6 +845,14 @@ def lancer_push_azura():
                 playlist_task_ids.append(cursor.lastrowid)
 
             db.commit()
+
+        # [PATCH 2026-09-01] Insérer le dossier cible dans le cache immédiatement
+        # pour qu'il apparaisse dans la liste déroulante sans attendre le worker.
+        if dossier_cible and dossier_cible.strip('/') != 'imports_push':
+            try:
+                _inserer_dossier_cache(dossier_cible, station_id)
+            except Exception as e_cache:
+                _logger.warning(f"[azuracast] Erreur insertion cache dossier : {e_cache}")
 
         cursor.close()
         db.close()
@@ -1473,3 +1577,125 @@ def api_bulk_schedule_apply():
     if result:
         return jsonify(result)
     return jsonify({'status': 'error', 'message': 'Aucun résultat retourné par le worker'}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ═══ Rafraîchissement manuel des dossiers AzuraCast ═══════════════
+# [PATCH 2026-09-01 v2] Le bouton « Rafraîchir » déclenche maintenant le
+# worker (SYNC_AZURA_STATUS) qui scanne API + /directories + SSHFS.
+# L'ancien scan API-only ne découvrait pas les dossiers vides/non scannés.
+# On attend le worker (timeout 25s), puis on lit le cache à jour.
+# Si le worker ne répond pas (arrêté/maintenance), on lit le cache existant.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@azuracast_bp.route('/api/azuracast/refresh-folders', methods=['POST'])
+@login_requis
+def api_azuracast_refresh_folders():
+    """Rafraîchit le cache des dossiers AzuraCast.
+
+    Stratégie [PATCH 2026-09-01 v2] :
+      1. Créer une tâche SYNC_AZURA_STATUS pour le worker
+         (le worker scanne API + /directories + filesystem SSHFS)
+      2. Attendre la complétion du worker (polling, timeout 25s)
+      3. Lire azuracast_folders_cache et retourner la liste à jour
+
+    Si le worker ne répond pas (pas démarré, en maintenance), on lit
+    le cache existant — aucun dossier n'est perdu.
+    """
+    stations = _lister_stations()
+    station_ids = [s['id'] for s in stations]
+    rapports = []
+    worker_ok = False
+
+    # ── 1. Créer une tâche SYNC_AZURA_STATUS pour le worker ──
+    task_id = None
+    try:
+        db = get_db_connection()
+        if db:
+            cursor = db.cursor()
+            cursor.execute(
+                "INSERT INTO taches_planifiees (type_action, statut, parametres, date_creation) "
+                "VALUES ('SYNC_AZURA_STATUS', %s, 'en_attente', NOW())",
+                (json.dumps({'station_ids': station_ids}),)
+            )
+            db.commit()
+            task_id = cursor.lastrowid
+            cursor.close()
+            db.close()
+            _logger.info(f"[azuracast] refresh-folders : tâche SYNC_AZURA_STATUS #{task_id} créée")
+    except Exception as e:
+        _logger.warning(f"[azuracast] refresh-folders : impossible de créer tâche worker : {e}")
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    # ── 2. Attendre la complétion du worker (max 25s) ──
+    if task_id:
+        start = time.time()
+        while time.time() - start < 25:
+            time.sleep(2)
+            try:
+                db = get_db_connection()
+                if not db:
+                    continue
+                cursor = db.cursor(pymysql.cursors.DictCursor)
+                cursor.execute(
+                    "SELECT statut FROM taches_planifiees WHERE id = %s",
+                    (task_id,)
+                )
+                row = cursor.fetchone()
+                cursor.close()
+                db.close()
+                if row and row['statut'] in ('termine', 'erreur'):
+                    worker_ok = True
+                    rapports.append(f"Worker tâche #{task_id} : {row['statut']}")
+                    _logger.info(f"[azuracast] refresh-folders : worker terminé en {int(time.time() - start)}s")
+                    break
+            except Exception:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+
+        if not worker_ok:
+            rapports.append("Worker n'a pas répondu dans les 25s (cache existant lu)")
+            _logger.warning("[azuracast] refresh-folders : worker timeout, lecture du cache existant")
+    else:
+        rapports.append("Tâche worker non créée (cache existant lu)")
+
+    # ── 3. Lire le cache et retourner ──
+    try:
+        db = get_db_connection()
+        if not db:
+            return jsonify({'status': 'error', 'message': 'Connexion DB impossible'}), 500
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        _assurer_table_folders_cache(cursor)
+
+        cursor.execute(
+            "SELECT DISTINCT folder_path FROM azuracast_folders_cache ORDER BY folder_path ASC"
+        )
+        rows = cursor.fetchall()
+        all_folders = set()
+        for row in rows:
+            fp = row.get('folder_path', '') if isinstance(row, dict) else (row[0] if row else '')
+            if fp:
+                all_folders.add(fp)
+        all_folders.add('imports_push')
+
+        cursor.close()
+        db.close()
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f'Erreur lecture cache : {e}'}), 500
+
+    result = sorted(all_folders)
+    source = "worker (API + SSHFS)" if worker_ok else "cache BDD"
+    _logger.info(f"[azuracast] refresh-folders : {len(result)} dossier(s) via {source}")
+    return jsonify({
+        'status': 'ok',
+        'folders': result,
+        'count': len(result),
+        'source': source,
+        'rapports': rapports
+    })
