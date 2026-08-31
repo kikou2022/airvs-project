@@ -30,6 +30,7 @@ Routes manquants (airvs_manquants) :
   - GET    /api/manquants/stats     Compteurs par source/statut
   - POST   /api/manquants/resolve   Marque resolu (faux positif)
   - DELETE /api/manquants/delete    Supprime un manquant
+  - POST   /api/manquants/search-radiodj  Recherche dans RadioDJ + màj statut
 """
 
 import os
@@ -37,6 +38,7 @@ import re
 import json
 import shutil
 import subprocess
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import quote
@@ -1423,4 +1425,259 @@ def api_manquants_delete():
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"ok": True, "id": manq_id})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# HELPERS : MOTEUR DE MATCHING RADIODJ (porté de shazam.py)
+# Normalisation + 5 passes de recherche floue.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _manquants_normaliser(texte):
+    """Normalise un texte pour comparaison floue :
+    minuscules, sans accents, sans ponctuation, mots de liaison remplacés."""
+    if not texte:
+        return ""
+    texte = str(texte).strip().lower()
+    texte = ''.join(
+        c for c in unicodedata.normalize('NFD', texte)
+        if unicodedata.category(c) != 'Mn'
+    )
+    for caractere in "()[]&'+-":
+        texte = texte.replace(caractere, " ")
+    texte = re.sub(r'\b(?:et|and|x)\b', ' ', texte, flags=re.IGNORECASE)
+    return re.sub(r'\s+', ' ', texte).strip()
+
+
+def _manquants_extraire_principal(texte):
+    """Extrait la partie principale : supprime feat./ft./featuring."""
+    if not texte:
+        return texte
+    texte = re.sub(r'\s*\([^)]*(?:feat\.?|ft\.?|featuring)[^)]*\)\s*', ' ', texte, flags=re.IGNORECASE).strip()
+    texte = re.split(r'\s+(?:feat\.?|ft\.?|featuring)\s+', texte, flags=re.IGNORECASE)[0].strip()
+    return texte
+
+
+def _manquants_extraire_nu(texte):
+    """Extrait le noyau nu : supprime TOUTES les parenthèses ET les feat."""
+    if not texte:
+        return texte
+    texte = re.sub(r'\s*\([^)]*\)\s*', ' ', texte).strip()
+    texte = re.split(r'\s+(?:feat\.?|ft\.?|featuring)\s+', texte, flags=re.IGNORECASE)[0].strip()
+    return texte
+
+
+def _manquants_match_radiodj(cursor, artiste, titre):
+    """Moteur de matching 5 passes contre la table songs de RadioDJ.
+    Porté de shazam.py::_match_shazam_songs.
+    Retourne (resultat_dict_ou_None, methode_str)."""
+    base_query = (
+        "SELECT s.ID, s.artist, s.title, s.year, s.duration, s.`path`, "
+        "s.comments, s.album, s.bpm, s.id_genre "
+        "FROM songs s WHERE s.song_type = 0"
+    )
+
+    resultat = None
+    methode = ""
+
+    # Passe 1 : stricte
+    query = base_query + " AND s.artist LIKE %s AND s.title LIKE %s ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1"
+    cursor.execute(query, (f"%{artiste}%", f"%{titre}%"))
+    resultat = cursor.fetchone()
+    if resultat:
+        methode = "strict"
+
+    # Passe 2 : principal (sans feat.)
+    if not resultat:
+        art_p = _manquants_extraire_principal(artiste)
+        tit_p = _manquants_extraire_principal(titre)
+        if art_p != artiste or tit_p != titre:
+            cursor.execute(query, (f"%{art_p}%", f"%{tit_p}%"))
+            resultat = cursor.fetchone()
+            if resultat:
+                methode = "principal"
+
+    # Passe 2b : nu (sans feat. ni parenthèses)
+    if not resultat:
+        art_nu = _manquants_extraire_nu(artiste)
+        tit_nu = _manquants_extraire_nu(titre)
+        if (art_nu != _manquants_extraire_principal(artiste) or tit_nu != _manquants_extraire_principal(titre)):
+            if art_nu and tit_nu:
+                cursor.execute(query, (f"%{art_nu}%", f"%{tit_nu}%"))
+                resultat = cursor.fetchone()
+                if resultat:
+                    methode = "nu"
+
+    # Passe 3 : normalisé
+    if not resultat:
+        art_norm = _manquants_normaliser(artiste)
+        tit_norm = _manquants_normaliser(titre)
+        art_p_norm = _manquants_normaliser(_manquants_extraire_principal(artiste))
+        tit_p_norm = _manquants_normaliser(_manquants_extraire_principal(titre))
+        art_nu_norm = _manquants_normaliser(_manquants_extraire_nu(artiste))
+        tit_nu_norm = _manquants_normaliser(_manquants_extraire_nu(titre))
+        query_norm = base_query + " AND LOWER(s.artist) LIKE %s AND LOWER(s.title) LIKE %s ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1"
+        for a_s, t_s in [
+            (art_nu_norm, tit_nu_norm),
+            (art_p_norm, tit_p_norm),
+            (art_norm, tit_norm),
+        ]:
+            if a_s and t_s:
+                cursor.execute(query_norm, (f"%{a_s}%", f"%{t_s}%"))
+                resultat = cursor.fetchone()
+                if resultat:
+                    methode = "normalisé"
+                    break
+
+    # Passe 4 : mots-clés (score >= 2)
+    if not resultat:
+        art_mots = set(m for m in _manquants_normaliser(_manquants_extraire_nu(artiste)).split() if len(m) >= 3)
+        tit_mots = set(m for m in _manquants_normaliser(_manquants_extraire_nu(titre)).split() if len(m) >= 3)
+        if len(art_mots) + len(tit_mots) >= 2:
+            art_best = max(art_mots, key=len) if art_mots else ""
+            tit_best = max(tit_mots, key=len) if tit_mots else ""
+            if art_best and tit_best:
+                query4 = base_query + " AND LOWER(s.artist) LIKE %s AND LOWER(s.title) LIKE %s LIMIT 5"
+                cursor.execute(query4, (f"%{art_best}%", f"%{tit_best}%"))
+                candidats = cursor.fetchall()
+                if candidats:
+                    meilleur_score = 0
+                    meilleur_resultat = None
+                    for cand in candidats:
+                        c_art_mots = set(m for m in _manquants_normaliser(_manquants_extraire_nu(cand['artist'])).split() if len(m) >= 3)
+                        c_tit_mots = set(m for m in _manquants_normaliser(_manquants_extraire_nu(cand['title'])).split() if len(m) >= 3)
+                        score = len(art_mots & c_art_mots) + len(tit_mots & c_tit_mots)
+                        if score > meilleur_score and score >= 2:
+                            meilleur_score = score
+                            meilleur_resultat = cand
+                    if meilleur_resultat:
+                        resultat = meilleur_resultat
+                        methode = f"mots-cles (score={meilleur_score})"
+
+    # Passe 5 : inversion artiste/titre
+    if not resultat:
+        art_inv, tit_inv = titre, artiste
+        query_inv = base_query + " AND s.artist LIKE %s AND s.title LIKE %s ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1"
+        cursor.execute(query_inv, (f"%{art_inv}%", f"%{tit_inv}%"))
+        resultat = cursor.fetchone()
+        if resultat:
+            methode = "inversé-strict"
+        else:
+            art_inv_p = _manquants_extraire_principal(art_inv)
+            tit_inv_p = _manquants_extraire_principal(tit_inv)
+            if art_inv_p != art_inv or tit_inv_p != tit_inv:
+                cursor.execute(query_inv, (f"%{art_inv_p}%", f"%{tit_inv_p}%"))
+                resultat = cursor.fetchone()
+                if resultat:
+                    methode = "inversé-principal"
+        if not resultat:
+            art_inv_nu_norm = _manquants_normaliser(_manquants_extraire_nu(art_inv))
+            tit_inv_nu_norm = _manquants_normaliser(_manquants_extraire_nu(tit_inv))
+            art_inv_norm = _manquants_normaliser(art_inv)
+            tit_inv_norm = _manquants_normaliser(tit_inv)
+            query_inv_norm = base_query + " AND LOWER(s.artist) LIKE %s AND LOWER(s.title) LIKE %s ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1"
+            for a_s, t_s in [(art_inv_nu_norm, tit_inv_nu_norm), (art_inv_norm, tit_inv_norm)]:
+                if a_s and t_s:
+                    cursor.execute(query_inv_norm, (f"%{a_s}%", f"%{t_s}%"))
+                    resultat = cursor.fetchone()
+                    if resultat:
+                        methode = "inversé-normalisé"
+                        break
+
+    return resultat, methode
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ROUTE : RECHERCHE RADIODJ POUR UN MANQUANT
+# ═══════════════════════════════════════════════════════════════════════
+
+@pipeline_import_bp.route('/api/manquants/search-radiodj', methods=['POST'])
+@login_requis
+def api_manquants_search_radiodj():
+    """Recherche un manquant dans la base RadioDJ via le moteur de matching 5 passes.
+
+    Body JSON : { id: int }
+
+    Si trouvé :
+      - Met à jour le statut du manquant à 'importe' et id_import au song ID
+      - Retourne {found: true, song: {...}, methode: str}
+    Sinon :
+      - Retourne {found: false}
+    """
+    data = request.json or {}
+    manq_id = data.get('id')
+
+    if not manq_id:
+        return jsonify({"error": "'id' est obligatoire"}), 400
+
+    db = get_db_connection()
+    if not db:
+        return jsonify({"error": "Erreur DB"}), 500
+
+    try:
+        # 1. Lire le manquant
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            "SELECT id, artiste, titre, source, statut FROM airvs_manquants WHERE id = %s",
+            (manq_id,)
+        )
+        manquant = cursor.fetchone()
+
+        if not manquant:
+            cursor.close()
+            db.close()
+            return jsonify({"error": "Manquant introuvable"}), 404
+
+        if manquant['statut'] != 'en_attente':
+            cursor.close()
+            db.close()
+            return jsonify({"error": f"Le manquant n'est pas en attente (statut: {manquant['statut']})"}), 400
+
+        # 2. Lancer le matching RadioDJ
+        artiste = (manquant['artiste'] or '').strip()
+        titre = (manquant['titre'] or '').strip()
+
+        if not artiste or not titre:
+            cursor.close()
+            db.close()
+            return jsonify({"error": "Artiste ou titre vide"}), 400
+
+        resultat, methode = _manquants_match_radiodj(cursor, artiste, titre)
+
+        if not resultat:
+            cursor.close()
+            db.close()
+            return jsonify({"found": False, "methode": methode or "aucune correspondance"})
+
+        # 3. Mettre à jour le manquant : statut → 'importe', id_import → song ID
+        song_id = resultat.get('ID')
+        cursor.execute(
+            "UPDATE airvs_manquants SET statut = 'importe', id_import = %s, resolu_le = NOW() WHERE id = %s",
+            (song_id, manq_id)
+        )
+        db.commit()
+        cursor.close()
+        db.close()
+
+        # Serializer le résultat (les datetime ne sont pas JSON-sérialisables)
+        song = dict(resultat)
+        for k, v in song.items():
+            if hasattr(v, 'isoformat'):
+                song[k] = v.isoformat()
+            elif hasattr(v, 'strftime'):
+                song[k] = v.strftime('%Y-%m-%d %H:%M:%S')
+
+        return jsonify({
+            "found": True,
+            "song": song,
+            "methode": methode,
+            "id": manq_id
+        })
+
+    except Exception as e:
+        try:
+            cursor.close()
+            db.close()
+        except Exception:
+            pass
+        return jsonify({"error": str(e)}), 500
 

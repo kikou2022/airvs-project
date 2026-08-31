@@ -1605,7 +1605,10 @@
                                         <select class="form-select form-select-sm" id="action_dossier_cible">
                                             <option value="">-- Charger les dossiers --</option>
                                         </select>
-                                        <div class="form-text small" id="action_folders_hint"></div>
+                                        <div class="form-text small d-flex align-items-center gap-2">
+                                            <span id="action_folders_hint"></span>
+                                            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" id="btn_refresh_action_folders" title="Rafraîchir les dossiers depuis AzuraCast">↻ Rafraîchir</button>
+                                        </div>
                                     </div>
                                     <div class="col-md-3" id="action_new_folder_col" style="display:none">
                                         <label class="form-label small fw-bold">Nouveau dossier :</label>
@@ -2887,9 +2890,12 @@
                                 <select class="form-select form-select-sm" id="push_dossier_cible">
                                     <option value="">-- Charger les dossiers --</option>
                                 </select>
-                                <div id="push_new_folder_row" style="display:none" class="mt-1">
-                                    <input type="text" class="form-control form-control-sm"
-                                           id="push_new_folder_name" placeholder="ex: NOUVELLES_ENTREES/mon_dossier">
+                                <div class="d-flex align-items-center gap-2">
+                                    <div id="push_new_folder_row" style="display:none" class="mt-1 flex-grow-1">
+                                        <input type="text" class="form-control form-control-sm"
+                                               id="push_new_folder_name" placeholder="ex: NOUVELLES_ENTREES/mon_dossier">
+                                    </div>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1 mt-1" id="btn_refresh_push_folders" title="Rafraîchir les dossiers depuis AzuraCast">↻ Rafraîchir</button>
                                 </div>
                             </div>
                             <div class="col-md-3">
@@ -6506,7 +6512,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     var dateStr = r.date_creation ? r.date_creation.substring(0, 16) : '';
                     var actions = '';
                     if (r.statut === 'en_attente') {
-                        actions = '<button class="btn btn-sm btn-outline-success me-1" onclick="_resolveManquant(' + r.id + ')" title="Marquer résolu (faux positif)">✓</button>';
+                        actions = '<button class="btn btn-sm btn-outline-info me-1" onclick="_searchManquantRadioDJ(' + r.id + ', this)" title="Chercher dans RadioDJ">🔍</button>';
+                        actions += '<button class="btn btn-sm btn-outline-success me-1" onclick="_resolveManquant(' + r.id + ')" title="Marquer résolu (faux positif)">✓</button>';
                         actions += '<button class="btn btn-sm btn-outline-danger" onclick="_deleteManquant(' + r.id + ')" title="Supprimer">✕</button>';
                     }
                     html += '<tr>' +
@@ -6571,6 +6578,80 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    /** Recherche un manquant dans RadioDJ via le moteur de matching 5 passes.
+     *  Si trouvé, met à jour la ligne en place (statut → Importé, boutons désactivés)
+     *  et ajoute le titre au push buffer correspondant. */
+    function _searchManquantRadioDJ(id, btnEl) {
+        // Désactiver le bouton pendant la recherche
+        if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳'; }
+
+        fetch('/api/manquants/search-radiodj', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id: id})
+        }).then(function(r) {
+            if (!r.ok) throw new Error(r.status);
+            return r.json();
+        }).then(function(data) {
+            if (data.found) {
+                var song = data.song;
+                showToast('Trouvé : ' + song.artist + ' — ' + song.title + ' (ID ' + song.ID + ') [' + data.methode + ']', 'success');
+                // Mettre à jour la ligne en place : badge + boutons
+                var row = btnEl ? btnEl.closest('tr') : null;
+                if (row) {
+                    // Mettre à jour le badge de statut
+                    var badge = row.querySelector('.badge');
+                    if (badge) {
+                        badge.className = 'badge bg-success';
+                        badge.style.fontSize = '0.7em';
+                        badge.textContent = 'Importé';
+                    }
+                    // Désactiver les boutons de la ligne
+                    var btns = row.querySelectorAll('button');
+                    btns.forEach(function(b) { b.disabled = true; b.classList.add('opacity-50'); });
+                }
+                // Ajouter au push buffer correspondant (source → buffer key)
+                var sourceToBuffer = {prefill_sheets: 'sheets', shazam: 'shazam', animateurs: 'animateurs'};
+                if (window.pushBuffers) {
+                    // Chercher la source de ce manquant dans la ligne
+                    var row2 = btnEl ? btnEl.closest('tr') : null;
+                    if (row2) {
+                        var smalls = row2.querySelectorAll('small');
+                        var sourceLabel = '';
+                        smalls.forEach(function(s) {
+                            var txt = s.textContent.trim();
+                            if (txt.indexOf('Sheets') >= 0) sourceLabel = 'prefill_sheets';
+                            if (txt.indexOf('Shazam') >= 0) sourceLabel = 'shazam';
+                            if (txt.indexOf('Animateurs') >= 0) sourceLabel = 'animateurs';
+                        });
+                        var bufferKey = sourceToBuffer[sourceLabel];
+                        if (bufferKey && window.pushBuffers[bufferKey]) {
+                            window.pushBuffers[bufferKey].selectedFiles.push({
+                                ID: song.ID,
+                                artist: song.artist,
+                                title: song.title,
+                                path: song.path,
+                                album: song.album || '',
+                                year: song.year || '',
+                                duration: song.duration || 0,
+                                inAzura: false
+                            });
+                            showToast('Ajouté au buffer ' + bufferKey + ' (' + window.pushBuffers[bufferKey].selectedFiles.length + ' titres)', 'success');
+                        }
+                    }
+                }
+                // Rafraîchir les compteurs
+                _fetchManquantsStats();
+            } else {
+                showToast('Non trouvé dans RadioDJ' + (data.methode ? ' (' + data.methode + ')' : ''), 'warning');
+                if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔍'; }
+            }
+        }).catch(function(err) {
+            showToast('Erreur recherche RadioDJ : ' + err.message, 'danger');
+            if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔍'; }
+        });
+    }
+
     // Badge polling (every 60s)
     _fetchManquantsStats();
     setInterval(_fetchManquantsStats, 60000);
@@ -6582,6 +6663,7 @@ document.addEventListener('DOMContentLoaded', function() {
     window._loadManquants = _loadManquants;
     window._mqPage = _mqPage;
     window._fetchManquantsStats = _fetchManquantsStats;
+    window._searchManquantRadioDJ = _searchManquantRadioDJ;
 
     // Load manquants when tab is shown
     (function() {
