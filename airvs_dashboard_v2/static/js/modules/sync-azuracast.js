@@ -1413,6 +1413,7 @@ function getPushMode() {
     if (active.id === 'push-sql') return 'sql';
     if (active.id === 'push-m3u') return 'm3u';
     if (active.id === 'push-sheets') return 'sheets';
+    if (active.id === 'push-manquants') return null;
     if (active.id === 'push-shazam') return 'shazam';
     if (active.id === 'push-animateurs') return 'animateurs';
     return 'assiste';
@@ -2570,7 +2571,8 @@ function surveillerFinPlaylist() {
                 // 5. Masquer/afficher les paramètres partagés
                 var sharedParams = document.getElementById('push_shared_params');
                 if (sharedParams) {
-                    sharedParams.style.display = (e.target.id === 'push-bulk-tab') ? 'none' : '';
+                    var _hide = e.target.id === 'push-bulk-tab' || e.target.id === 'push-manquants-tab';
+                    sharedParams.style.display = _hide ? 'none' : '';
                 }
 
                 // 6. Mettre à jour le badge de buffer actif
