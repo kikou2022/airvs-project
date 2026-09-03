@@ -70,7 +70,7 @@ def crossfade_2s(a,b)
 end
 # blank() à la fin rend la source "grille" safe
 grille = fallback(
-    [azuracast7, studio1, semaine_musicale, blank()],
+    [studio1, azuracast7, semaine_musicale, blank()],
     transitions=[
         crossfade_2s, crossfade_2s, crossfade_2s
     ],
