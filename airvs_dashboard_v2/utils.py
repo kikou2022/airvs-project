@@ -504,11 +504,78 @@ def _assurer_schema_airvs_avance():
               id_import       INT          DEFAULT NULL,
               resolu_le       DATETIME     DEFAULT NULL,
               date_creation   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-              UNIQUE INDEX uq_art_titre (artiste(255), titre(255)),
+              UNIQUE INDEX uq_art_titre_src (artiste(255), titre(255), source),
               INDEX idx_statut (statut),
               INDEX idx_source (source)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
+
+        # ── Migration airvs_manquants : ENUM enrichi + colonnes correction ──
+        # R7 + R16 : rejete, rejete_corrigé + correction_artiste/titre/source/id
+        try:
+            dcursor = db.cursor(pymysql.cursors.DictCursor)
+            dcursor.execute(
+                "SELECT COLUMN_TYPE FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = 'airvs_manquants' "
+                "AND column_name = 'statut'"
+            )
+            row = dcursor.fetchone()
+            _statut_type = (row.get('COLUMN_TYPE', '') if row else '').lower()
+            if 'rejete_corrig' not in _statut_type:
+                cursor.execute(
+                    "ALTER TABLE airvs_manquants "
+                    "MODIFY COLUMN statut ENUM('en_attente','importe','resolu','rejete','rejete_corrigé') DEFAULT 'en_attente'"
+                )
+                print("[Schema] airvs_manquants.statut : ENUM enrichi avec rejete + rejete_corrigé (migration)")
+            dcursor.close()
+        except Exception as e:
+            msg = f"MODIFY statut ENUM rejete/rejete_corrigé : {type(e).__name__}: {e}"
+            schema_errors.append(msg)
+            print(f"[Schema] {msg}")
+
+        # Ajout colonne motif_rejet (si pas déjà présent)
+        try:
+            dcursor = db.cursor(pymysql.cursors.DictCursor)
+            dcursor.execute(
+                "SELECT COUNT(*) AS c FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = 'airvs_manquants' "
+                "AND column_name = 'motif_rejet'"
+            )
+            if not dcursor.fetchone().get('c', 0):
+                cursor.execute(
+                    "ALTER TABLE airvs_manquants ADD COLUMN motif_rejet VARCHAR(255) DEFAULT NULL AFTER resolu_le"
+                )
+                print("[Schema] airvs_manquants.motif_rejet ajouté (migration)")
+            dcursor.close()
+        except Exception as e:
+            msg = f"ADD motif_rejet : {type(e).__name__}: {e}"
+            schema_errors.append(msg)
+            print(f"[Schema] {msg}")
+
+        # Ajout colonnes correction (R16)
+        for _col, _def in [
+            ('correction_artiste', "VARCHAR(500) DEFAULT NULL AFTER motif_rejet"),
+            ('correction_titre',   "VARCHAR(500) DEFAULT NULL AFTER correction_artiste"),
+            ('correction_source',  "VARCHAR(255) DEFAULT NULL AFTER correction_titre"),
+            ('id_correction',      "INT DEFAULT NULL AFTER correction_source"),
+        ]:
+            try:
+                dcursor = db.cursor(pymysql.cursors.DictCursor)
+                dcursor.execute(
+                    "SELECT COUNT(*) AS c FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() AND table_name = 'airvs_manquants' "
+                    "AND column_name = %s", (_col,)
+                )
+                if not dcursor.fetchone().get('c', 0):
+                    cursor.execute(
+                        f"ALTER TABLE airvs_manquants ADD COLUMN {_col} {_def}"
+                    )
+                    print(f"[Schema] airvs_manquants.{_col} ajouté (migration)")
+                dcursor.close()
+            except Exception as e:
+                msg = f"ADD {_col} : {type(e).__name__}: {e}"
+                schema_errors.append(msg)
+                print(f"[Schema] {msg}")
 
         # ── Phase P1 (grille editoriale) ──
         _safe("CREATE TABLE airvs_grille_editoriale", """

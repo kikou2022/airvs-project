@@ -38,7 +38,7 @@ from blueprints.grille import grille_bp
 from blueprints.shazam import shazam_bp, _assurer_schema_shazam
 from blueprints.programmation import programmation_bp
 from blueprints.taches import taches_bp
-from blueprints.pipeline_import import pipeline_import_bp
+from blueprints.pipeline_import import pipeline_import_bp, _assurer_schema_browse_roots
 
 
 app = Flask(__name__)
@@ -137,31 +137,12 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"  ⚠ Shazam : {e}")
 
-    # Vérification/migration table Manquants
+    # Vérification table Browse Roots (Option B)
     try:
-        db_mq = get_db_connection()
-        if db_mq:
-            cur_mq = db_mq.cursor()
-            _manq_migrations = [
-                ('annee',     "VARCHAR(10) DEFAULT NULL"),
-                ('album',     "VARCHAR(500) DEFAULT NULL"),
-                ('animateur', "VARCHAR(100) DEFAULT NULL"),
-                ('origine',   "VARCHAR(255) DEFAULT NULL"),
-                ('statut',    "ENUM('en_attente','importe','resolu') DEFAULT 'en_attente'"),
-                ('id_import', "INT DEFAULT NULL"),
-                ('resolu_le', "DATETIME DEFAULT NULL"),
-            ]
-            for _col, _def in _manq_migrations:
-                cur_mq.execute(f"SHOW COLUMNS FROM airvs_manquants LIKE '{_col}'")
-                if not cur_mq.fetchone():
-                    cur_mq.execute(f"ALTER TABLE airvs_manquants ADD COLUMN {_col} {_def}")
-                    print(f"  + airvs_manquants : colonne {_col} ajoutée")
-            db_mq.commit()
-            cur_mq.close()
-            db_mq.close()
-            print("  ✓ Table Manquants vérifiée")
+        if _assurer_schema_browse_roots():
+            print("  ✓ Table Browse Roots vérifiée")
     except Exception as e:
-        print(f"  ⚠ Manquants : {e}")
+        print(f"  ⚠ Browse Roots : {e}")
 
     # Nettoyage rétroactif doublons Shazam
     try:

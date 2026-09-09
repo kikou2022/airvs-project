@@ -855,9 +855,17 @@ def api_edit_soumission(sid):
         "UPDATE soumissions SET artiste=?, titre=?, genre=?, source=?, commentaire=?, video_url=?, match_result=? WHERE id=?",
         (artiste, titre, genre, source, commentaire, video_url, match_json, sid)
     )
+    # Re-pending : si la soumission était déjà synced, la remettre en 'pending'
+    # pour que le worker la re-voie au prochain sync (et mette à jour commentaire/genre/video_url)
+    if already_synced:
+        db.execute(
+            "UPDATE soumissions SET statut = 'pending', date_sync = NULL WHERE id = ?",
+            (sid,)
+        )
+        logger.info(f"Soumission #{sid} re-pending (modifiée après sync) par {current_user.username}")
     db.commit()
     logger.info(f"Soumission #{sid} modifiee par {current_user.username}")
-    return jsonify({"status": "ok", "message": "Soumission modifiee"})
+    return jsonify({"status": "ok", "message": "Soumission modifiee", "re_pended": already_synced})
 
 
 @app.route('/api/match', methods=['POST'])
@@ -1198,6 +1206,7 @@ FORMULAIRE_TEMPLATE = '''<!DOCTYPE html>
   input,select,textarea{width:100%;padding:.55rem;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:.85rem}
   input:focus,select:focus,textarea:focus{outline:none;border-color:#38bdf8}
   textarea{height:60px;resize:vertical}
+  textarea#commentaire{height:140px;min-height:80px;resize:vertical;font-size:.88rem;line-height:1.45}
   .match-result{margin:1rem 0;padding:.8rem;border-radius:8px;font-size:.85rem;display:none}
   .match-ok{background:#064e3b;border:1px solid #10b981;color:#6ee7b7}
   .match-ko{background:#1e293b;border:1px solid #334155;color:#94a3b8}
@@ -1255,7 +1264,7 @@ FORMULAIRE_TEMPLATE = '''<!DOCTYPE html>
   <span>Bonjour, {{ user.display_name }} &middot; <a href="/historique">Historique</a>{% if user.is_admin %} &middot; <a href="/admin">Admin</a>{% endif %} &middot; <a href="/logout">D&eacute;connexion</a></span>
 </div>
 <div class="form-box">
-  {% if edit_data %}<div class="edit-banner" id="editBanner" style="display:flex">{% if edit_locked %}<span style="color:#fbbf24;margin-right:.3rem">&#x1f512;</span><span>{{ "Modification restreinte (vid\u00e9o/commentaire) \u2014 #" ~ edit_id ~ " [" ~ edit_data.statut ~ "]" }}</span>{% else %}<span style="color:#38bdf8;margin-right:.3rem">&#x270e;</span><span>{{ "Modification de la soumission #" ~ edit_id ~ " [" ~ edit_data.statut ~ "]" }}</span>{% endif %}</div>{% else %}<div class="edit-banner" id="editBanner"><div class="spinner"></div><span id="editBannerText">Chargement...</span></div>{% endif %}
+  {% if edit_data %}<div class="edit-banner" id="editBanner" style="display:flex">{% if edit_locked %}<span style="color:#fbbf24;margin-right:.3rem">&#x1f512;</span><span>{{ "Modification restreinte (vid\u00e9o/commentaires) \u2014 #" ~ edit_id ~ " [" ~ edit_data.statut ~ "]" }}</span>{% else %}<span style="color:#38bdf8;margin-right:.3rem">&#x270e;</span><span>{{ "Modification de la soumission #" ~ edit_id ~ " [" ~ edit_data.statut ~ "]" }}</span>{% endif %}</div>{% else %}<div class="edit-banner" id="editBanner"><div class="spinner"></div><span id="editBannerText">Chargement...</span></div>{% endif %}
   <div class="mirror-info" id="mirrorInfo">{% if mirror_age is not none %}Base locale : {{ mirror_count if mirror_count is defined else '?' }} titres (mise \u00e0 jour il y a {{ mirror_age }} min){% else %}Base locale non disponible{% endif %}</div>
   <div class="row">
     <div class="field"><label for="artiste">Artiste *</label><input type="text" id="artiste" placeholder="Ex: Daft Punk" required value="{{ edit_data.artiste or "" }}" {{ "disabled" if edit_locked }}></div>
@@ -1269,7 +1278,7 @@ FORMULAIRE_TEMPLATE = '''<!DOCTYPE html>
       <select id="source" {{ "disabled" if edit_locked }}><option{{ " selected" if edit_data and edit_data.source=="Shazam" }}>Shazam</option><option{{ " selected" if edit_data and edit_data.source=="Emission" }}>Emission</option><option{{ " selected" if edit_data and edit_data.source=="Chronique" }}>Chronique</option><option{{ " selected" if edit_data and edit_data.source=="Titre Discoth\u00e8que" }}>Titre Discoth\u00e8que</option><option{{ " selected" if edit_data and edit_data.source=="Recommandation" }}>Recommandation</option><option{{ " selected" if edit_data and edit_data.source=="Autre" }}>Autre</option></select>
     </div>
   </div>
-  <div class="field"><label for="commentaire">Commentaire</label><textarea id="commentaire" placeholder="Optionnel">{{ edit_data.commentaire or "" }}</textarea></div>
+  <div class="field"><label for="commentaire">Commentaires</label><textarea id="commentaire" placeholder="Notes, descriptif podcast, infos &hellip;">{{ edit_data.commentaire or "" }}</textarea></div>
   <div class="field"><label for="videoUrl">Vid\u00e9o (YouTube, Vimeo...)</label><input type="url" id="videoUrl" placeholder="https://www.youtube.com/watch?v=..." value="{{ edit_data.video_url or "" }}" ></div>
   <input type="hidden" id="editMode" value="{{ edit_id or "" }}">
   <div class="video-preview" id="videoPreview" style="display:none"></div>
@@ -1283,7 +1292,7 @@ FORMULAIRE_TEMPLATE = '''<!DOCTYPE html>
     <button class="btn-reset-form" id="btnResetForm" type="button">Réinitialiser</button>
     <div>
     {% if edit_data %}<a href="/" class="btn-cancel-edit" id="btnCancelEdit" style="display:inline-block;text-decoration:none;margin-right:.5rem">Annuler</a>
-    <button class="submit" type="button" id="btnSubmit">{{ "Mettre \u00e0 jour" if not edit_locked else "Enregistrer (vid\u00e9o/commentaire)" }}</button>{% else %}<button class="submit" type="button" id="btnSubmit">Enregistrer</button>{% endif %}
+    <button class="submit" type="button" id="btnSubmit">{{ "Mettre \u00e0 jour" if not edit_locked else "Enregistrer (vid\u00e9o/commentaires)" }}</button>{% else %}<button class="submit" type="button" id="btnSubmit">Enregistrer</button>{% endif %}
     </div>
   </div>
 </div>
@@ -1376,8 +1385,8 @@ async function loadForEdit(id){
     const locked=d.statut&&d.statut!=='pending';
     if(locked){
       $('#artiste').disabled=true;$('#titre').disabled=true;$('#genre').disabled=true;$('#source').disabled=true;
-      if(bannerText)bannerText.textContent='LOCK Modification restreinte (vid\u00e9o/commentaire) \u2014 #'+id+' ['+d.statut+']';
-      $('#btnSubmit').textContent='Enregistrer (vid\u00e9o/commentaire)'
+      if(bannerText)bannerText.textContent='LOCK Modification restreinte (vid\u00e9o/commentaires) \u2014 #'+id+' ['+d.statut+']';
+      $('#btnSubmit').textContent='Enregistrer (vid\u00e9o/commentaires)'
     }else{
       if(bannerText)bannerText.textContent='EDIT Modification de la soumission #'+id+' ['+d.statut+']';
       $('#btnSubmit').textContent='Mettre \u00e0 jour'
@@ -1486,7 +1495,7 @@ HISTORIQUE_TEMPLATE = '''<!DOCTYPE html>
 </div>
 {% if soumissions %}
 <table>
-<thead><tr><th>Date</th><th>Artiste</th><th>Titre</th><th>Genre</th><th>Source</th><th>Video</th><th>Statut</th><th></th></tr></thead>
+<thead><tr><th>Date</th><th>Artiste</th><th>Titre</th><th>Genre</th><th>Source</th><th>Video</th><th>Comm.</th><th>Statut</th><th></th></tr></thead>
 <tbody>
 {% for s in soumissions %}
 <tr id="row-{{ s['id'] }}">
@@ -1496,6 +1505,7 @@ HISTORIQUE_TEMPLATE = '''<!DOCTYPE html>
   <td>{{ s['genre'] or '-' }}</td>
   <td>{{ s['source'] }}</td>
   <td>{% if s['video_url'] %}<a class="vid-link" href="{{ s['video_url'] }}" target="_blank" rel="noopener" title="{{ s['video_url'] }}">&#x25b6;</a>{% else %}-{% endif %}</td>
+  <td>{% if s['commentaire'] %}<span title="{{ s['commentaire'][:120] }}" style="color:#38bdf8;cursor:help">&#x1f4ac;</span>{% else %}-{% endif %}</td>
   <td><span class="badge badge-{{ s['statut'] }}">{{ s['statut'] }}</span></td>
   <td><button class="btn-edit" onclick="editSoumission({{ s['id'] }})" title="Modifier">&#x270e;</button> <button class="btn-del" onclick="delSoumission({{ s['id'] }}, this)" title="Supprimer">&times;</button></td>
 </tr>

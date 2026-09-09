@@ -64,6 +64,58 @@ def _assurer_schema_shazam():
                 _logger.info("Migration : colonne animateur ajoutée à airvs_shazam")
         except Exception as e:
             _logger.debug(f"Migration animateur (ignorée si déjà faite) : {e}")
+
+        # ── R1 : Migration statut + match_song_id + match_passe sur airvs_shazam ──
+        try:
+            cursor.execute("SHOW COLUMNS FROM airvs_shazam LIKE 'statut'")
+            if not cursor.fetchone():
+                cursor.execute(
+                    "ALTER TABLE airvs_shazam "
+                    "ADD COLUMN statut ENUM('nouveau','matche','pousse_azura','rejete') DEFAULT 'nouveau' "
+                    "AFTER animateur, "
+                    "ADD COLUMN match_song_id INT DEFAULT NULL AFTER statut, "
+                    "ADD COLUMN match_passe VARCHAR(50) DEFAULT NULL AFTER match_song_id, "
+                    "ADD INDEX idx_statut (statut)"
+                )
+                db.commit()
+                _logger.info("Migration : colonnes statut/match_song_id/match_passe ajoutées à airvs_shazam")
+        except Exception as e:
+            _logger.debug(f"Migration statut shazam (ignorée si déjà faite) : {e}")
+
+        # ── R2 : Migration statut + match_song_id/match_passe sur airvs_animateurs ──
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = 'airvs_animateurs'"
+            )
+            if cursor.fetchone()[0]:
+                # Ajouter match_song_id si absent (créé par le worker VPS ou migration)
+                try:
+                    cursor.execute("SHOW COLUMNS FROM airvs_animateurs LIKE 'match_song_id'")
+                    if not cursor.fetchone():
+                        cursor.execute(
+                            "ALTER TABLE airvs_animateurs "
+                            "ADD COLUMN match_song_id INT DEFAULT NULL, "
+                            "ADD COLUMN match_passe VARCHAR(50) DEFAULT NULL"
+                        )
+                        db.commit()
+                        _logger.info("Migration : colonnes match_song_id/match_passe ajoutées à airvs_animateurs")
+                except Exception as e:
+                    _logger.debug(f"Migration match_song_id animateurs (ignorée) : {e}")
+
+                # Ajouter statut si absent
+                cursor.execute("SHOW COLUMNS FROM airvs_animateurs LIKE 'statut'")
+                if not cursor.fetchone():
+                    cursor.execute(
+                        "ALTER TABLE airvs_animateurs "
+                        "ADD COLUMN statut ENUM('nouveau','matche','pousse_azura','rejete') DEFAULT 'nouveau', "
+                        "ADD INDEX idx_statut (statut)"
+                    )
+                    db.commit()
+                    _logger.info("Migration : colonne statut ajoutée à airvs_animateurs")
+        except Exception as e:
+            _logger.debug(f"Migration statut animateurs (ignorée si déjà faite) : {e}")
+
         db.commit()
         cursor.close()
         db.close()
@@ -92,26 +144,29 @@ def _persister_manquants_shazam(not_found, source_type):
         cur_m = db_m.cursor()
         nb = 0
         for item in not_found:
-            # Normaliser : strip + NFC pour garantir la cohérence
-            # avec l'UNIQUE INDEX uq_art_titre_src (artiste(255), titre(255), source)
-            art = unicodedata.normalize('NFC', str(item.get('artist') or '').strip())[:500]
-            tit = unicodedata.normalize('NFC', str(item.get('title') or '').strip())[:500]
+            art = str(item.get('artist') or '')[:500]
+            tit = str(item.get('title') or '')[:500]
             if not art and not tit:
                 continue
             anim = str(item.get('animateur') or '').strip() or None
             orig = str(item.get('source') or '').strip() or None
+
+            # ── R14 : Dédup cross-source — vérifier si déjà rejeté dans UNE QUELCONQUE source ──
             try:
-                # Vérification explicite avant INSERT (belt & suspenders)
-                # Dédupe sur (artiste, titre) uniquement — la source ne doit pas créer de doublon
                 cur_m.execute(
-                    "SELECT 1 FROM airvs_manquants "
-                    "WHERE artiste = %s AND titre = %s LIMIT 1",
+                    "SELECT id FROM airvs_manquants "
+                    "WHERE LOWER(artiste) = LOWER(%s) AND LOWER(titre) = LOWER(%s) "
+                    "AND statut IN ('rejete','rejete_corrigé') LIMIT 1",
                     (art, tit)
                 )
                 if cur_m.fetchone():
-                    continue  # déjà présent, on saute
+                    continue  # Déjà rejeté, ne pas re-persister
+            except Exception:
+                pass  # Ne pas bloquer si la requête échoue
+
+            try:
                 cur_m.execute(
-                    "INSERT INTO airvs_manquants "
+                    "INSERT IGNORE INTO airvs_manquants "
                     "(artiste, titre, source, animateur, origine) "
                     "VALUES (%s, %s, %s, %s, %s)",
                     (art, tit, source_type, anim, orig)
@@ -515,17 +570,32 @@ def api_shazam_log():
 @shazam_bp.route('/api/shazam/list')
 @login_requis
 def api_shazam_list():
-    """Renvoie les N dernières reconnaissances Shazam."""
+    """Renvoie les N dernières reconnaissances Shazam (avec statut si disponible)."""
     limite = min(max(int(request.args.get('limit', '50')), 1), 500)
 
     try:
         db = get_db_connection()
         cursor = db.cursor(pymysql.cursors.DictCursor)
-        cursor.execute(
-            "SELECT id, artiste, titre, date_reconnaissance, source, animateur "
-            "FROM airvs_shazam ORDER BY date_reconnaissance DESC LIMIT %s",
-            (limite,)
-        )
+        # R1 : Inclure statut, match_song_id, match_passe si les colonnes existent
+        try:
+            cursor.execute("SHOW COLUMNS FROM airvs_shazam LIKE 'statut'")
+            _has_statut = bool(cursor.fetchone())
+        except Exception:
+            _has_statut = False
+
+        if _has_statut:
+            cursor.execute(
+                "SELECT id, artiste, titre, date_reconnaissance, source, animateur, "
+                "statut, match_song_id, match_passe "
+                "FROM airvs_shazam ORDER BY date_reconnaissance DESC LIMIT %s",
+                (limite,)
+            )
+        else:
+            cursor.execute(
+                "SELECT id, artiste, titre, date_reconnaissance, source, animateur "
+                "FROM airvs_shazam ORDER BY date_reconnaissance DESC LIMIT %s",
+                (limite,)
+            )
         rows = cursor.fetchall()
         cursor.close()
         db.close()
@@ -636,10 +706,25 @@ def api_animateurs_list():
             db.close()
             return jsonify([])
 
-        query = ("SELECT id, vps_id, artiste, titre, genre, source, commentaire, "
-                 "video_url, animateur, match_song_id, match_passe, statut_vps, "
-                 "date_soumission, date_sync "
-                 "FROM airvs_animateurs")
+        # Construire le SELECT dynamiquement en fonction des colonnes existantes
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = 'airvs_animateurs'"
+        )
+        _existing_cols = {r['column_name'] for r in cursor.fetchall()}
+
+        _required_cols = ['id', 'vps_id', 'artiste', 'titre', 'genre', 'source',
+                          'commentaire', 'video_url', 'animateur', 'statut_vps',
+                          'date_soumission', 'date_sync']
+        _optional_cols = ['match_song_id', 'match_passe', 'statut']
+        _select_cols = [c for c in _required_cols if c in _existing_cols]
+        _select_cols += [c for c in _optional_cols if c in _existing_cols]
+        if not _select_cols:
+            cursor.close()
+            db.close()
+            return jsonify([])
+
+        query = "SELECT " + ", ".join(_select_cols) + " FROM airvs_animateurs"
         params = ()
 
         if animateur_filter:
@@ -939,6 +1024,7 @@ def api_shazam_prefill():
         # Construction dynamique de la requête selon le mode
         # Phase 2 : mode=web lit airvs_animateurs (soumissions VPS),
         # les autres modes continuent de lire airvs_shazam (reconnaissances MacroDroid).
+        _src_table = 'airvs_animateurs' if mode == 'web' else 'airvs_shazam'
         if mode == 'web':
             base_query = ("SELECT id, artiste, titre, "
                           "date_soumission AS date_reconnaissance, "
@@ -953,6 +1039,29 @@ def api_shazam_prefill():
                 base_query += " WHERE source NOT IN ('Shazam', 'Recommandation', 'Saisie manuelle', 'Autre', 'formulaire_programmeur') AND (source NOT LIKE '%%externe%%' OR source IS NULL)"
             elif mode == 'shazam_ext':
                 base_query += " WHERE source LIKE '%%externe%%'"
+
+        # ── R5 : Filtre statut — n'inclure que les entrées "nouveau" par défaut ──
+        # Le paramètre ?statut= permet de re-matcher (ex: statut=nouveau,matche)
+        statut_filter = (request.args.get('statut') or 'nouveau').strip()
+        if statut_filter != 'tous':
+            _statuts_valides = [s.strip() for s in statut_filter.split(',') if s.strip()]
+            if _statuts_valides:
+                # Vérifier si la table a la colonne statut (migration R1/R2)
+                _has_statut = True
+                try:
+                    chk_s = db.cursor()
+                    chk_s.execute("SHOW COLUMNS FROM %s LIKE 'statut'" % _src_table)
+                    _has_statut = bool(chk_s.fetchone())
+                    chk_s.close()
+                except Exception:
+                    _has_statut = False
+                if _has_statut:
+                    _statut_clause = ",".join(["%s"] * len(_statuts_valides))
+                    if 'WHERE' in base_query:
+                        base_query += f" AND statut IN ({_statut_clause})"
+                    else:
+                        base_query += f" WHERE statut IN ({_statut_clause})"
+                    params = params + tuple(_statuts_valides)
 
         # Filtre optionnel par animateur
         if animateur_filter:
@@ -976,6 +1085,7 @@ def api_shazam_prefill():
         # 2) Matcher contre songs (algorithme 5 passes)
         found = []
         not_found = []
+        matched_ids = []  # R3 : IDs à mettre à jour après matching
 
         for idx, sr in enumerate(shazam_rows):
             # ── Vérification d'annulation toutes les ~10 itérations ──
@@ -1014,6 +1124,22 @@ def api_shazam_prefill():
             art = str(sr['artiste'] or '').strip()
             tit = str(sr['titre'] or '').strip()
 
+            # ── R9 : Vérifier si ce couple est déjà rejeté dans airvs_manquants ──
+            try:
+                chk_r = db.cursor()
+                chk_r.execute(
+                    "SELECT id FROM airvs_manquants "
+                    "WHERE LOWER(artiste) = LOWER(%s) AND LOWER(titre) = LOWER(%s) "
+                    "AND statut IN ('rejete','rejete_corrigé') LIMIT 1",
+                    (art, tit)
+                )
+                if chk_r.fetchone():
+                    chk_r.close()
+                    continue  # Déjà rejeté, skip
+                chk_r.close()
+            except Exception:
+                pass  # Ne pas bloquer si la requête échoue
+
             cursor2 = db.cursor(pymysql.cursors.DictCursor)
             match, methode = _match_shazam_songs(cursor2, art, tit)
             cursor2.close()
@@ -1028,6 +1154,8 @@ def api_shazam_prefill():
                 match['_original_artiste'] = sr['artiste']
                 match['_original_titre'] = sr['titre']
                 found.append(match)
+                # R3 : mémoriser pour persister après la boucle
+                matched_ids.append((sr['id'], match['ID'], methode))
             else:
                 not_found.append({
                     'artist': sr['artiste'],
@@ -1039,6 +1167,23 @@ def api_shazam_prefill():
                 })
 
         cursor.close()
+
+        # ── R3 : Persister les matchs sur la table source ──
+        _nb_persisted = 0
+        if matched_ids:
+            try:
+                cur_up = db.cursor()
+                for _sid, _song_id, _methode in matched_ids:
+                    cur_up.execute(
+                        "UPDATE %s SET statut = 'matche', match_song_id = %%s, match_passe = %%s WHERE id = %%s" % _src_table,
+                        (_song_id, _methode, _sid)
+                    )
+                    _nb_persisted += cur_up.rowcount
+                db.commit()
+                cur_up.close()
+            except Exception as e:
+                _logger.debug(f"R3 : persister matchs ignoré (colonne statut absente ?) : {e}")
+
         db.close()
 
         # Persister les manquants (non bloquant)
@@ -1054,6 +1199,8 @@ def api_shazam_prefill():
             result['sync_logs'] = sync_logs
         if _nb_manq:
             result['manquants_persistes'] = _nb_manq
+        if _nb_persisted:
+            result['matchs_persistes'] = _nb_persisted
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1141,7 +1288,9 @@ def api_shazam_pipeline_trigger():
         # Filtrage par mode (si fourni dans le POST body)
         pipeline_mode = (request.get_json(silent=True) or {}).get('mode', '')
         pipeline_animateur = (request.get_json(silent=True) or {}).get('animateur', '')
+        pipeline_statut = (request.get_json(silent=True) or {}).get('statut', 'nouveau')
         # Phase 2 : mode=web lit airvs_animateurs (soumissions VPS)
+        _pipe_src_table = 'airvs_animateurs' if pipeline_mode == 'web' else 'airvs_shazam'
         if pipeline_mode == 'web':
             base_query = ("SELECT id, artiste, titre, "
                           "date_soumission AS date_reconnaissance, "
@@ -1157,6 +1306,26 @@ def api_shazam_pipeline_trigger():
             base_query += " WHERE source = 'shazam_studio' OR source IS NULL"
         elif pipeline_mode == 'shazam_ext':
             base_query += " WHERE source LIKE '%%externe%%'"
+
+        # ── R5 : Filtre statut dans pipeline ──
+        if pipeline_statut and pipeline_statut != 'tous':
+            _statuts_p = [s.strip() for s in pipeline_statut.split(',') if s.strip()]
+            if _statuts_p:
+                _has_statut_p = True
+                try:
+                    chk_sp = db.cursor()
+                    chk_sp.execute("SHOW COLUMNS FROM %s LIKE 'statut'" % _pipe_src_table)
+                    _has_statut_p = bool(chk_sp.fetchone())
+                    chk_sp.close()
+                except Exception:
+                    _has_statut_p = False
+                if _has_statut_p:
+                    _sc = ",".join(["%s"] * len(_statuts_p))
+                    if 'WHERE' in base_query:
+                        base_query += f" AND statut IN ({_sc})"
+                    else:
+                        base_query += f" WHERE statut IN ({_sc})"
+                    params = params + tuple(_statuts_p)
 
         if pipeline_animateur:
             if 'WHERE' in base_query:
@@ -1186,6 +1355,7 @@ def api_shazam_pipeline_trigger():
         logs.append('[2/3] Matching contre la base RadioDJ...')
         found = []
         not_found = []
+        matched_ids = []  # R3 : IDs à mettre à jour après matching
 
         for idx, sr in enumerate(shazam_rows):
             # ── Vérification d'annulation toutes les ~10 itérations ──
@@ -1224,6 +1394,22 @@ def api_shazam_pipeline_trigger():
             art = str(sr['artiste'] or '').strip()
             tit = str(sr['titre'] or '').strip()
 
+            # ── R9 : Vérifier si ce couple est déjà rejeté dans airvs_manquants ──
+            try:
+                chk_r = db.cursor()
+                chk_r.execute(
+                    "SELECT id FROM airvs_manquants "
+                    "WHERE LOWER(artiste) = LOWER(%s) AND LOWER(titre) = LOWER(%s) "
+                    "AND statut IN ('rejete','rejete_corrigé') LIMIT 1",
+                    (art, tit)
+                )
+                if chk_r.fetchone():
+                    chk_r.close()
+                    continue  # Déjà rejeté, skip
+                chk_r.close()
+            except Exception:
+                pass
+
             cursor2 = db.cursor(pymysql.cursors.DictCursor)
             match, methode = _match_shazam_songs(cursor2, art, tit)
             cursor2.close()
@@ -1238,6 +1424,8 @@ def api_shazam_pipeline_trigger():
                 match['_original_artiste'] = sr['artiste']
                 match['_original_titre'] = sr['titre']
                 found.append(match)
+                # R3 : mémoriser pour persister après la boucle
+                matched_ids.append((sr['id'], match['ID'], methode))
             else:
                 not_found.append({
                     'artist': sr['artiste'],
@@ -1249,6 +1437,26 @@ def api_shazam_pipeline_trigger():
                 })
 
         cursor.close()
+
+        # ── R3 : Persister les matchs sur la table source ──
+        _nb_persisted_pipe = 0
+        if matched_ids:
+            try:
+                cur_up = db.cursor()
+                for _sid, _song_id, _methode in matched_ids:
+                    cur_up.execute(
+                        "UPDATE %s SET statut = 'matche', match_song_id = %%s, match_passe = %%s WHERE id = %%s" % _pipe_src_table,
+                        (_song_id, _methode, _sid)
+                    )
+                    _nb_persisted_pipe += cur_up.rowcount
+                db.commit()
+                cur_up.close()
+            except Exception as e:
+                _logger.debug(f"R3 pipeline : persister matchs ignoré : {e}")
+
+        if _nb_persisted_pipe:
+            logs.append(f'  → {_nb_persisted_pipe} match(s) persisté(s) sur {_pipe_src_table}')
+
         db.close()
 
         logs.append(f'  → {len(found)} matché(s) · {len(not_found)} absent(s)')

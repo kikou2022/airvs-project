@@ -1605,10 +1605,7 @@
                                         <select class="form-select form-select-sm" id="action_dossier_cible">
                                             <option value="">-- Charger les dossiers --</option>
                                         </select>
-                                        <div class="form-text small d-flex align-items-center gap-2">
-                                            <span id="action_folders_hint"></span>
-                                            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" id="btn_refresh_action_folders" title="Rafraîchir les dossiers depuis AzuraCast">↻ Rafraîchir</button>
-                                        </div>
+                                        <div class="form-text small" id="action_folders_hint"></div>
                                     </div>
                                     <div class="col-md-3" id="action_new_folder_col" style="display:none">
                                         <label class="form-label small fw-bold">Nouveau dossier :</label>
@@ -2550,17 +2547,19 @@
                                         <div class="border rounded" style="max-height: 220px; overflow-y: auto;" id="shazam_list_wrapper">
                                             <table class="table table-sm table-hover mb-0">
                                                 <thead class="table-light sticky-top">
-                                                    <tr>
-                                                        <th width="8%" class="text-center">Provenance</th>
-                                                        <th width="10%" class="text-center">Animateur</th>
-                                                        <th>Artiste</th>
-                                                        <th>Titre</th>
-                                                        <th width="13%">Date recon.</th>
-                                                        <th width="7%" class="text-center">Match</th>
-                                                    </tr>
-                                                </thead>
+    <tr>
+        <th width="8%" class="text-center">Provenance</th>
+        <th width="8%" class="text-center">Animateur</th>
+        <th>Artiste</th>
+        <th>Titre</th>
+        <th width="11%">Date recon.</th>
+        <th width="5%" class="text-center">Match</th>
+        <th width="6%" class="text-center">Statut</th>
+        <th width="7%" class="text-center">Actions</th>
+    </tr>
+</thead>
                                                 <tbody id="shazam_list_body">
-                                                    <tr><td colspan="6" class="text-center text-muted p-2 small">
+                                                    <tr><td colspan="8" class="text-center text-muted p-2 small">
                                                         Cliquez sur « ↻ » (base locale) ou « ⬇ VPS » (nouveautés distantes) pour charger les données.
                                                     </td></tr>
                                                 </tbody>
@@ -2640,19 +2639,24 @@
                                         <div class="border rounded" style="max-height: 220px; overflow-y: auto;" id="animateurs_list_wrapper">
                                             <table class="table table-sm table-hover mb-0">
                                                 <thead class="table-light sticky-top">
-                                                    <tr>
-                                                        <th width="10%" class="text-center">Animateur</th>
-                                                        <th width="10%" class="text-center">Source</th>
-                                                        <th>Artiste</th>
-                                                        <th>Titre</th>
-                                                        <th width="13%">Date</th>
-                                                        <th width="7%" class="text-center">Match</th>
-                                                        <th width="5%" class="text-center">Video</th>
-                                                        <th width="5%" class="text-center"></th>
-                                                    </tr>
-                                                </thead>
+    <tr>
+        <th width="8%" class="text-center">Animateur</th>
+        <th width="8%" class="text-center">Source</th>
+        <th>Artiste</th>
+        <th>Titre</th>
+        <th width="6%" class="text-center">Genre</th>
+        <th width="10%">Commentaire</th>
+        <th width="11%">Date</th>
+        <th width="5%" class="text-center">Match</th>
+        <th width="6%" class="text-center">Statut</th>
+        <th width="7%" class="text-center">Actions</th>
+        <th width="4%" class="text-center">Video</th>
+        <th width="4%" class="text-center">✎</th>
+    </tr>
+</thead>
+
                                                 <tbody id="animateurs_list_body">
-                                                    <tr><td colspan="8" class="text-center text-muted p-2 small">
+                                                    <tr><td colspan="12" class="text-center text-muted p-2 small">
                                                         Cliquez sur « ↻ » (base locale) ou « ⬇ VPS » (nouveautés distantes) pour charger les données.
                                                     </td></tr>
                                                 </tbody>
@@ -2890,12 +2894,9 @@
                                 <select class="form-select form-select-sm" id="push_dossier_cible">
                                     <option value="">-- Charger les dossiers --</option>
                                 </select>
-                                <div class="d-flex align-items-center gap-2">
-                                    <div id="push_new_folder_row" style="display:none" class="mt-1 flex-grow-1">
-                                        <input type="text" class="form-control form-control-sm"
-                                               id="push_new_folder_name" placeholder="ex: NOUVELLES_ENTREES/mon_dossier">
-                                    </div>
-                                    <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1 mt-1" id="btn_refresh_push_folders" title="Rafraîchir les dossiers depuis AzuraCast">↻ Rafraîchir</button>
+                                <div id="push_new_folder_row" style="display:none" class="mt-1">
+                                    <input type="text" class="form-control form-control-sm"
+                                           id="push_new_folder_name" placeholder="ex: NOUVELLES_ENTREES/mon_dossier">
                                 </div>
                             </div>
                             <div class="col-md-3">
@@ -6512,8 +6513,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     var dateStr = r.date_creation ? r.date_creation.substring(0, 16) : '';
                     var actions = '';
                     if (r.statut === 'en_attente') {
-                        actions = '<button class="btn btn-sm btn-outline-info me-1" onclick="_searchManquantRadioDJ(' + r.id + ', this)" title="Chercher dans RadioDJ">🔍</button>';
-                        actions += '<button class="btn btn-sm btn-outline-success me-1" onclick="_resolveManquant(' + r.id + ')" title="Marquer résolu (faux positif)">✓</button>';
+                        actions = '<button class="btn btn-sm btn-outline-success me-1" onclick="_resolveManquant(' + r.id + ')" title="Marquer résolu (faux positif)">✓</button>';
                         actions += '<button class="btn btn-sm btn-outline-danger" onclick="_deleteManquant(' + r.id + ')" title="Supprimer">✕</button>';
                     }
                     html += '<tr>' +
@@ -6578,80 +6578,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    /** Recherche un manquant dans RadioDJ via le moteur de matching 5 passes.
-     *  Si trouvé, met à jour la ligne en place (statut → Importé, boutons désactivés)
-     *  et ajoute le titre au push buffer correspondant. */
-    function _searchManquantRadioDJ(id, btnEl) {
-        // Désactiver le bouton pendant la recherche
-        if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳'; }
-
-        fetch('/api/manquants/search-radiodj', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({id: id})
-        }).then(function(r) {
-            if (!r.ok) throw new Error(r.status);
-            return r.json();
-        }).then(function(data) {
-            if (data.found) {
-                var song = data.song;
-                showToast('Trouvé : ' + song.artist + ' — ' + song.title + ' (ID ' + song.ID + ') [' + data.methode + ']', 'success');
-                // Mettre à jour la ligne en place : badge + boutons
-                var row = btnEl ? btnEl.closest('tr') : null;
-                if (row) {
-                    // Mettre à jour le badge de statut
-                    var badge = row.querySelector('.badge');
-                    if (badge) {
-                        badge.className = 'badge bg-success';
-                        badge.style.fontSize = '0.7em';
-                        badge.textContent = 'Importé';
-                    }
-                    // Désactiver les boutons de la ligne
-                    var btns = row.querySelectorAll('button');
-                    btns.forEach(function(b) { b.disabled = true; b.classList.add('opacity-50'); });
-                }
-                // Ajouter au push buffer correspondant (source → buffer key)
-                var sourceToBuffer = {prefill_sheets: 'sheets', shazam: 'shazam', animateurs: 'animateurs'};
-                if (window.pushBuffers) {
-                    // Chercher la source de ce manquant dans la ligne
-                    var row2 = btnEl ? btnEl.closest('tr') : null;
-                    if (row2) {
-                        var smalls = row2.querySelectorAll('small');
-                        var sourceLabel = '';
-                        smalls.forEach(function(s) {
-                            var txt = s.textContent.trim();
-                            if (txt.indexOf('Sheets') >= 0) sourceLabel = 'prefill_sheets';
-                            if (txt.indexOf('Shazam') >= 0) sourceLabel = 'shazam';
-                            if (txt.indexOf('Animateurs') >= 0) sourceLabel = 'animateurs';
-                        });
-                        var bufferKey = sourceToBuffer[sourceLabel];
-                        if (bufferKey && window.pushBuffers[bufferKey]) {
-                            window.pushBuffers[bufferKey].selectedFiles.push({
-                                ID: song.ID,
-                                artist: song.artist,
-                                title: song.title,
-                                path: song.path,
-                                album: song.album || '',
-                                year: song.year || '',
-                                duration: song.duration || 0,
-                                inAzura: false
-                            });
-                            showToast('Ajouté au buffer ' + bufferKey + ' (' + window.pushBuffers[bufferKey].selectedFiles.length + ' titres)', 'success');
-                        }
-                    }
-                }
-                // Rafraîchir les compteurs
-                _fetchManquantsStats();
-            } else {
-                showToast('Non trouvé dans RadioDJ' + (data.methode ? ' (' + data.methode + ')' : ''), 'warning');
-                if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔍'; }
-            }
-        }).catch(function(err) {
-            showToast('Erreur recherche RadioDJ : ' + err.message, 'danger');
-            if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔍'; }
-        });
-    }
-
     // Badge polling (every 60s)
     _fetchManquantsStats();
     setInterval(_fetchManquantsStats, 60000);
@@ -6663,7 +6589,6 @@ document.addEventListener('DOMContentLoaded', function() {
     window._loadManquants = _loadManquants;
     window._mqPage = _mqPage;
     window._fetchManquantsStats = _fetchManquantsStats;
-    window._searchManquantRadioDJ = _searchManquantRadioDJ;
 
     // Load manquants when tab is shown
     (function() {
@@ -6808,11 +6733,14 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                     var rows = '';
                     data.dirs.forEach(function(d) {
-                        var icon = d.has_subdirs ? '📂' : '📁';
+                        var icon = d.unmounted ? '🔌' : (d.has_subdirs ? '📂' : '📁');
                         var count = (d.subdir_count !== undefined && d.subdir_count > 0) ? d.subdir_count : '—';
                         var mtime = d.mtime || '—';
+                        var label = d.label ? ' <span class="badge bg-secondary" style="font-size:0.55rem;">' + d.label + '</span>' : '';
+                        var errTag = d.error ? ' <span class="badge bg-warning text-dark" style="font-size:0.55rem;">⚠ timeout</span>' : '';
+                        var unmountedTag = d.unmounted ? ' <span class="badge bg-danger" style="font-size:0.55rem;">non monté</span>' : '';
                         rows += '<tr class="browse-dir-row" style="cursor:pointer;" data-path="' + d.path.replace(/"/g, '&quot;') + '">'
-                            + '<td><span class="me-2">' + icon + '</span>' + d.name + '</td>'
+                            + '<td><span class="me-2">' + icon + '</span>' + d.name + label + unmountedTag + errTag + '</td>'
                             + '<td class="text-center text-muted">' + count + '</td>'
                             + '<td class="text-muted">' + mtime + '</td>'
                             + '</tr>';
@@ -6851,6 +6779,118 @@ document.addEventListener('DOMContentLoaded', function() {
                 getModal().hide();
             }
         });
+
+        // ════════════════════════════════════════════════════════
+        // PANEL GESTION DES RACINES (Option B)
+        // ════════════════════════════════════════════════════════
+        var browseSettingsBtn = document.getElementById('browse_settings_btn');
+        var browseSettingsPanel = document.getElementById('browse_settings_panel');
+        var browseRootsList = document.getElementById('browse_roots_list');
+
+        if (browseSettingsBtn && browseSettingsPanel) {
+            browseSettingsBtn.addEventListener('click', function() {
+                var isVisible = browseSettingsPanel.style.display !== 'none';
+                browseSettingsPanel.style.display = isVisible ? 'none' : 'block';
+                if (!isVisible) _loadBrowseRootsUI();
+            });
+        }
+
+        function _loadBrowseRootsUI() {
+            if (!browseRootsList) return;
+            browseRootsList.innerHTML = '<div class="text-center p-2"><span class="spinner-border spinner-border-sm"></span></div>';
+            fetch('/api/browse/roots')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (!data.roots || data.roots.length === 0) {
+                        browseRootsList.innerHTML = '<div class="text-muted text-center p-2">Aucune racine configurée</div>';
+                        return;
+                    }
+                    var html = '';
+                    data.roots.forEach(function(r) {
+                        var activeBadge = r.actif ? '<span class="badge bg-success" style="font-size:0.55rem;">actif</span>' : '<span class="badge bg-secondary" style="font-size:0.55rem;">inactif</span>';
+                        var mountBadge = r.mounted ? '<span class="badge bg-info" style="font-size:0.55rem;">monté</span>' : '<span class="badge bg-danger" style="font-size:0.55rem;">non monté</span>';
+                        html += '<div class="d-flex align-items-center gap-1 py-1 border-bottom small" data-root-id="' + r.id + '">'
+                            + '<span class="flex-grow-1">' + r.root + ' <span class="text-muted">(' + (r.label || '') + ')</span> ' + activeBadge + ' ' + mountBadge + '</span>'
+                            + '<button class="btn btn-outline-secondary btn-sm py-0 px-1" onclick="_toggleBrowseRoot(' + r.id + ',' + (r.actif ? 0 : 1) + ')" title="' + (r.actif ? 'Désactiver' : 'Activer') + '">' + (r.actif ? '⏸' : '▶') + '</button>'
+                            + '<button class="btn btn-outline-danger btn-sm py-0 px-1" onclick="_deleteBrowseRoot(' + r.id + ')" title="Supprimer">✕</button>'
+                            + '</div>';
+                    });
+                    browseRootsList.innerHTML = html;
+                })
+                .catch(function(err) {
+                    browseRootsList.innerHTML = '<div class="text-danger text-center p-2">Erreur : ' + err.message + '</div>';
+                });
+        }
+
+        window._toggleBrowseRoot = function(id, actif) {
+            fetch('/api/browse/roots/' + id, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({actif: actif})
+            }).then(function(r) { return r.json(); })
+              .then(function() { _loadBrowseRootsUI(); browseTo(''); })
+              .catch(function(err) { alert('Erreur : ' + err.message); });
+        };
+
+        window._deleteBrowseRoot = function(id) {
+            if (!confirm('Supprimer cette racine ?')) return;
+            fetch('/api/browse/roots/' + id, { method: 'DELETE' })
+                .then(function(r) { return r.json(); })
+                .then(function() { _loadBrowseRootsUI(); browseTo(''); })
+                .catch(function(err) { alert('Erreur : ' + err.message); });
+        };
+
+        window._addBrowseRoot = function() {
+            var input = document.getElementById('browse_new_root');
+            var labelInput = document.getElementById('browse_new_label');
+            var root = (input && input.value.trim()) || '';
+            var label = (labelInput && labelInput.value.trim()) || '';
+            if (!root) { alert('Chemin racine obligatoire'); return; }
+            fetch('/api/browse/roots', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({root: root, label: label})
+            }).then(function(r) {
+                if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Erreur'); });
+                return r.json();
+            }).then(function() {
+                if (input) input.value = '';
+                if (labelInput) labelInput.value = '';
+                _loadBrowseRootsUI();
+                browseTo('');
+            }).catch(function(err) { alert('Erreur : ' + err.message); });
+        };
+
+        window._detectBrowseDrives = function() {
+            var btn = document.getElementById('browse_detect_btn');
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Détection...'; }
+            fetch('/api/browse/roots/detect', { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (btn) { btn.disabled = false; btn.textContent = '🔍 Détecter'; }
+                    if (!data.detected || data.detected.length === 0) {
+                        alert('Aucun nouveau lecteur/répertoire détecté.');
+                        return;
+                    }
+                    var promises = data.detected.map(function(d) {
+                        return fetch('/api/browse/roots', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({root: d.root, label: d.label})
+                        }).then(function(r) { return r.json(); })
+                          .catch(function() {});
+                    });
+                    Promise.all(promises).then(function() {
+                        _loadBrowseRootsUI();
+                        browseTo('');
+                        alert(data.detected.length + ' lecteur(s) ajouté(s) !');
+                    });
+                })
+                .catch(function(err) {
+                    if (btn) { btn.disabled = false; btn.textContent = '🔍 Détecter'; }
+                    alert('Erreur détection : ' + err.message);
+                });
+        };
     })();
 
         // (ONGLET AUDIENCE — stats agrégées → module stats-audience.js)
@@ -6865,9 +6905,23 @@ document.addEventListener('DOMContentLoaded', function() {
     <div class="modal-content">
       <div class="modal-header py-2">
         <h6 class="modal-title">📁 Sélectionner un dossier source</h6>
+        <button type="button" class="btn btn-outline-secondary btn-sm me-2" id="browse_settings_btn" title="Gérer les racines/lecteurs">⚙ Racines</button>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body p-0">
+        <!-- Panel gestion racines (caché par défaut) -->
+        <div id="browse_settings_panel" style="display:none;" class="p-2 border-bottom bg-light">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <span class="fw-bold small">Gestion des racines / lecteurs</span>
+            <button type="button" class="btn btn-outline-primary btn-sm ms-auto" id="browse_detect_btn" onclick="_detectBrowseDrives()">🔍 Détecter</button>
+          </div>
+          <div id="browse_roots_list" style="max-height:20vh;overflow-y:auto;" class="mb-2"></div>
+          <div class="d-flex gap-1">
+            <input type="text" id="browse_new_root" class="form-control form-control-sm" placeholder="Chemin (ex: T:/ ou /mnt/stockage_1to)" style="width:50%;">
+            <input type="text" id="browse_new_label" class="form-control form-control-sm" placeholder="Label (ex: Stockage 1To)" style="width:30%;">
+            <button type="button" class="btn btn-success btn-sm" onclick="_addBrowseRoot()">＋ Ajouter</button>
+          </div>
+        </div>
         <!-- Barre de navigation -->
         <div class="d-flex align-items-center gap-1 p-2 border-bottom bg-light small">
           <button type="button" class="btn btn-outline-secondary btn-sm" id="browse_up" title="Dossier parent" disabled>⬆</button>

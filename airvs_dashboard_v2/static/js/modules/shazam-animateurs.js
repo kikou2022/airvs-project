@@ -19,6 +19,78 @@
     // via window._onShazamMatchResult / window._onAnimateursMatchResult
     // On l'appelle directement — pas de wrapper intermédiaire.
 
+
+
+// ── Helper Genre badge ──
+function getGenreBadge(genre) {
+    var g = (genre || '').trim();
+    if (!g) return '<span class="text-muted" style="font-size:0.7rem">—</span>';
+    // Couleurs par genre
+    var colors = {
+        'chanson': '#3b82f6', 'pop': '#ec4899', 'rock': '#f59e0b',
+        'jazz': '#8b5cf6', 'classique': '#6366f1', 'electro': '#10b981',
+        'rap': '#ef4444', 'r&b': '#f97316', 'reggae': '#14b8a6',
+        'soul': '#a855f7', 'funk': '#eab308', 'country': '#84cc16',
+        'blues': '#06b6d4', 'metal': '#dc2626', 'world': '#0d9488'
+    };
+    var gl = g.toLowerCase();
+    var c = colors[gl] || '#6b7280';
+    return '<span class="badge" style="background:' + c + ';color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;">' + escapeHtml(g) + '</span>';
+}
+
+// ── Helper Commentaire cell (sélectionnable, copiable, multiligne) ──
+// Stocke les commentaires dans un map global pour le copier-coller
+window._commentaires = window._commentaires || {};
+var _commIdx = 0;
+function getCommentaireCell(commentaire) {
+    var c = (commentaire || '').trim();
+    if (!c) return '<td class="text-center text-muted" style="font-size:0.7rem;">—</td>';
+    var idx = '_comm_' + (_commIdx++);
+    window._commentaires[idx] = c;
+    // Preview : première ligne ou 60 premiers chars
+    var lines = c.split('\n');
+    var preview = lines[0].length > 60 ? lines[0].substring(0, 60) + '…' : lines[0];
+    var multiLine = lines.length > 1 || c.length > 60;
+    var moreLabel = multiLine ? ' <span style="color:#0ea5e9;cursor:pointer;font-weight:600;" onclick="window._toggleComment(\'' + idx + '\')" title="Voir tout le commentaire">▸</span>' : '';
+    var copyBtn = '<span style="color:#94a3b8;cursor:pointer;margin-left:4px;" onclick="window._copyComment(\'' + idx + '\')" title="Copier le commentaire">⧉</span>';
+    // Cellule avec texte sélectionnable
+    return '<td style="font-size:0.78rem;max-width:260px;vertical-align:top;padding:4px 6px;">' +
+        '<div id="comm_preview_' + idx + '" style="white-space:pre-wrap;word-break:break-word;">' + escapeHtml(preview) + moreLabel + copyBtn + '</div>' +
+        '<div id="comm_full_' + idx + '" style="display:none;white-space:pre-wrap;word-break:break-word;background:#1e293b;border:1px solid #334155;border-radius:4px;padding:6px;margin-top:4px;max-height:200px;overflow-y:auto;">' + escapeHtml(c) + copyBtn + '</div>' +
+        '</td>';
+}
+// Toggle preview ↔ full
+window._toggleComment = function(idx) {
+    var preview = document.getElementById('comm_preview_' + idx);
+    var full = document.getElementById('comm_full_' + idx);
+    if (!preview || !full) return;
+    if (full.style.display === 'none') {
+        full.style.display = 'block';
+        preview.style.display = 'none';
+    } else {
+        full.style.display = 'none';
+        preview.style.display = 'block';
+    }
+};
+// Copier le commentaire dans le presse-papier
+window._copyComment = function(idx) {
+    var c = window._commentaires[idx];
+    if (!c) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(c).then(function() {
+            window._toastComment && clearTimeout(window._toastComment);
+            var t = document.getElementById('comm_toast');
+            if (!t) { t = document.createElement('div'); t.id = 'comm_toast'; t.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;background:#064e3b;color:#6ee7b7;border:1px solid #10b981;padding:6px 14px;border-radius:6px;font-size:0.82rem;z-index:9999;'; document.body.appendChild(t); }
+            t.textContent = 'Commentaire copié !';
+            t.style.opacity = '1';
+            window._toastComment = setTimeout(function() { t.style.opacity = '0'; }, 1800);
+        });
+    } else {
+        // Fallback : sélectionner le texte dans le bloc full
+        var full = document.getElementById('comm_full_' + idx);
+        if (full) { window._toggleComment(idx); var range = document.createRange(); range.selectNodeContents(full); var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); }
+    }
+};
 // ════════════════════════════════════
 // SHAZAM : sous-onglet Pré-remplissage
 // ════════════════════════════════════
@@ -59,6 +131,53 @@ function getAnimSourceBadge(source) {
     // Valeur inconnue
     return '<span class="badge" style="background:#6b7280;color:#fff;font-size:0.7rem;padding:2px 6px;border-radius:4px;" title="' + escapeHtml(source) + '">' + escapeHtml(source) + '</span>';
 }
+
+// ── Helper Badge Statut (R6+R15) ──
+function getStatutBadge(statut, rowId, prefix, statutVps) {
+    // statut = colonne matching (matche/rejete/nouveau/pousse_azura) — si elle existe
+    // statutVps = colonne statut_vps (pending/synced) — fallback
+    var s = (statut || '').toLowerCase();
+    // Si pas de statut matching, déduire depuis match_song_id ou statut_vps
+    if (!s && statutVps) {
+        s = statutVps.toLowerCase();  // 'pending' ou 'synced'
+    }
+    if (!s) s = 'nouveau';
+    var tbl = (prefix === 'animateurs') ? 'animateurs' : 'shazam';
+    if (s === 'matche' || s === 'matché')
+        return '<span class="badge" style="background:#10b981;color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;" title="Matché dans RadioDJ">✓ Match</span>';
+    if (s === 'pousse_azura' || s === 'poussé_azura' || s === 'pousse' || s === 'poussé')
+        return '<span class="badge" style="background:#6366f1;color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;" title="Poussé dans Azuracast">☁ Poussé</span>';
+    if (s === 'rejete' || s === 'rejeté' || s === 'rejete_corrigé' || s === 'rejete_corrige')
+        return '<span class="badge" style="background:#ef4444;color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;" title="Rejeté" data-row-id="' + rowId + '" data-table="' + tbl + '">✗ Rejeté</span>';
+    // nouveau ou vide
+    return '<span class="badge" style="background:#6b7280;color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;" title="Nouveau — pas encore matché">● Nouveau</span>';
+}
+
+// ── Bouton Rejeter/Corriger pour les entrées non matchées (R15) ──
+function getRejetActionsCell(statut, rowId, prefix, artiste, titre) {
+    var s = (statut || 'nouveau').toLowerCase();
+    var tbl = (prefix === 'animateurs') ? 'animateurs' : 'shazam';
+    // Si déjà rejeté, on ne montre que "Corriger"
+    if (s === 'rejete' || s === 'rejeté' || s === 'rejete_corrigé' || s === 'rejete_corrige') {
+        return '<td class="text-center">' +
+            '<button class="btn btn-sm btn-outline-warning" style="font-size:0.65rem;padding:1px 4px;" ' +
+            'onclick="window._shazamClick.call(this,&#39;corriger&#39;,&#39;' + tbl + '&#39;,' + rowId + ')" ' +
+            'title="Corriger cet entrée">✎ Corriger</button></td>';
+    }
+    // Si matché ou poussé, pas d'action de rejet
+    if (s === 'matche' || s === 'matché' || s === 'pousse_azura' || s === 'poussé_azura' || s === 'pousse' || s === 'poussé') {
+        return '<td class="text-center text-muted" style="font-size:0.65rem;">—</td>';
+    }
+    // Nouveau : on peut rejeter
+    return '<td class="text-center">' +
+        '<button class="btn btn-sm btn-outline-danger" style="font-size:0.65rem;padding:1px 4px;" ' +
+        'onclick="window._shazamClick.call(this,&#39;rejeter&#39;,&#39;' + tbl + '&#39;,' + rowId + ')" ' +
+        'title="Rejeter ce titre">🚫</button> ' +
+        '<button class="btn btn-sm btn-outline-warning" style="font-size:0.65rem;padding:1px 4px;" ' +
+        'onclick="window._shazamClick.call(this,&#39;corriger&#39;,&#39;' + tbl + '&#39;,' + rowId + ')" ' +
+        'title="Corriger artiste/titre">✎</button></td>';
+}
+
 
 // ── Helper Badge Animateur (colore + cliquable) ──
 var ANIMATEUR_COLORS = {
@@ -211,6 +330,8 @@ let currentShazamFilterByPrefix = {
     animateurs: 'all'
 };
 var currentAnimFilterByPrefix = { shazam: '', animateurs: '' };
+var currentStatutFilterByPrefix = { shazam: '', animateurs: '' };
+
 var _prefillController = null;   // AbortController pour le fetch en cours
 var _prefillCancelled = false;   // Flag d'annulation
 
@@ -224,6 +345,17 @@ function setAnimFilter(value, prefix) {
     renderShazamListTable(allShazamRowsData[prefix] || [], {}, prefix);
     updateShazamModeUI(getShazamFilter(prefix), prefix);
 }
+
+function getStatutFilter(prefix) {
+    return currentStatutFilterByPrefix[prefix] || '';
+}
+
+function setStatutFilter(value, prefix) {
+    currentStatutFilterByPrefix[prefix] = value || '';
+    renderShazamListTable(allShazamRowsData[prefix] || [], {}, prefix);
+    updateShazamModeUI(getShazamFilter(prefix), prefix);
+}
+
 
 function getShazamFilter(prefix) {
     return currentShazamFilterByPrefix[prefix] || 'all';
@@ -299,8 +431,10 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
     let tbody = getShazamElement(prefix, 'list_body');
     let activeFilter = getShazamFilter(prefix);
     let animFilter = getAnimFilter(prefix);
+    let statutFilter = getStatutFilter(prefix);
     let isAnimateursTab = (prefix === 'animateurs');
-    let colCount = isAnimateursTab ? 8 : 6;
+    // +2 colonnes : statut + actions rejet/correction
+    let colCount = isAnimateursTab ? 12 : 8;
 
     let filtered = (rows || []).filter(function(r) {
         let src = (r.source || '').toLowerCase();
@@ -318,6 +452,18 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
     if (animFilter) {
         filtered = filtered.filter(function(r) {
             return (r.animateur || '') === animFilter;
+        });
+    }
+
+    // Filtre statut (R6)
+    if (statutFilter) {
+        filtered = filtered.filter(function(r) {
+            var s = (r.statut || 'nouveau').toLowerCase();
+            if (statutFilter === 'nouveau') return s === 'nouveau' || !s;
+            if (statutFilter === 'matche') return s === 'matche' || s === 'matché';
+            if (statutFilter === 'rejete') return s === 'rejete' || s === 'rejeté' || s === 'rejete_corrigé' || s === 'rejete_corrige';
+            if (statutFilter === 'pousse') return s === 'pousse_azura' || s === 'poussé_azura' || s === 'pousse' || s === 'poussé';
+            return true;
         });
     }
 
@@ -346,10 +492,16 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
         let animBadge = '<td class="text-center">' + getAnimateurBadge(r.animateur, r.id, prefix) + '</td>';
         let srcBadge = '<td class="text-center">' + getShazamSourceBadge(r.source) + '</td>';
         let animSrcBadge = '<td class="text-center">' + getAnimSourceBadge(r.source) + '</td>';
+        // R6 : badge statut
+        let statutCell = '<td class="text-center">' + getStatutBadge(r.statut, r.id, prefix, r.statut_vps) + '</td>';
+        // R15 : actions rejet/correction
+        let actionCell = getRejetActionsCell(r.statut, r.id, prefix, r.artiste, r.titre);
 
         if (isAnimateursTab) {
-            // Colonnes supplémentaires : video_url + lien édition VPS
+            // Ordre des colonnes : Animateur | Source | Artiste | Titre | Genre | Commentaire | Date | Match | Statut | Actions | Video | Edit
             let dateVal = r.date_soumission || r.date_reconnaissance || '';
+            let genreCell = '<td class="text-center">' + getGenreBadge(r.genre) + '</td>';
+            let commentCell = getCommentaireCell(r.commentaire);
             let videoCell = r.video_url
                 ? '<td class="text-center"><a href="' + escapeAttr(r.video_url) + '" target="_blank" rel="noopener" title="Voir la vidéo"><span style="color:#ef4444">▶</span></a></td>'
                 : '<td class="text-center text-muted" style="font-size:0.75rem">—</td>';
@@ -361,8 +513,12 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
                 animSrcBadge +
                 '<td class="small">' + escapeHtml(r.artiste || '') + '</td>' +
                 '<td class="small">' + escapeHtml(r.titre || '') + '</td>' +
+                genreCell +
+                commentCell +
                 '<td class="small text-muted">' + dateVal + '</td>' +
                 '<td class="text-center">' + matchCell + '</td>' +
+                statutCell +
+                actionCell +
                 videoCell +
                 editCell +
                 '</tr>';
@@ -374,6 +530,8 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
                 '<td class="small">' + escapeHtml(r.titre || '') + '</td>' +
                 '<td class="small text-muted">' + (r.date_reconnaissance || '') + '</td>' +
                 '<td class="text-center">' + matchCell + '</td>' +
+                statutCell +
+                actionCell +
                 '</tr>';
         }
     }).join('');
@@ -781,6 +939,163 @@ function syncVpsNow(prefix) {
         }
     });
 
+
+// ════════════════════════════════════
+// R15 : Modal Rejeter / Corriger / Suggestions
+// ════════════════════════════════════
+
+function _closeRejetModal() {
+    var m = document.getElementById('_rejet_modal');
+    if (m) m.remove();
+}
+
+function _closeCorrectionModal() {
+    var m = document.getElementById('_correction_modal');
+    if (m) m.remove();
+}
+
+// ── Rejeter un manquant ──
+function rejeterManquant(rowId, table) {
+    _closeRejetModal();
+    table = table || 'shazam';
+    var modalHtml = '<div id="_rejet_modal" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);">' +
+        '<div style="background:#fff;border-radius:8px;padding:20px;min-width:360px;max-width:500px;box-shadow:0 4px 24px rgba(0,0,0,0.3);">' +
+        '<h5 style="margin:0 0 12px 0;color:#ef4444;">🚫 Rejeter ce titre</h5>' +
+        '<p style="font-size:0.85rem;color:#6b7280;margin:0 0 8px 0;">Ce titre sera marqué comme rejeté et ne sera plus proposé au matching.</p>' +
+        '<label style="font-size:0.8rem;font-weight:bold;display:block;margin-bottom:4px;">Motif de rejet (optionnel) :</label>' +
+        '<textarea id="_rejet_motif" rows="2" style="width:100%;border:1px solid #d1d5db;border-radius:4px;padding:6px;font-size:0.8rem;resize:vertical;" placeholder="Ex. : doublon, erreur de reconnaissance..."></textarea>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">' +
+        '<button onclick="window._shazamFns._closeRejetModal()" style="padding:6px 14px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;font-size:0.8rem;">Annuler</button>' +
+        '<button onclick="window._shazamFns._doRejeter(' + rowId + ',\'' + table + '\')" style="padding:6px 14px;border:none;border-radius:4px;background:#ef4444;color:#fff;cursor:pointer;font-size:0.8rem;font-weight:bold;">Rejeter</button>' +
+        '</div></div></div>';
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+function _doRejeter(rowId, table) {
+    var motifEl = document.getElementById('_rejet_motif');
+    var motif = motifEl ? motifEl.value.trim() : '';
+    _closeRejetModal();
+    var prefix = (table === 'animateurs') ? 'animateurs' : 'shazam';
+    fetch('/api/manquants/rejeter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ row_id: rowId, table: table, motif: motif })
+    })
+    .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    })
+    .then(function(data) {
+        if (data.error) {
+            alert('Erreur : ' + data.error);
+            return;
+        }
+        // Recharger la liste
+        var fn = window._shazamFns;
+        if (fn) fn.loadList(prefix);
+    })
+    .catch(function(err) {
+        alert('Erreur rejet : ' + err.message);
+    });
+}
+
+// ── Corriger un manquant (rejete_corrigé + nouvelle forme) ──
+function corrigerManquant(rowId, table) {
+    _closeCorrectionModal();
+    table = table || 'shazam';
+    // Trouver la ligne dans les données locales pour pré-remplir
+    var prefix = (table === 'animateurs') ? 'animateurs' : 'shazam';
+    var data = allShazamRowsData[prefix] || [];
+    var row = data.find(function(r) { return r.id == rowId; });
+    var currentArtiste = row ? (row.artiste || '') : '';
+    var currentTitre = row ? (row.titre || '') : '';
+
+    var modalHtml = '<div id="_correction_modal" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);">' +
+        '<div style="background:#fff;border-radius:8px;padding:20px;min-width:400px;max-width:560px;box-shadow:0 4px 24px rgba(0,0,0,0.3);">' +
+        '<h5 style="margin:0 0 12px 0;color:#f59e0b;">✎ Corriger artiste / titre</h5>' +
+        '<p style="font-size:0.85rem;color:#6b7280;margin:0 0 8px 0;">L\'entrée originale sera marquée rejetée. Une nouvelle entrée corrigée sera créée et matchée si possible.</p>' +
+        '<label style="font-size:0.8rem;font-weight:bold;display:block;margin-bottom:4px;">Artiste corrigé :</label>' +
+        '<input id="_corr_artiste" type="text" value="' + escapeAttr(currentArtiste) + '" style="width:100%;border:1px solid #d1d5db;border-radius:4px;padding:6px;font-size:0.85rem;margin-bottom:8px;" oninput="window._shazamFns._loadSuggestions()">' +
+        '<div id="_corr_suggestions_art" style="font-size:0.75rem;color:#6366f1;min-height:18px;margin-bottom:8px;"></div>' +
+        '<label style="font-size:0.8rem;font-weight:bold;display:block;margin-bottom:4px;">Titre corrigé :</label>' +
+        '<input id="_corr_titre" type="text" value="' + escapeAttr(currentTitre) + '" style="width:100%;border:1px solid #d1d5db;border-radius:4px;padding:6px;font-size:0.85rem;margin-bottom:8px;">' +
+        '<label style="font-size:0.8rem;font-weight:bold;display:block;margin-bottom:4px;">Motif (optionnel) :</label>' +
+        '<input id="_corr_motif" type="text" style="width:100%;border:1px solid #d1d5db;border-radius:4px;padding:6px;font-size:0.85rem;margin-bottom:8px;" placeholder="Correction orthographe, mauvaise reconnaissance...">' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">' +
+        '<button onclick="window._shazamFns._closeCorrectionModal()" style="padding:6px 14px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;font-size:0.8rem;">Annuler</button>' +
+        '<button onclick="window._shazamFns._doCorriger(' + rowId + ',\'' + table + '\')" style="padding:6px 14px;border:none;border-radius:4px;background:#f59e0b;color:#000;cursor:pointer;font-size:0.8rem;font-weight:bold;">Corriger & Matcher</button>' +
+        '</div></div></div>';
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+function _doCorriger(rowId, table) {
+    var artEl = document.getElementById('_corr_artiste');
+    var titEl = document.getElementById('_corr_titre');
+    var motifEl = document.getElementById('_corr_motif');
+    var newArt = artEl ? artEl.value.trim() : '';
+    var newTit = titEl ? titEl.value.trim() : '';
+    var motif = motifEl ? motifEl.value.trim() : '';
+    if (!newArt || !newTit) {
+        alert('Artiste et titre corrigés sont obligatoires.');
+        return;
+    }
+    _closeCorrectionModal();
+    var prefix = (table === 'animateurs') ? 'animateurs' : 'shazam';
+    fetch('/api/manquants/corriger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            row_id: rowId,
+            table: table,
+            correction_artiste: newArt,
+            correction_titre: newTit,
+            motif: motif
+        })
+    })
+    .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    })
+    .then(function(data) {
+        if (data.error) {
+            alert('Erreur : ' + data.error);
+            return;
+        }
+        // Recharger la liste
+        var fn = window._shazamFns;
+        if (fn) fn.loadList(prefix);
+    })
+    .catch(function(err) {
+        alert('Erreur correction : ' + err.message);
+    });
+}
+
+// ── Auto-suggestions fuzzy (R18) ──
+var _suggestTimer = null;
+function _loadSuggestions() {
+    if (_suggestTimer) clearTimeout(_suggestTimer);
+    _suggestTimer = setTimeout(function() {
+        var artEl = document.getElementById('_corr_artiste');
+        var q = artEl ? artEl.value.trim() : '';
+        var sugEl = document.getElementById('_corr_suggestions_art');
+        if (!sugEl) return;
+        if (q.length < 2) { sugEl.textContent = ''; return; }
+        fetch('/api/shazam/suggestions?q=' + encodeURIComponent(q) + '&limit=5')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var suggestions = data.suggestions || [];
+                if (suggestions.length === 0) {
+                    sugEl.textContent = '— aucune suggestion —';
+                    return;
+                }
+                sugEl.innerHTML = 'Suggestions : ' + suggestions.map(function(s) {
+                    return '<span style="cursor:pointer;text-decoration:underline;margin-right:8px;" onclick="document.getElementById(\'_corr_artiste\').value=\'' + escapeAttr(s) + '\'">' + escapeHtml(s) + '</span>';
+                }).join('');
+            })
+            .catch(function() { sugEl.textContent = ''; });
+    }, 300);
+}
+
     // ── Dispatcher _shazamClick (pour les onclick inline dans le HTML) ──
     window._shazamClick = function(action, prefix, extra) {
         switch (action) {
@@ -789,6 +1104,7 @@ function syncVpsNow(prefix) {
             case 'pipeline': handleShazamPipeline(prefix); break;
             case 'prefill': handleShazamPrefill(prefix); break;
             case 'filter': setShazamFilter(prefix, extra); setAnimFilter('', prefix); break;
+            case 'statutFilter': setStatutFilter(extra || '', prefix); break;
             case 'closeLog':
                 var logCard = getShazamElement(prefix, 'pipeline_log_card');
                 if (logCard) logCard.style.display = 'none';
@@ -797,6 +1113,18 @@ function syncVpsNow(prefix) {
                 var rowId2 = parseInt(this.dataset.rowId);
                 var tbl2 = this.dataset.table || 'shazam';
                 showAnimateurDropdown(rowId2, '', this, tbl2);
+                break;
+            }
+            case 'rejeter': {
+                var rejId = parseInt(extra);
+                var rejTbl = prefix || 'shazam';
+                rejeterManquant(rejId, rejTbl);
+                break;
+            }
+            case 'corriger': {
+                var corrId = parseInt(extra);
+                var corrTbl = prefix || 'shazam';
+                corrigerManquant(corrId, corrTbl);
                 break;
             }
             default: console.warn('[shazamClick] Action inconnue:', action);
@@ -813,6 +1141,8 @@ function syncVpsNow(prefix) {
         getFilter: getShazamFilter,
         setAnimFilter: setAnimFilter,
         getAnimFilter: getAnimFilter,
+        setStatutFilter: setStatutFilter,
+        getStatutFilter: getStatutFilter,
         populateAnimDropdowns: populateAnimateurDropdowns,
         updateModeUI: updateShazamModeUI,
         setModeFromTab: setShazamModeFromTab,
@@ -825,7 +1155,14 @@ function syncVpsNow(prefix) {
             if (row) showAnimateurDropdown(rowId, row.animateur, anchorEl, tbl);
         },
         hideAnimDD: hideAnimateurDropdown,
-        syncVps: syncVpsNow
+        syncVps: syncVpsNow,
+        rejeter: rejeterManquant,
+        corriger: corrigerManquant,
+        _closeRejetModal: _closeRejetModal,
+        _closeCorrectionModal: _closeCorrectionModal,
+        _doRejeter: _doRejeter,
+        _doCorriger: _doCorriger,
+        _loadSuggestions: _loadSuggestions
     };
 
     window._dynamicAnimateurList = _dynamicAnimateurList;

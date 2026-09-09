@@ -30,6 +30,7 @@ Routes manquants (airvs_manquants) :
   - GET    /api/manquants/stats     Compteurs par source/statut
   - POST   /api/manquants/resolve   Marque resolu (faux positif)
   - DELETE /api/manquants/delete    Supprime un manquant
+  - POST   /api/manquants/search-radiodj  Recherche dans RadioDJ + màj statut
 """
 
 import os
@@ -37,6 +38,7 @@ import re
 import json
 import shutil
 import subprocess
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import quote
@@ -197,19 +199,16 @@ def api_pipeline_status(tache_id):
 
 
 import platform
-import signal
 
-# ── Racines dynamiques (Option B) ────────────────────────────────────────
-# Les racines du navigateur de dossiers sont stockées en DB (airvs_browse_roots).
-# Au démarrage, si la table est vide, on y insère les valeurs par défaut.
-# Le fallback hardcodé n'est utilisé que si la DB est inaccessible.
-
+# Racines autorisees pour le navigateur de dossiers.
+# Adaptation automatique Windows / Linux.
+# Sur Windows on utilise des chemins avec / (Python les gère correctement)
 if platform.system() == 'Windows':
-    _BROWSE_ROOTS_FALLBACK = ['U:/', 'M:/', 'L:/', 'D:/', 'E:/', 'N:/', 'Z:/', 'T:/']
-    _BROWSE_DEFAULT_FALLBACK = 'U:/'
+    BROWSE_ROOTS = ['U:/', 'M:/', 'L:/', 'D:/', 'E:/', 'N:/', 'Z:/']
+    BROWSE_DEFAULT = 'U:/'
 else:
-    _BROWSE_ROOTS_FALLBACK = ['/mnt', '/mnt/stockage_1to', '/home', '/media']
-    _BROWSE_DEFAULT_FALLBACK = '/mnt'
+    BROWSE_ROOTS = ['/mnt', '/home', '/media']
+    BROWSE_DEFAULT = '/mnt'
 
 # Dossiers a masquer (caches, systeme)
 BROWSE_HIDDEN = {
@@ -219,138 +218,13 @@ BROWSE_HIDDEN = {
     'Program Files (x86)', 'ProgramData', 'AppData',
 }
 
-# Timeout pour iterdir/stat sur mounts réseau (secondes)
-_BROWSE_ENTRY_TIMEOUT = 3  # par entrée
-_BROWSE_MAX_ENTRIES = 500  # limite anti-DOS
 
-
-def _assurer_schema_browse_roots():
-    """Crée la table airvs_browse_roots si absente + peuple les défauts.
-
-    Table : id, root, label, actif, pos, date_ajout
-    """
-    try:
-        db = get_db_connection()
-        if not db:
-            return False
-        cursor = db.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS airvs_browse_roots (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                root VARCHAR(255) NOT NULL UNIQUE,
-                label VARCHAR(100) DEFAULT '',
-                actif TINYINT(1) NOT NULL DEFAULT 1,
-                pos INT NOT NULL DEFAULT 0,
-                date_ajout DATETIME DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """)
-        db.commit()
-
-        # Peuplement par défaut si table vide
-        cursor.execute("SELECT COUNT(*) FROM airvs_browse_roots")
-        count = cursor.fetchone()[0]
-        if count == 0:
-            defaults = [
-                ('U:/', 'Lecteur U:', 1),
-                ('M:/', 'Lecteur M:', 2),
-                ('L:/', 'Lecteur L:', 3),
-                ('D:/', 'Lecteur D:', 4),
-                ('E:/', 'Lecteur E:', 5),
-                ('N:/', 'Lecteur N:', 6),
-                ('Z:/', 'Lecteur Z:', 7),
-                ('T:/', 'Lecteur T:', 8),
-                ('/mnt', 'Mnt (Linux)', 10),
-                ('/mnt/stockage_1to', 'Stockage 1To', 11),
-                ('/home', 'Home (Linux)', 12),
-                ('/media', 'Media (Linux)', 13),
-            ]
-            for root, label, pos in defaults:
-                try:
-                    cursor.execute(
-                        "INSERT IGNORE INTO airvs_browse_roots (root, label, actif, pos) VALUES (%s, %s, 1, %s)",
-                        (root, label, pos)
-                    )
-                except Exception:
-                    pass
-            db.commit()
-            _logger.info("Browse roots : table créée + défauts insérés")
-
-        cursor.close()
-        db.close()
-        return True
-    except Exception as e:
-        _logger.error(f"Browse roots : erreur schéma : {e}")
-        return False
-
-
-def _load_browse_roots():
-    """Charge les racines actives depuis DB, fallback hardcodé."""
-    try:
-        db = get_db_connection()
-        if not db:
-            return _BROWSE_ROOTS_FALLBACK
-        cursor = db.cursor()
-        cursor.execute("SELECT root FROM airvs_browse_roots WHERE actif=1 ORDER BY pos")
-        roots = [r[0] for r in cursor.fetchall()]
-        cursor.close()
-        db.close()
-        return roots if roots else _BROWSE_ROOTS_FALLBACK
-    except Exception:
-        return _BROWSE_ROOTS_FALLBACK
-
-
-def _load_browse_roots_full():
-    """Charge toutes les racines avec métadonnées pour UI CRUD."""
-    try:
-        db = get_db_connection()
-        if not db:
-            return []
-        cursor = db.cursor(pymysql.cursors.DictCursor)
-        cursor.execute("SELECT id, root, label, actif, pos FROM airvs_browse_roots ORDER BY pos")
-        rows = cursor.fetchall()
-        cursor.close()
-        db.close()
-        return rows
-    except Exception:
-        return []
-
-
-def _detect_windows_drives():
-    """Détecte les lecteurs Windows montés (C:, D:, T:, etc.).
-
-    Sur Linux, vérifie /mnt/* et /media/*.
-    Retourne une liste de (root, label).
-    """
-    drives = []
-    if platform.system() == 'Windows':
-        for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
-            d = f'{c}:/'
-            if Path(d).exists():
-                drives.append((d, f'Lecteur {c}:'))
-    else:
-        # Linux : scan /mnt/* et /media/*
-        for base in ['/mnt', '/media']:
-            bp = Path(base)
-            if bp.is_dir():
-                try:
-                    for child in bp.iterdir():
-                        if child.is_dir() and not child.name.startswith('.'):
-                            drives.append((str(child), child.name))
-                except (PermissionError, OSError):
-                    pass
-    return drives
-
-
-def _is_under_root(path_str, roots=None):
-    """Verifie que path_str est sous une racine autorisee.
-
-    roots : liste de racines (str). Si None, charge depuis DB.
-    """
-    if roots is None:
-        roots = _load_browse_roots()
+def _is_under_root(path_str):
+    """Verifie que path_str est sous une racine autorisee."""
     p = path_str.replace(chr(92), '/').upper()  # normalise \ -> /
-    for root in roots:
+    for root in BROWSE_ROOTS:
         r = root.upper()
+        # r finit deja par '/' sur Windows (U:/) donc pas besoin d'en rajouter
         sep = '' if r.endswith('/') else '/'
         if p == r or p.startswith(r + sep):
             return True
@@ -365,191 +239,91 @@ def _parent_path(path_str):
     return str(p.parent)
 
 
-def _safe_iterdir(path, timeout=_BROWSE_ENTRY_TIMEOUT):
-    """iterdir() avec timeout — protège contre les mounts réseau gelés.
-
-    Retourne la liste des entrées, ou lève OSError si timeout.
-    """
-    result = []
-    error = [None]
-
-    def _collect():
-        try:
-            for entry in path.iterdir():
-                result.append(entry)
-        except Exception as e:
-            error[0] = e
-
-    import threading
-    t = threading.Thread(target=_collect, daemon=True)
-    t.start()
-    t.join(timeout=timeout)
-    if t.is_alive():
-        # Thread toujours vivant → mount gelé
-        raise OSError(f"Timeout ({timeout}s) sur iterdir({path})")
-    if error[0]:
-        raise error[0]
-    return result
-
-
-def _safe_stat(entry, timeout=2):
-    """stat() avec timeout pour les mounts réseau."""
-    result = [None]
-    error = [None]
-
-    def _do():
-        try:
-            result[0] = entry.stat().st_mtime
-        except Exception as e:
-            error[0] = e
-
-    import threading
-    t = threading.Thread(target=_do, daemon=True)
-    t.start()
-    t.join(timeout=timeout)
-    if t.is_alive():
-        return None  # timeout silencieux pour stat
-    if error[0]:
-        return None
-    return result[0]
-
-
 @pipeline_import_bp.route('/api/pipeline/browse')
 @login_requis
 def api_pipeline_browse():
-    """Liste les sous-dossiers d'un chemin donné.
+    """Liste les sous-dossiers d'un chemin donne.
 
-    Racines chargées dynamiquement depuis airvs_browse_roots (Option B).
-    Protection timeout sur iterdir/stat pour les mounts réseau.
+    Adaptatif Windows / Linux : detecte l'OS du dashboard.
+    Sur Windows : navigue les lecteurs reseau (U:/, M:/, etc.)
+    Sur Linux : navigue /mnt, /home, /media
 
     Query params :
-      - path (str) : chemin à lister (défaut: vue racines)
+      - path (str) : chemin a lister (defaut: BROWSE_DEFAULT)
 
     Retourne JSON :
       - current : chemin courant
-      - parent  : chemin parent (null si à la racine)
-      - dirs    : liste des sous-dossiers [{name, path, label, has_subdirs, subdir_count, mtime}]
+      - parent  : chemin parent (null si a la racine)
+      - dirs    : liste des sous-dossiers [{name, path, has_subdirs, subdir_count, mtime}]
     """
     raw = request.args.get('path', '').strip()
-    _current_roots = _load_browse_roots()
-    _roots_full = _load_browse_roots_full()
 
-    # Map root -> label pour affichage
-    _root_labels = {r['root']: r['label'] for r in _roots_full}
-
-    # --- Mode racines : path vide ou 'roots' -> liste les racines autorisées ---
+    # --- Mode racines : path vide ou 'roots' -> liste les racines autorisees ---
     if not raw or raw == 'roots':
         dirs = []
-        for root in _current_roots:
+        for root in BROWSE_ROOTS:
             rp = Path(root)
-            label = _root_labels.get(root, '')
-            try:
-                if not rp.is_dir():
-                    # Racine non montée — on l'affiche quand même avec un indicateur
-                    dirs.append({
-                        'name': label or root,
-                        'path': root,
-                        'label': label,
-                        'has_subdirs': False,
-                        'subdir_count': 0,
-                        'mtime': None,
-                        'unmounted': True,
-                    })
-                    continue
-            except OSError:
+            if rp.is_dir():
+                has_sub = False
+                subdir_count = 0
+                mtime = None
+                try:
+                    visible = [e for e in rp.iterdir()
+                               if e.name not in BROWSE_HIDDEN and not e.name.startswith('.')]
+                    has_sub = any(e.is_dir() for e in visible)
+                    subdir_count = sum(1 for e in visible if e.is_dir())
+                    all_times = [e.stat().st_mtime for e in visible]
+                    if all_times:
+                        mtime = datetime.fromtimestamp(max(all_times)).strftime('%d/%m/%Y %H:%M')
+                except (PermissionError, OSError):
+                    pass
                 dirs.append({
-                    'name': label or root,
+                    'name': root,
                     'path': root,
-                    'label': label,
-                    'has_subdirs': False,
-                    'subdir_count': 0,
-                    'mtime': None,
-                    'unmounted': True,
+                    'has_subdirs': has_sub,
+                    'subdir_count': subdir_count,
+                    'mtime': mtime,
                 })
-                continue
-
-            has_sub = False
-            subdir_count = 0
-            mtime = None
-            try:
-                visible = [e for e in _safe_iterdir(rp)
-                           if e.name not in BROWSE_HIDDEN and not e.name.startswith('.')]
-                has_sub = any(e.is_dir() for e in visible)
-                subdir_count = sum(1 for e in visible if e.is_dir())
-                all_times = [_safe_stat(e) for e in visible]
-                all_times = [t for t in all_times if t is not None]
-                if all_times:
-                    mtime = datetime.fromtimestamp(max(all_times)).strftime('%d/%m/%Y %H:%M')
-            except OSError as e:
-                # Timeout ou erreur mount — on affiche la racine avec info d'erreur
-                dirs.append({
-                    'name': label or root,
-                    'path': root,
-                    'label': label,
-                    'has_subdirs': False,
-                    'subdir_count': 0,
-                    'mtime': None,
-                    'error': str(e),
-                })
-                continue
-            except (PermissionError, OSError):
-                pass
-            dirs.append({
-                'name': label or root,
-                'path': root,
-                'label': label,
-                'has_subdirs': has_sub,
-                'subdir_count': subdir_count,
-                'mtime': mtime,
-            })
         return jsonify({
             'current': '[ Racines ]',
             'parent': None,
             'dirs': dirs,
-            'roots': _current_roots,
         })
 
     target = Path(raw)
 
-    # Sécurité : le chemin doit être sous une racine autorisée
-    if not _is_under_root(raw, roots=_current_roots):
+    # Securite : le chemin doit etre sous une racine autorisee
+    if not _is_under_root(raw):
         return jsonify({
-            'error': 'Chemin non autorisé.',
-            'allowed': _current_roots,
+            'error': 'Chemin non autorise.',
+            'allowed': BROWSE_ROOTS,
         }), 403
 
     if not target.is_dir():
         return jsonify({'error': 'Dossier introuvable : ' + raw}), 404
 
     try:
-        entries = sorted(_safe_iterdir(target))
+        entries = sorted(target.iterdir())
     except PermissionError:
-        return jsonify({'error': 'Permission refusée'}), 403
+        return jsonify({'error': 'Permission refusee'}), 403
     except OSError as e:
         return jsonify({'error': str(e)}), 403
 
     dirs = []
-    for entry in entries[:_BROWSE_MAX_ENTRIES]:
-        try:
-            if not entry.is_dir():
-                continue
-        except OSError:
+    for entry in entries:
+        if not entry.is_dir():
             continue
         name = entry.name
         if name in BROWSE_HIDDEN:
             continue
         if name.startswith('.'):
             continue
-        has_sub = False
-        subdir_count = 0
-        mtime = None
         try:
-            visible = [e for e in _safe_iterdir(entry)
+            visible = [e for e in entry.iterdir()
                        if e.name not in BROWSE_HIDDEN and not e.name.startswith('.')]
             has_sub = any(e.is_dir() for e in visible)
             subdir_count = sum(1 for e in visible if e.is_dir())
-            all_times = [_safe_stat(e) for e in visible]
-            all_times = [t for t in all_times if t is not None]
+            all_times = [e.stat().st_mtime for e in visible]
             mtime = datetime.fromtimestamp(max(all_times)).strftime('%d/%m/%Y %H:%M') if all_times else None
         except (PermissionError, OSError):
             has_sub = False
@@ -572,190 +346,6 @@ def api_pipeline_browse():
     })
 
 
-
-# ══════════════════════════════════════════════════════════════════
-# CRUD Racines de navigation (Option B)
-# ══════════════════════════════════════════════════════════════════
-
-@pipeline_import_bp.route('/api/browse/roots', methods=['GET'])
-@login_requis
-def api_browse_roots_list():
-    """Liste toutes les racines avec métadonnées."""
-    roots = _load_browse_roots_full()
-    # Enrichir avec info montée/non montée
-    for r in roots:
-        try:
-            r['mounted'] = Path(r['root']).is_dir()
-        except OSError:
-            r['mounted'] = False
-    return jsonify({'roots': roots})
-
-
-@pipeline_import_bp.route('/api/browse/roots', methods=['POST'])
-@login_requis
-def api_browse_roots_add():
-    """Ajoute une nouvelle racine.
-
-    JSON : { root: str, label: str (optionnel) }
-    """
-    data = request.json or {}
-    root = data.get('root', '').strip().replace(chr(92), '/')  # normalise \ -> /
-    label = data.get('label', '').strip()
-
-    if not root:
-        return jsonify({'error': 'Chemin racine obligatoire'}), 400
-
-    # Normaliser : terminer par / si c'est un lecteur Windows (X:)
-    if len(root) == 2 and root[1] == ':':
-        root += '/'
-
-    try:
-        db = get_db_connection()
-        if not db:
-            return jsonify({'error': 'DB inaccessible'}), 500
-        cursor = db.cursor()
-
-        # Vérifier doublon
-        cursor.execute("SELECT id FROM airvs_browse_roots WHERE root = %s", (root,))
-        if cursor.fetchone():
-            cursor.close()
-            db.close()
-            return jsonify({'error': f'Racine {root} déjà existante'}), 409
-
-        # Position max + 1
-        cursor.execute("SELECT COALESCE(MAX(pos), 0) + 1 FROM airvs_browse_roots")
-        next_pos = cursor.fetchone()[0]
-
-        if not label:
-            # Auto-label
-            if len(root) == 3 and root[1] == ':' and root[2] == '/':
-                label = f'Lecteur {root[0]}:'
-            else:
-                label = Path(root).name or root
-
-        cursor.execute(
-            "INSERT INTO airvs_browse_roots (root, label, actif, pos) VALUES (%s, %s, 1, %s)",
-            (root, label, next_pos)
-        )
-        db.commit()
-        new_id = cursor.lastrowid
-        cursor.close()
-        db.close()
-        _logger.info(f"Browse roots : ajout {root} (label={label}, id={new_id})")
-        return jsonify({'id': new_id, 'root': root, 'label': label, 'actif': 1, 'pos': next_pos}), 201
-    except Exception as e:
-        _logger.error(f"Browse roots : erreur ajout : {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@pipeline_import_bp.route('/api/browse/roots/<int:root_id>', methods=['DELETE'])
-@login_requis
-def api_browse_roots_delete(root_id):
-    """Supprime une racine."""
-    try:
-        db = get_db_connection()
-        if not db:
-            return jsonify({'error': 'DB inaccessible'}), 500
-        cursor = db.cursor()
-        cursor.execute("SELECT root FROM airvs_browse_roots WHERE id = %s", (root_id,))
-        row = cursor.fetchone()
-        if not row:
-            cursor.close()
-            db.close()
-            return jsonify({'error': 'Racine introuvable'}), 404
-        root_name = row[0]
-        cursor.execute("DELETE FROM airvs_browse_roots WHERE id = %s", (root_id,))
-        db.commit()
-        cursor.close()
-        db.close()
-        _logger.info(f"Browse roots : suppression {root_name} (id={root_id})")
-        return jsonify({'deleted': root_id, 'root': root_name})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@pipeline_import_bp.route('/api/browse/roots/<int:root_id>', methods=['PATCH'])
-@login_requis
-def api_browse_roots_update(root_id):
-    """Met à jour une racine (label, actif, pos).
-
-    JSON : { label?, actif?, pos? }
-    """
-    data = request.json or {}
-    try:
-        db = get_db_connection()
-        if not db:
-            return jsonify({'error': 'DB inaccessible'}), 500
-        cursor = db.cursor(pymysql.cursors.DictCursor)
-        cursor.execute("SELECT * FROM airvs_browse_roots WHERE id = %s", (root_id,))
-        row = cursor.fetchone()
-        if not row:
-            cursor.close()
-            db.close()
-            return jsonify({'error': 'Racine introuvable'}), 404
-
-        updates = []
-        params = []
-        if 'label' in data:
-            updates.append("label = %s")
-            params.append(data['label'].strip())
-        if 'actif' in data:
-            updates.append("actif = %s")
-            params.append(1 if data['actif'] else 0)
-        if 'pos' in data:
-            updates.append("pos = %s")
-            params.append(int(data['pos']))
-
-        if not updates:
-            cursor.close()
-            db.close()
-            return jsonify(row)
-
-        params.append(root_id)
-        cursor.execute(
-            f"UPDATE airvs_browse_roots SET {', '.join(updates)} WHERE id = %s",
-            params
-        )
-        db.commit()
-
-        # Retourner la ligne mise à jour
-        cursor.execute("SELECT * FROM airvs_browse_roots WHERE id = %s", (root_id,))
-        updated = cursor.fetchone()
-        cursor.close()
-        db.close()
-        _logger.info(f"Browse roots : mise à jour id={root_id} : {updates}")
-        return jsonify(updated)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@pipeline_import_bp.route('/api/browse/roots/detect', methods=['POST'])
-@login_requis
-def api_browse_roots_detect():
-    """Détecte les lecteurs/répertoires montés et propose d'ajouter les manquants.
-
-    Retourne la liste des lecteurs détectés qui ne sont pas encore dans la DB.
-    """
-    detected = _detect_windows_drives()
-    try:
-        db = get_db_connection()
-        if not db:
-            return jsonify({'detected': [{'root': r, 'label': l} for r, l in detected]})
-        cursor = db.cursor()
-        cursor.execute("SELECT root FROM airvs_browse_roots")
-        existing = {r[0].upper() for r in cursor.fetchall()}
-        cursor.close()
-        db.close()
-    except Exception:
-        existing = set()
-
-    # Filtrer les déjà présents
-    new_drives = []
-    for root, label in detected:
-        if root.upper().replace('\\', '/') not in existing and root.upper() not in existing:
-            new_drives.append({'root': root, 'label': label})
-
-    return jsonify({'detected': new_drives})
 
 
 @pipeline_import_bp.route('/api/pipeline/test-mp3gain', methods=['GET'])
@@ -1835,4 +1425,259 @@ def api_manquants_delete():
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"ok": True, "id": manq_id})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# HELPERS : MOTEUR DE MATCHING RADIODJ (porté de shazam.py)
+# Normalisation + 5 passes de recherche floue.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _manquants_normaliser(texte):
+    """Normalise un texte pour comparaison floue :
+    minuscules, sans accents, sans ponctuation, mots de liaison remplacés."""
+    if not texte:
+        return ""
+    texte = str(texte).strip().lower()
+    texte = ''.join(
+        c for c in unicodedata.normalize('NFD', texte)
+        if unicodedata.category(c) != 'Mn'
+    )
+    for caractere in "()[]&'+-":
+        texte = texte.replace(caractere, " ")
+    texte = re.sub(r'\b(?:et|and|x)\b', ' ', texte, flags=re.IGNORECASE)
+    return re.sub(r'\s+', ' ', texte).strip()
+
+
+def _manquants_extraire_principal(texte):
+    """Extrait la partie principale : supprime feat./ft./featuring."""
+    if not texte:
+        return texte
+    texte = re.sub(r'\s*\([^)]*(?:feat\.?|ft\.?|featuring)[^)]*\)\s*', ' ', texte, flags=re.IGNORECASE).strip()
+    texte = re.split(r'\s+(?:feat\.?|ft\.?|featuring)\s+', texte, flags=re.IGNORECASE)[0].strip()
+    return texte
+
+
+def _manquants_extraire_nu(texte):
+    """Extrait le noyau nu : supprime TOUTES les parenthèses ET les feat."""
+    if not texte:
+        return texte
+    texte = re.sub(r'\s*\([^)]*\)\s*', ' ', texte).strip()
+    texte = re.split(r'\s+(?:feat\.?|ft\.?|featuring)\s+', texte, flags=re.IGNORECASE)[0].strip()
+    return texte
+
+
+def _manquants_match_radiodj(cursor, artiste, titre):
+    """Moteur de matching 5 passes contre la table songs de RadioDJ.
+    Porté de shazam.py::_match_shazam_songs.
+    Retourne (resultat_dict_ou_None, methode_str)."""
+    base_query = (
+        "SELECT s.ID, s.artist, s.title, s.year, s.duration, s.`path`, "
+        "s.comments, s.album, s.bpm, s.id_genre "
+        "FROM songs s WHERE s.song_type = 0"
+    )
+
+    resultat = None
+    methode = ""
+
+    # Passe 1 : stricte
+    query = base_query + " AND s.artist LIKE %s AND s.title LIKE %s ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1"
+    cursor.execute(query, (f"%{artiste}%", f"%{titre}%"))
+    resultat = cursor.fetchone()
+    if resultat:
+        methode = "strict"
+
+    # Passe 2 : principal (sans feat.)
+    if not resultat:
+        art_p = _manquants_extraire_principal(artiste)
+        tit_p = _manquants_extraire_principal(titre)
+        if art_p != artiste or tit_p != titre:
+            cursor.execute(query, (f"%{art_p}%", f"%{tit_p}%"))
+            resultat = cursor.fetchone()
+            if resultat:
+                methode = "principal"
+
+    # Passe 2b : nu (sans feat. ni parenthèses)
+    if not resultat:
+        art_nu = _manquants_extraire_nu(artiste)
+        tit_nu = _manquants_extraire_nu(titre)
+        if (art_nu != _manquants_extraire_principal(artiste) or tit_nu != _manquants_extraire_principal(titre)):
+            if art_nu and tit_nu:
+                cursor.execute(query, (f"%{art_nu}%", f"%{tit_nu}%"))
+                resultat = cursor.fetchone()
+                if resultat:
+                    methode = "nu"
+
+    # Passe 3 : normalisé
+    if not resultat:
+        art_norm = _manquants_normaliser(artiste)
+        tit_norm = _manquants_normaliser(titre)
+        art_p_norm = _manquants_normaliser(_manquants_extraire_principal(artiste))
+        tit_p_norm = _manquants_normaliser(_manquants_extraire_principal(titre))
+        art_nu_norm = _manquants_normaliser(_manquants_extraire_nu(artiste))
+        tit_nu_norm = _manquants_normaliser(_manquants_extraire_nu(titre))
+        query_norm = base_query + " AND LOWER(s.artist) LIKE %s AND LOWER(s.title) LIKE %s ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1"
+        for a_s, t_s in [
+            (art_nu_norm, tit_nu_norm),
+            (art_p_norm, tit_p_norm),
+            (art_norm, tit_norm),
+        ]:
+            if a_s and t_s:
+                cursor.execute(query_norm, (f"%{a_s}%", f"%{t_s}%"))
+                resultat = cursor.fetchone()
+                if resultat:
+                    methode = "normalisé"
+                    break
+
+    # Passe 4 : mots-clés (score >= 2)
+    if not resultat:
+        art_mots = set(m for m in _manquants_normaliser(_manquants_extraire_nu(artiste)).split() if len(m) >= 3)
+        tit_mots = set(m for m in _manquants_normaliser(_manquants_extraire_nu(titre)).split() if len(m) >= 3)
+        if len(art_mots) + len(tit_mots) >= 2:
+            art_best = max(art_mots, key=len) if art_mots else ""
+            tit_best = max(tit_mots, key=len) if tit_mots else ""
+            if art_best and tit_best:
+                query4 = base_query + " AND LOWER(s.artist) LIKE %s AND LOWER(s.title) LIKE %s LIMIT 5"
+                cursor.execute(query4, (f"%{art_best}%", f"%{tit_best}%"))
+                candidats = cursor.fetchall()
+                if candidats:
+                    meilleur_score = 0
+                    meilleur_resultat = None
+                    for cand in candidats:
+                        c_art_mots = set(m for m in _manquants_normaliser(_manquants_extraire_nu(cand['artist'])).split() if len(m) >= 3)
+                        c_tit_mots = set(m for m in _manquants_normaliser(_manquants_extraire_nu(cand['title'])).split() if len(m) >= 3)
+                        score = len(art_mots & c_art_mots) + len(tit_mots & c_tit_mots)
+                        if score > meilleur_score and score >= 2:
+                            meilleur_score = score
+                            meilleur_resultat = cand
+                    if meilleur_resultat:
+                        resultat = meilleur_resultat
+                        methode = f"mots-cles (score={meilleur_score})"
+
+    # Passe 5 : inversion artiste/titre
+    if not resultat:
+        art_inv, tit_inv = titre, artiste
+        query_inv = base_query + " AND s.artist LIKE %s AND s.title LIKE %s ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1"
+        cursor.execute(query_inv, (f"%{art_inv}%", f"%{tit_inv}%"))
+        resultat = cursor.fetchone()
+        if resultat:
+            methode = "inversé-strict"
+        else:
+            art_inv_p = _manquants_extraire_principal(art_inv)
+            tit_inv_p = _manquants_extraire_principal(tit_inv)
+            if art_inv_p != art_inv or tit_inv_p != tit_inv:
+                cursor.execute(query_inv, (f"%{art_inv_p}%", f"%{tit_inv_p}%"))
+                resultat = cursor.fetchone()
+                if resultat:
+                    methode = "inversé-principal"
+        if not resultat:
+            art_inv_nu_norm = _manquants_normaliser(_manquants_extraire_nu(art_inv))
+            tit_inv_nu_norm = _manquants_normaliser(_manquants_extraire_nu(tit_inv))
+            art_inv_norm = _manquants_normaliser(art_inv)
+            tit_inv_norm = _manquants_normaliser(tit_inv)
+            query_inv_norm = base_query + " AND LOWER(s.artist) LIKE %s AND LOWER(s.title) LIKE %s ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1"
+            for a_s, t_s in [(art_inv_nu_norm, tit_inv_nu_norm), (art_inv_norm, tit_inv_norm)]:
+                if a_s and t_s:
+                    cursor.execute(query_inv_norm, (f"%{a_s}%", f"%{t_s}%"))
+                    resultat = cursor.fetchone()
+                    if resultat:
+                        methode = "inversé-normalisé"
+                        break
+
+    return resultat, methode
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ROUTE : RECHERCHE RADIODJ POUR UN MANQUANT
+# ═══════════════════════════════════════════════════════════════════════
+
+@pipeline_import_bp.route('/api/manquants/search-radiodj', methods=['POST'])
+@login_requis
+def api_manquants_search_radiodj():
+    """Recherche un manquant dans la base RadioDJ via le moteur de matching 5 passes.
+
+    Body JSON : { id: int }
+
+    Si trouvé :
+      - Met à jour le statut du manquant à 'importe' et id_import au song ID
+      - Retourne {found: true, song: {...}, methode: str}
+    Sinon :
+      - Retourne {found: false}
+    """
+    data = request.json or {}
+    manq_id = data.get('id')
+
+    if not manq_id:
+        return jsonify({"error": "'id' est obligatoire"}), 400
+
+    db = get_db_connection()
+    if not db:
+        return jsonify({"error": "Erreur DB"}), 500
+
+    try:
+        # 1. Lire le manquant
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            "SELECT id, artiste, titre, source, statut FROM airvs_manquants WHERE id = %s",
+            (manq_id,)
+        )
+        manquant = cursor.fetchone()
+
+        if not manquant:
+            cursor.close()
+            db.close()
+            return jsonify({"error": "Manquant introuvable"}), 404
+
+        if manquant['statut'] != 'en_attente':
+            cursor.close()
+            db.close()
+            return jsonify({"error": f"Le manquant n'est pas en attente (statut: {manquant['statut']})"}), 400
+
+        # 2. Lancer le matching RadioDJ
+        artiste = (manquant['artiste'] or '').strip()
+        titre = (manquant['titre'] or '').strip()
+
+        if not artiste or not titre:
+            cursor.close()
+            db.close()
+            return jsonify({"error": "Artiste ou titre vide"}), 400
+
+        resultat, methode = _manquants_match_radiodj(cursor, artiste, titre)
+
+        if not resultat:
+            cursor.close()
+            db.close()
+            return jsonify({"found": False, "methode": methode or "aucune correspondance"})
+
+        # 3. Mettre à jour le manquant : statut → 'importe', id_import → song ID
+        song_id = resultat.get('ID')
+        cursor.execute(
+            "UPDATE airvs_manquants SET statut = 'importe', id_import = %s, resolu_le = NOW() WHERE id = %s",
+            (song_id, manq_id)
+        )
+        db.commit()
+        cursor.close()
+        db.close()
+
+        # Serializer le résultat (les datetime ne sont pas JSON-sérialisables)
+        song = dict(resultat)
+        for k, v in song.items():
+            if hasattr(v, 'isoformat'):
+                song[k] = v.isoformat()
+            elif hasattr(v, 'strftime'):
+                song[k] = v.strftime('%Y-%m-%d %H:%M:%S')
+
+        return jsonify({
+            "found": True,
+            "song": song,
+            "methode": methode,
+            "id": manq_id
+        })
+
+    except Exception as e:
+        try:
+            cursor.close()
+            db.close()
+        except Exception:
+            pass
+        return jsonify({"error": str(e)}), 500
 

@@ -5815,14 +5815,40 @@ def executer_sync_vps_soumissions(tache_id, parametres):
             ids_synced.append(vps_id)
             continue
 
-        # Dédup 24h dans airvs_animateurs (par vps_id ou artiste+titre)
+        # Dédup dans airvs_animateurs : si vps_id existe → UPDATE champs mutables (commentaire, genre, etc.)
         cursor.execute(
-            "SELECT id FROM airvs_animateurs "
-            "WHERE vps_id = %s LIMIT 1",
+            "SELECT id, commentaire, genre, video_url, animateur, source "
+            "FROM airvs_animateurs WHERE vps_id = %s LIMIT 1",
             (vps_id,)
         )
-        if cursor.fetchone():
-            logger(tache_id, f"  ~ {artiste} - {titre} (vps_id #{vps_id} déjà dans airvs_animateurs)")
+        existing_row = cursor.fetchone()
+        if existing_row:
+            # L'enregistrement existe déjà : on met à jour les champs mutables si au moins un a changé
+            _changed = False
+            _updates = []
+            _params = []
+            if commentaire_vps and commentaire_vps != (existing_row['commentaire'] or ''):
+                _updates.append("commentaire = %s"); _params.append(commentaire_vps); _changed = True
+            if genre_vps and genre_vps != (existing_row['genre'] or ''):
+                _updates.append("genre = %s"); _params.append(genre_vps); _changed = True
+            if video_url_vps and video_url_vps != (existing_row['video_url'] or ''):
+                _updates.append("video_url = %s"); _params.append(video_url_vps); _changed = True
+            if animateur and animateur != (existing_row['animateur'] or ''):
+                _updates.append("animateur = %s"); _params.append(animateur); _changed = True
+            if source_vps and source_vps != (existing_row['source'] or ''):
+                _updates.append("source = %s"); _params.append(source_vps); _changed = True
+            if date_soumission_vps:
+                _updates.append("date_soumission = %s"); _params.append(date_soumission_vps); _changed = True
+            if _changed and _updates:
+                _params.append(vps_id)
+                cursor.execute(
+                    "UPDATE airvs_animateurs SET " + ", ".join(_updates) + " WHERE vps_id = %s",
+                    tuple(_params)
+                )
+                db.commit()
+                logger(tache_id, f"  ↻ {artiste} - {titre} (vps_id #{vps_id} mis à jour : {', '.join(_updates)})")
+            else:
+                logger(tache_id, f"  ~ {artiste} - {titre} (vps_id #{vps_id} déjà dans airvs_animateurs, inchangé)")
             ids_synced.append(vps_id)
             continue
         cursor.execute(

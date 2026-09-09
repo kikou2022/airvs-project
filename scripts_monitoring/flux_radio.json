@@ -1,14 +1,6 @@
 {
-  "flux_actif": "stream11",
+  "flux_actif": "stream12",
   "flux_disponibles": [
-    {
-      "id": "stream11",
-      "nom": "AIRVS Principal",
-      "url": "https://icecast-vps-ovh.airvs.fr/stream11",
-      "codec": "AAC HE-AAC v2",
-      "bitrate": 48,
-      "detail": "libfdk_aac / aac_he_v2 / 44100Hz / Stéréo"
-    },
     {
       "id": "stream12",
       "nom": "AIRVS Principal",
@@ -16,14 +8,6 @@
       "codec": "AAC HE-AAC v2",
       "bitrate": 64,
       "detail": "libfdk_aac / aac_he_v2 / 44100Hz / Stéréo"
-    },
-    {
-      "id": "stream13",
-      "nom": "AIRVS Principal",
-      "url": "https://icecast-vps-ovh.airvs.fr/stream13",
-      "codec": "AAC HE-AAC v2",
-      "bitrate": 96,
-      "detail": "libfdk_aac / aac_he_v2 / 44100Hz / Stéréo"
-    }
+    }    
   ]
 }
