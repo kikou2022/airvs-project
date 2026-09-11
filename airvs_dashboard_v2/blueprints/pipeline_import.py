@@ -252,20 +252,33 @@ def _assurer_schema_browse_roots():
         """)
         db.commit()
 
+        # Labels descriptifs pour tous les lecteurs (table de référence)
+        drive_labels = {
+            'U:/': 'Stockage 160 Go (Debian Master)',
+            'M:/': 'Musique 172 Go (Debian Master)',
+            'L:/': 'Musique 47 Go (Debian Master)',
+            'D:/': 'Projet Radio 2 (Windows)',
+            'E:/': 'Projet Radio 3 (Windows)',
+            'N:/': 'Musique Debian (SSHFS)',
+            'Z:/': 'Disque Externe (Debian SSHFS)',
+            'W:/': 'Stockage 500 Go (Ubuntu Studio)',
+            'Y:/': 'Stockage 80 Go (Ubuntu Studio)',
+        }
+
         # Peuplement par défaut si table vide
         cursor.execute("SELECT COUNT(*) FROM airvs_browse_roots")
         count = cursor.fetchone()[0]
         if count == 0:
             defaults = [
-                ('U:/', 'Lecteur U:', 1),
-                ('M:/', 'Lecteur M:', 2),
-                ('L:/', 'Lecteur L:', 3),
-                ('D:/', 'Lecteur D:', 4),
-                ('E:/', 'Lecteur E:', 5),
-                ('N:/', 'Lecteur N:', 6),
-                ('Z:/', 'Lecteur Z:', 7),
-                ('W:/', 'Stockage 500 Go (Ubuntu Studio)', 8),
-                ('Y:/', 'Stockage 80 Go (Ubuntu Studio)', 9),
+                ('U:/', drive_labels['U:/'], 1),
+                ('M:/', drive_labels['M:/'], 2),
+                ('L:/', drive_labels['L:/'], 3),
+                ('D:/', drive_labels['D:/'], 4),
+                ('E:/', drive_labels['E:/'], 5),
+                ('N:/', drive_labels['N:/'], 6),
+                ('Z:/', drive_labels['Z:/'], 7),
+                ('W:/', drive_labels['W:/'], 8),
+                ('Y:/', drive_labels['Y:/'], 9),
                 ('/mnt', 'Mnt (Linux)', 10),
                 ('/mnt/stockage_1to', 'Stockage 1To', 11),
                 ('/home', 'Home (Linux)', 12),
@@ -281,6 +294,26 @@ def _assurer_schema_browse_roots():
                     pass
             db.commit()
             _logger.info("Browse roots : table créée + défauts insérés")
+        else:
+            # Mise à jour : ajout des nouveaux lecteurs + mise à jour des labels
+            try:
+                # Insérer W:/ et Y:/ si absents
+                for root, label in [('W:/', drive_labels['W:/']), ('Y:/', drive_labels['Y:/'])]:
+                    cursor.execute(
+                        "INSERT IGNORE INTO airvs_browse_roots (root, label, actif, pos) VALUES (%s, %s, 1, %s)",
+                        (root, label, 8 if root == 'W:/' else 9)
+                    )
+                # Désactiver l'ancien lecteur T:/ (1 To mort)
+                cursor.execute("UPDATE airvs_browse_roots SET actif=0 WHERE root='T:/'")
+                # Mettre à jour les labels des anciens lecteurs avec des noms descriptifs
+                for root, label in drive_labels.items():
+                    cursor.execute(
+                        "UPDATE airvs_browse_roots SET label=%s WHERE root=%s",
+                        (label, root)
+                    )
+                db.commit()
+            except Exception:
+                pass
 
         cursor.close()
         db.close()
