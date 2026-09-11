@@ -3813,6 +3813,14 @@
                     <i class="bi bi-upload"></i> Importer
                 </button>
                 <div class="vr mx-1" style="height:24px;"></div>
+                <button class="btn btn-sm btn-outline-info" onclick="remplirGrilleDepuisAzuraCast()">
+                    <i class="bi bi-cloud-download"></i> Remplir depuis AzuraCast
+                </button>
+                <select class="form-select form-select-sm" id="grille_azura_station" style="width:auto; max-width:130px;" title="Station AzuraCast pour le pré-remplissage">
+                    <option value="7">Station 7</option>
+                    <option value="6">Station 6</option>
+                </select>
+                <div class="vr mx-1" style="height:24px;"></div>
                 <button class="btn btn-sm btn-success" onclick="publierGrille()">
                     <i class="bi bi-cloud-arrow-up"></i> Publier
                 </button>
@@ -4212,6 +4220,27 @@
                                         <input class="form-check-input" type="checkbox" id="pipeline_do_mp3gain" checked>
                                         <label class="form-check-label small" for="pipeline_do_mp3gain">
                                             <strong>Normaliser le volume</strong> (mp3gain 89 dB)
+                                        </label>
+                                    </div>
+                                    <hr class="my-2">
+                                    <div class="form-check mb-1">
+                                        <input class="form-check-input" type="checkbox" id="pipeline_convert_flac" checked>
+                                        <label class="form-check-label small" for="pipeline_convert_flac">
+                                            <strong>Convertir FLAC → MP3</strong> avant pipeline
+                                        </label>
+                                    </div>
+                                    <div class="d-flex align-items-center gap-2 mb-1" style="padding-left:1.5rem;">
+                                        <label class="form-label small mb-0" for="pipeline_flac_bitrate">Bitrate :</label>
+                                        <select class="form-select form-select-sm" id="pipeline_flac_bitrate" style="width:auto;">
+                                            <option value="320" selected>320 kbps</option>
+                                            <option value="256">256 kbps</option>
+                                            <option value="192">192 kbps</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-check mb-2" style="padding-left:1.5rem;">
+                                        <input class="form-check-input" type="checkbox" id="pipeline_flac_delete_source">
+                                        <label class="form-check-label small" for="pipeline_flac_delete_source">
+                                            Supprimer le FLAC source après conversion
                                         </label>
                                     </div>
                                     <div class="d-grid gap-2">
@@ -5354,6 +5383,77 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // ════════════════════════════════════
+    // GRILLE ÉDITORIALE : Pré-remplissage depuis AzuraCast
+    // ════════════════════════════════════
+    function remplirGrilleDepuisAzuraCast() {
+        var stationSel = document.getElementById('grille_azura_station');
+        var stationId = stationSel ? stationSel.value : '7';
+        var btn = event.target.closest('button');
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Chargement...'; }
+
+        fetch('/api/azuracast/grille_editoriale?station_id=' + encodeURIComponent(stationId))
+        .then(function(r) {
+            if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Erreur ' + r.status); });
+            return r.json();
+        })
+        .then(function(data) {
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-cloud-download"></i> Remplir depuis AzuraCast'; }
+
+            if (!data.blocs || data.blocs.length === 0) {
+                alert(data.message || 'Aucune playlist programmée trouvée sur cette station.');
+                return;
+            }
+
+            // Afficher le résumé
+            var resume = 'Station ' + data.station_id + ' : ' +
+                         data.total_blocs + ' tranche(s) trouvée(s)\n' +
+                         '  → ' + data.auto_count + ' pré-remplissable(s) automatiquement\n' +
+                         '  → ' + data.multi_count + ' multi-playlists (saisie manuelle)\n\n';
+
+            // Lister les blocs
+            var blocsAuto = [];
+            var blocsMulti = [];
+            for (var i = 0; i < data.blocs.length; i++) {
+                var b = data.blocs[i];
+                var jours = b.days ? b.days.join(', ') : 'tous les jours';
+                if (b.mode === 'auto') {
+                    var pl = b.playlists[0];
+                    blocsAuto.push('  ✓ ' + b.tranche + ' [' + jours + '] → ' + pl.name +
+                                   ' (' + pl.num_songs + ' titres, poids ' + pl.weight + ')');
+                } else {
+                    blocsMulti.push('  ⚠ ' + b.tranche + ' [' + jours + '] → ' + b.badge);
+                }
+            }
+
+            if (blocsAuto.length > 0) {
+                resume += 'Blocs pré-remplissables :\n' + blocsAuto.join('\n') + '\n\n';
+            }
+            if (blocsMulti.length > 0) {
+                resume += 'Blocs multi-playlists (saisie manuelle requise) :\n' + blocsMulti.join('\n') + '\n\n';
+            }
+
+            resume += 'Voulez-vous pré-remplir les ' + data.auto_count + ' bloc(s) automatique(s) ?';
+
+            if (confirm(resume)) {
+                // Appeler la fonction du module grille-editoriale.js si disponible
+                if (typeof window._remplirBlocsDepuisAzura === 'function') {
+                    window._remplirBlocsDepuisAzura(data.blocs);
+                } else {
+                    // Fallback : stocker les données et informer l'utilisateur
+                    window._grilleAzuraData = data;
+                    console.log('[grille] Données AzuraCast stockées dans window._grilleAzuraData');
+                    alert('Données AzuraCast récupérées (' + data.auto_count + ' blocs auto).' +
+                          '\nIntégrez-les via la fonction _remplirBlocsDepuisAzura() du module grille-editoriale.js.');
+                }
+            }
+        })
+        .catch(function(err) {
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-cloud-download"></i> Remplir depuis AzuraCast'; }
+            alert('Erreur AzuraCast : ' + err.message);
+        });
+    }
+
+    // ════════════════════════════════════
     // IMPORT DE MASSE : Pipeline dédoublonnage
     // ════════════════════════════════════
     var _pipelinePollTimer = null;
@@ -5369,6 +5469,9 @@ document.addEventListener('DOMContentLoaded', function() {
             execute: document.getElementById('pipeline_execute').checked,
             recursive: document.getElementById('pipeline_recursive').checked,
             skip_mp3gain: !document.getElementById('pipeline_do_mp3gain').checked,
+            convert_flac: document.getElementById('pipeline_convert_flac').checked,
+            flac_bitrate: parseInt(document.getElementById('pipeline_flac_bitrate').value) || 320,
+            flac_delete_source: document.getElementById('pipeline_flac_delete_source').checked,
             sync_folder: document.getElementById('pipeline_sync_folder').value.trim()
         };
 

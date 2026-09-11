@@ -974,10 +974,7 @@ def api_azuracast_folders():
 @login_requis
 def api_marquer_in_azuracast():
     """Marque un ou plusieurs titres comme IN_AZURACAST dans la base RadioDJ.
-    Appelé par le worker Ubuntu après copie réussie, ou manuellement depuis le dashboard.
-
-    R4 : Remonte également statut='pousse_azura' sur airvs_shazam et airvs_animateurs
-    pour les entrées dont le match_song_id correspond aux songs poussés."""
+    Appelé par le worker Ubuntu après copie réussie, ou manuellement depuis le dashboard."""
     try:
         data = request.get_json(force=True)
         fichiers = data.get('fichiers', [])  # Liste de chemins fichiers
@@ -1008,40 +1005,11 @@ def api_marquer_in_azuracast():
             )
             updated += cursor.rowcount
 
-        # ── R4 : Remonter statut='pousse_azura' sur airvs_shazam et airvs_animateurs ──
-        _nb_src_updated = 0
-        _all_song_ids = list(ids)
-        # Collecter les IDs depuis les chemins fichiers
-        for chemin in fichiers:
-            try:
-                cursor.execute("SELECT ID FROM songs WHERE `path` = %s LIMIT 1", (chemin,))
-                _row = cursor.fetchone()
-                if _row:
-                    _all_song_ids.append(_row[0])
-            except Exception:
-                pass
-
-        if _all_song_ids:
-            for _tbl in ('airvs_shazam', 'airvs_animateurs'):
-                try:
-                    _ph = ",".join(["%s"] * len(_all_song_ids))
-                    cursor.execute(
-                        f"UPDATE {_tbl} SET statut = 'pousse_azura' "
-                        f"WHERE match_song_id IN ({_ph}) AND statut = 'matche'",
-                        tuple(_all_song_ids)
-                    )
-                    _nb_src_updated += cursor.rowcount
-                except Exception:
-                    pass  # Colonne statut peut ne pas exister encore
-
         db.commit()
         cursor.close()
         db.close()
 
-        result = {'status': 'ok', 'updated': updated}
-        if _nb_src_updated:
-            result['source_updated'] = _nb_src_updated
-        return jsonify(result)
+        return jsonify({'status': 'ok', 'updated': updated})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -1472,6 +1440,224 @@ def lire_log_sync_playlists():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# ═══ Grille Éditoriale — Pré-remplissage via API AzuraCast ═════════════
+# Interroge l'API AzuraCast pour récupérer les playlists programmées
+# et les organiser par tranches horaires pour pré-remplir la grille.
+#
+# Logique :
+#   - 1 playlist sur une tranche → pré-remplissage automatique
+#   - >1 playlists (poids différents) → badge « multi-playlists — saisie manuelle »
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _azura_api_get_station(base_url, api_key, path, params=None, timeout=15):
+    """Appel HTTP GET vers l'API AzuraCast avec URL de base configurable.
+
+    Args:
+        base_url: URL de base (ex: https://azuracast.2026.airvs.fr/api)
+        api_key: Clé API Bearer
+        path: Chemin relatif (ex: /station/7/playlists)
+        params: Paramètres de requête optionnels
+        timeout: Timeout en secondes
+    """
+    url = base_url.rstrip('/') + path
+    if params:
+        url += '?' + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={
+        'Authorization': 'Bearer ' + api_key,
+        'Accept': 'application/json'
+    })
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        if resp.status == 200:
+            return json.loads(resp.read().decode('utf-8'))
+        return None
+
+
+def _hhmm_to_minutes(hhmm):
+    """Convertit un entier HHMM (ex: 900 → 540, 2200 → 1320) en minutes depuis minuit."""
+    if hhmm is None:
+        return None
+    hhmm = int(hhmm)
+    heures = hhmm // 100
+    minutes = hhmm % 100
+    return heures * 60 + minutes
+
+
+def _jours_noms(days_list):
+    """Convertit une liste de jours ISO-8601 (1=Lundi…7=Dimanche) en noms français abrégés."""
+    noms = {1: 'Lun', 2: 'Mar', 3: 'Mer', 4: 'Jeu', 5: 'Ven', 6: 'Sam', 7: 'Dim'}
+    return [noms.get(d, str(d)) for d in (days_list or [])]
+
+
+@azuracast_bp.route('/api/azuracast/grille_editoriale')
+@login_requis
+def api_azuracast_grille_editoriale():
+    """Pré-remplissage de la grille éditoriale depuis l'API AzuraCast.
+
+    Parametres query :
+      - station_id (int, optionnel) : ID de la station (defaut: première station configurée)
+
+    Retourne un objet structuré par tranches horaires :
+    {
+      "station_id": 7,
+      "blocs": [
+        {
+          "tranche": "06h00-09h00",
+          "start_time": 600,
+          "end_time": 900,
+          "mode": "auto",
+          "playlists": [{ "id", "name", "weight", ... }],
+          "badge": null
+        }
+      ],
+      "auto_count": 5,
+      "multi_count": 2
+    }
+    """
+    try:
+        station_id = int(request.args.get('station_id', '0'))
+    except (ValueError, TypeError):
+        station_id = 0
+    if not station_id:
+        station_id = _station_par_defaut()
+
+    azura = _charger_azura_config()
+    if not azura:
+        return jsonify({'error': 'Section azuracast absente de config.json'}), 500
+
+    base_url = azura.get('base_url', '')
+    if not base_url:
+        base_url = AZURA_API_URL.rsplit('/station/', 1)[0]
+    api_key = azura.get('api_key', AZURA_API_KEY)
+
+    if not base_url.endswith('/api'):
+        base_url = base_url.rstrip('/') + '/api'
+
+    # Appeler GET /api/station/{station_id}/playlists
+    try:
+        playlists = _azura_api_get_station(
+            base_url, api_key,
+            f'/station/{station_id}/playlists'
+        )
+    except Exception as e:
+        _logger.error(f"[grille_editoriale] Erreur API playlists station {station_id} : {e}")
+        return jsonify({'error': f'Erreur appel API AzuraCast : {e}'}), 500
+
+    if not playlists or not isinstance(playlists, list):
+        return jsonify({
+            'station_id': station_id,
+            'blocs': [],
+            'message': 'Aucune playlist retournée par AzuraCast'
+        })
+
+    # Filtrer : uniquement les playlists activées avec des schedule_items
+    playlists_schedulees = []
+    for pl in playlists:
+        if not isinstance(pl, dict):
+            continue
+        if not pl.get('is_enabled', False):
+            continue
+        items = pl.get('schedule_items') or []
+        if not items:
+            continue
+        playlists_schedulees.append(pl)
+
+    if not playlists_schedulees:
+        return jsonify({
+            'station_id': station_id,
+            'blocs': [],
+            'message': 'Aucune playlist programmée (schedule_items) trouvée'
+        })
+
+    # Construire les tranches horaires à partir des schedule_items
+    tranches_brutes = []
+    for pl in playlists_schedulees:
+        pl_info = {
+            'id': pl.get('id'),
+            'name': pl.get('name', ''),
+            'weight': pl.get('weight', 1),
+            'source': pl.get('source', ''),
+            'order': pl.get('order', ''),
+            'is_enabled': pl.get('is_enabled', True),
+            'num_songs': pl.get('num_songs', 0),
+        }
+        for si in pl.get('schedule_items', []):
+            start_min = _hhmm_to_minutes(si.get('start_time'))
+            end_min = _hhmm_to_minutes(si.get('end_time'))
+            days = si.get('days') or []
+            if start_min is not None and end_min is not None:
+                tranches_brutes.append({
+                    'start_min': start_min,
+                    'end_min': end_min,
+                    'days': days,
+                    'playlist': pl_info,
+                })
+
+    # Regrouper par tranche horaire identique (start, end, days)
+    from collections import defaultdict
+    groupes = defaultdict(list)
+    for t in tranches_brutes:
+        cle = (t['start_min'], t['end_min'], frozenset(t['days']))
+        groupes[cle].append(t)
+
+    # Construire les blocs de la grille
+    blocs = []
+    for (start_min, end_min, days_set), items in sorted(groupes.items()):
+        days_list = sorted(days_set)
+        start_h = start_min // 60
+        start_m = start_min % 60
+        end_h = end_min // 60
+        end_m = end_min % 60
+        tranche_label = f"{start_h:02d}h{start_m:02d}-{end_h:02d}h{end_m:02d}"
+
+        playlists_du_bloc = []
+        poids_list = []
+        for item in items:
+            pl = item['playlist']
+            playlists_du_bloc.append({
+                'id': pl['id'],
+                'name': pl['name'],
+                'weight': pl['weight'],
+                'source': pl['source'],
+                'order': pl['order'],
+                'is_enabled': pl['is_enabled'],
+                'num_songs': pl['num_songs'],
+                'schedule_days': _jours_noms(item['days']),
+            })
+            poids_list.append(pl['weight'])
+
+        nb = len(playlists_du_bloc)
+        if nb == 1:
+            mode = 'auto'
+            badge = None
+        else:
+            mode = 'multi'
+            poids_str = '/'.join(str(p) for p in sorted(poids_list, reverse=True))
+            badge = f"{nb} playlists (poids {poids_str}) — saisie manuelle"
+
+        blocs.append({
+            'tranche': tranche_label,
+            'start_time': start_h * 100 + start_m,
+            'end_time': end_h * 100 + end_m,
+            'days': _jours_noms(days_list),
+            'mode': mode,
+            'playlists': playlists_du_bloc,
+            'badge': badge,
+        })
+
+    return jsonify({
+        'station_id': station_id,
+        'blocs': blocs,
+        'total_blocs': len(blocs),
+        'auto_count': sum(1 for b in blocs if b['mode'] == 'auto'),
+        'multi_count': sum(1 for b in blocs if b['mode'] == 'multi'),
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # ═══ Bulk Schedule AzuraCast (intégration 2026-07-08) ══════════════════
 # Modifie en masse la planification de plusieurs playlists AzuraCast.
 # Toutes les opérations passent par le worker Ubuntu (tâche BULK_SCHEDULE)
@@ -1505,3 +1691,155 @@ def api_bulk_schedule_apply():
     if result:
         return jsonify(result)
     return jsonify({'status': 'error', 'message': 'Aucun résultat retourné par le worker'}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ═══ Rafraîchissement manuel des dossiers AzuraCast ═══════════════
+# Permet au dashboard de scanner l’API AzuraCast et mettre à jour
+# la table azuracast_folders_cache sans attendre le worker Ubuntu.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@azuracast_bp.route('/api/azuracast/refresh-folders', methods=['POST'])
+@login_requis
+def api_azuracast_refresh_folders():
+    """Rafraîchit le cache des dossiers AzuraCast en interrogeant
+    directement l’API de chaque station configurée.
+
+    Pour chaque station :
+      1. GET /api/station/{id}/files (avec Bearer token)
+      2. Extraire les préfixes de répertoire uniques depuis les chemins
+      3. DELETE + INSERT dans azuracast_folders_cache
+
+    Retourne la liste agrégée des dossiers mis à jour.
+    """
+    stations = _lister_stations()
+    azura = _charger_azura_config()
+    # URL de base depuis config.json ou déduction depuis AZURA_API_URL
+    base_url = azura.get('base_url', '') if azura else ''
+    if not base_url:
+        # Fallback : déduire depuis AZURA_API_URL (station/7/files)
+        base_url = AZURA_API_URL.rsplit('/station/', 1)[0]
+    api_key = azura.get('api_key', AZURA_API_KEY) if azura else AZURA_API_KEY
+
+    # S’assurer que base_url se termine par /api
+    if not base_url.endswith('/api'):
+        base_url = base_url.rstrip('/') + '/api'
+
+    all_folders = set()
+    all_folders.add('imports_push')  # Dossier par défaut
+    rapports = []  # Détails par station pour le log
+
+    for station in stations:
+        sid = station['id']
+        nom = station['nom']
+        url = f"{base_url}/station/{sid}/files"
+
+        try:
+            # Réutiliser le même pattern que _azura_api_get (urllib + SSL désactivé)
+            req = urllib.request.Request(url, headers={
+                'Authorization': 'Bearer ' + api_key,
+                'Accept': 'application/json'
+            })
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                if resp.status != 200:
+                    rapports.append(f"Station {sid} ({nom}) : erreur HTTP {resp.status}")
+                    continue
+                data = json.loads(resp.read().decode('utf-8'))
+                rows = data if isinstance(data, list) else data.get('rows', [])
+
+                # Extraire les dossiers uniques depuis les chemins des fichiers
+                station_folders = set()
+                for morceau in rows:
+                    if not isinstance(morceau, dict):
+                        continue
+                    fpath = morceau.get('path', '')
+                    if fpath and '/' in fpath:
+                        parts = fpath.split('/')
+                        for i in range(1, len(parts)):
+                            station_folders.add('/'.join(parts[:i]))
+
+                all_folders.update(station_folders)
+                rapports.append(f"Station {sid} ({nom}) : {len(rows)} fichier(s), {len(station_folders)} dossier(s)")
+
+        except Exception as e:
+            rapports.append(f"Station {sid} ({nom}) : exception - {e}")
+            _logger.error(f"[azuracast] Erreur refresh-folders station {sid} : {e}")
+            continue
+
+    # Mettre à jour la table azuracast_folders_cache
+    try:
+        db = get_db_connection()
+        if not db:
+            return jsonify({'status': 'error', 'message': 'Connexion DB impossible'}), 500
+        cursor = db.cursor()
+
+        # S’assurer que la table existe (même DDL que le worker)
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS azuracast_folders_cache ("
+            "  id INT AUTO_INCREMENT PRIMARY KEY,"
+            "  folder_path VARCHAR(500) NOT NULL,"
+            "  station_id TINYINT NOT NULL DEFAULT 7,"
+            "  date_sync DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  UNIQUE KEY uq_folder_station (folder_path, station_id)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )
+
+        # Vérifier la colonne station_id (migration douce)
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = 'azuracast_folders_cache' "
+                "AND column_name = 'station_id'"
+            )
+            col_check = cursor.fetchone()
+            has_station_col = False
+            if isinstance(col_check, dict):
+                has_station_col = col_check.get('COUNT(*)', 0) > 0
+            elif isinstance(col_check, (list, tuple)):
+                has_station_col = col_check[0] > 0
+
+            if not has_station_col:
+                cursor.execute(
+                    "ALTER TABLE azuracast_folders_cache "
+                    "ADD COLUMN station_id TINYINT NOT NULL DEFAULT 7"
+                )
+        except Exception:
+            pass  # La colonne existe probablement déjà
+
+        # Vider et réinsérer pour chaque station
+        for station in stations:
+            sid = station['id']
+            cursor.execute(
+                "DELETE FROM azuracast_folders_cache WHERE station_id = %s",
+                (sid,)
+            )
+            for folder in sorted(all_folders):
+                cursor.execute(
+                    "INSERT IGNORE INTO azuracast_folders_cache (folder_path, station_id) "
+                    "VALUES (%s, %s)",
+                    (folder, sid)
+                )
+
+        db.commit()
+        cursor.close()
+        db.close()
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Erreur mise à jour cache : {e}',
+            'rapports': rapports
+        }), 500
+
+    result = sorted(all_folders)
+    _logger.info(f"[azuracast] refresh-folders : {len(result)} dossier(s), {len(stations)} station(s)")
+    return jsonify({
+        'status': 'ok',
+        'folders': result,
+        'count': len(result),
+        'rapports': rapports
+    })
