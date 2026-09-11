@@ -89,12 +89,15 @@ def api_pipeline_launch():
     Le worker Ubuntu Studio la capte automatiquement et traite le pipeline.
 
     Parametres JSON :
-      - source (str, obligatoire) : dossier source MP3
+      - source (str, obligatoire) : dossier source (MP3 / FLAC)
           Chemin Linux : "/mnt/stockage_160go/A_trier"
           Chemin Windows : "U:\\A_trier" (converti auto par le worker)
       - execute (bool) : execution reelle (defaut: false = dry-run)
       - recursive (bool) : scan recursif (defaut: false)
       - skip_mp3gain (bool) : sauter mp3gain (defaut: false)
+      - convert_flac (bool) : convertir FLAC en MP3 avant pipeline (defaut: true)
+      - flac_bitrate (int) : bitrate cible en kbps pour la conversion FLAC (defaut: 320)
+      - flac_delete_source (bool) : supprimer le FLAC source apres conversion (defaut: false)
       - sync_folder (str, optionnel) : forcer le dossier de sync
       - radiodj_api_url (str) : URL REST Server (defaut: http://192.168.1.39:7777)
       - radiodj_api_pass (str) : mot de passe REST Server v4
@@ -111,6 +114,9 @@ def api_pipeline_launch():
         'execute': bool(data.get('execute', False)),
         'recursive': bool(data.get('recursive', False)),
         'skip_mp3gain': bool(data.get('skip_mp3gain', False)),
+        'convert_flac': bool(data.get('convert_flac', True)),
+        'flac_bitrate': int(data.get('flac_bitrate', 320)),
+        'flac_delete_source': bool(data.get('flac_delete_source', False)),
         'sync_folder': data.get('sync_folder', ''),
         'radiodj_api_url': data.get(
             'radiodj_api_url',
@@ -782,6 +788,166 @@ def api_pipeline_test_mp3gain():
         result['ok'] = False
         result['error'] = str(e)
     return jsonify(result)
+
+
+# ══════════════════════════════════════════
+# CONVERSION FLAC → MP3 320k
+# ══════════════════════════════════════════
+
+@pipeline_import_bp.route('/api/pipeline/flac-convert', methods=['POST'])
+@login_requis
+def api_pipeline_flac_convert():
+    """Convertit un fichier FLAC en MP3 320 kbps via ffmpeg.
+
+    Parametres JSON :
+      - source (str, obligatoire) : chemin absolu du fichier FLAC
+      - bitrate (int, optionnel) : bitrate cible en kbps (defaut: 320)
+      - delete_source (bool, optionnel) : supprimer le FLAC apres conversion (defaut: false)
+
+    Le fichier MP3 est genere au meme emplacement que le FLAC,
+    avec la meme extension remplacee par .mp3.
+    Les metadonnees ID3 sont preservees via -map_metadata.
+    """
+    data = request.json or {}
+    source = data.get('source', '').strip()
+    bitrate = int(data.get('bitrate', 320))
+    delete_source = bool(data.get('delete_source', False))
+
+    if not source:
+        return jsonify({"error": "'source' est obligatoire"}), 400
+
+    if not source.lower().endswith('.flac'):
+        return jsonify({"error": "Le fichier source doit etre au format FLAC (.flac)"}), 400
+
+    if not os.path.isfile(source):
+        return jsonify({"error": f"Fichier introuvable : {source}"}), 400
+
+    # Verifier que ffmpeg est disponible
+    try:
+        proc = subprocess.run(
+            ['ffmpeg', '-version'],
+            capture_output=True, text=True, timeout=5
+        )
+        if proc.returncode != 0:
+            return jsonify({"error": "ffmpeg n'est pas disponible sur ce systeme"}), 500
+    except FileNotFoundError:
+        return jsonify({"error": "ffmpeg n'est pas installe (binaire introuvable)"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Erreur verification ffmpeg : {e}"}), 500
+
+    # Chemin de sortie MP3
+    mp3_path = source.rsplit('.', 1)[0] + '.mp3'
+
+    if os.path.exists(mp3_path):
+        return jsonify({
+            "error": f"Le fichier MP3 cible existe deja : {mp3_path}",
+            "mp3_path": mp3_path
+        }), 409
+
+    # Conversion FLAC → MP3
+    try:
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', source,
+            '-ab', f'{bitrate}k',
+            '-map_metadata', '0',
+            '-id3v2_version', '3',
+            mp3_path
+        ]
+        _logger.info(f"Conversion FLAC → MP3 : {source} → {mp3_path} ({bitrate}k)")
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300
+        )
+        if proc.returncode != 0:
+            return jsonify({
+                "error": f"ffmpeg a echoue (code {proc.returncode})",
+                "stderr": proc.stderr[-500:] if proc.stderr else ''
+            }), 500
+
+        # Verifier le fichier MP3 genere
+        mp3_size = os.path.getsize(mp3_path) if os.path.isfile(mp3_path) else 0
+        flac_size = os.path.getsize(source)
+
+        # Supprimer le FLAC source si demande
+        deleted = False
+        if delete_source and mp3_size > 0:
+            os.remove(source)
+            deleted = True
+            _logger.info(f"FLAC source supprime : {source}")
+
+        return jsonify({
+            "status": "ok",
+            "flac_path": source,
+            "mp3_path": mp3_path,
+            "bitrate": bitrate,
+            "flac_size": flac_size,
+            "mp3_size": mp3_size,
+            "source_deleted": deleted,
+            "message": f"Conversion reussie : {os.path.basename(source)} → {os.path.basename(mp3_path)} ({bitrate}k)"
+        })
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Timeout ffmpeg (>300s) — fichier trop volumineux ?"}), 504
+    except Exception as e:
+        _logger.error(f"Erreur conversion FLAC : {e}")
+        return jsonify({"error": f"Erreur conversion : {e}"}), 500
+
+
+@pipeline_import_bp.route('/api/pipeline/flac-detect', methods=['POST'])
+@login_requis
+def api_pipeline_flac_detect():
+    """Detecte les fichiers FLAC dans un dossier source.
+
+    Parametres JSON :
+      - source (str, obligatoire) : chemin du dossier a scanner
+      - recursive (bool, optionnel) : scan recursif (defaut: false)
+
+    Retourne la liste des fichiers FLAC trouves avec leur taille.
+    """
+    data = request.json or {}
+    source = data.get('source', '').strip()
+    recursive = bool(data.get('recursive', False))
+
+    if not source:
+        return jsonify({"error": "'source' est obligatoire"}), 400
+
+    if not os.path.isdir(source):
+        return jsonify({"error": f"Dossier introuvable : {source}"}), 400
+
+    flac_files = []
+    try:
+        if recursive:
+            for root, dirs, files in os.walk(source):
+                for fn in files:
+                    if fn.lower().endswith('.flac'):
+                        fpath = os.path.join(root, fn)
+                        flac_files.append({
+                            'path': fpath,
+                            'name': fn,
+                            'size': os.path.getsize(fpath),
+                            'size_mb': round(os.path.getsize(fpath) / 1048576, 2)
+                        })
+        else:
+            for fn in os.listdir(source):
+                if fn.lower().endswith('.flac'):
+                    fpath = os.path.join(source, fn)
+                    if os.path.isfile(fpath):
+                        flac_files.append({
+                            'path': fpath,
+                            'name': fn,
+                            'size': os.path.getsize(fpath),
+                            'size_mb': round(os.path.getsize(fpath) / 1048576, 2)
+                        })
+    except Exception as e:
+        return jsonify({"error": f"Erreur scan : {e}"}), 500
+
+    total_size = sum(f['size'] for f in flac_files)
+    return jsonify({
+        "source": source,
+        "flac_count": len(flac_files),
+        "total_size_mb": round(total_size / 1048576, 2),
+        "files": flac_files
+    })
 
 
 @pipeline_import_bp.route('/api/pipeline/sync-radiodj', methods=['POST'])
