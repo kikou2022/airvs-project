@@ -211,7 +211,7 @@ import signal
 # Le fallback hardcodé n'est utilisé que si la DB est inaccessible.
 
 if platform.system() == 'Windows':
-    _BROWSE_ROOTS_FALLBACK = ['U:/', 'M:/', 'L:/', 'D:/', 'E:/', 'N:/', 'Z:/', 'T:/']
+    _BROWSE_ROOTS_FALLBACK = ['U:/', 'M:/', 'L:/', 'D:/', 'E:/', 'N:/', 'Z:/', 'W:/', 'Y:/']
     _BROWSE_DEFAULT_FALLBACK = 'U:/'
 else:
     _BROWSE_ROOTS_FALLBACK = ['/mnt', '/mnt/stockage_1to', '/home', '/media']
@@ -264,7 +264,8 @@ def _assurer_schema_browse_roots():
                 ('E:/', 'Lecteur E:', 5),
                 ('N:/', 'Lecteur N:', 6),
                 ('Z:/', 'Lecteur Z:', 7),
-                ('T:/', 'Lecteur T:', 8),
+                ('W:/', 'Stockage 500 Go (Ubuntu Studio)', 8),
+                ('Y:/', 'Stockage 80 Go (Ubuntu Studio)', 9),
                 ('/mnt', 'Mnt (Linux)', 10),
                 ('/mnt/stockage_1to', 'Stockage 1To', 11),
                 ('/home', 'Home (Linux)', 12),
