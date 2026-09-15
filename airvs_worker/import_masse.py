@@ -123,13 +123,16 @@ def _format_taille(octets):
 # ─── Tags ID3 ────────────────────────────────────────────────────
 
 def _lire_tags(fichier):
-    """Retourne (artist, title) depuis les tags ID3."""
+    """Retourne (artist, title) depuis les tags (MP3 ID3 ou FLAC Vorbis)."""
     if not MUTAGEN_OK:
         return "", ""
     try:
-        tags = ID3(str(fichier))
-        artist = str(tags.get("TPE1", "")).strip()
-        title = str(tags.get("TIT2", "")).strip()
+        # Utiliser MutagenFile (easy=True) qui supporte MP3, FLAC, OGG, etc.
+        audio = MutagenFile(str(fichier), easy=True)
+        if audio is None:
+            return "", ""
+        artist = str(audio.get('artist', [''])[0]).strip()
+        title = str(audio.get('title', [''])[0]).strip()
         return artist, title
     except Exception:
         return "", ""
@@ -635,7 +638,11 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
     execute = parametres.get('execute', False)
     recursive = parametres.get('recursive', False)
     skip_mp3gain = parametres.get('skip_mp3gain', False)
+    convert_flac = bool(parametres.get('convert_flac', True))
+    flac_bitrate = int(parametres.get('flac_bitrate', 320))
+    flac_delete_source = bool(parametres.get('flac_delete_source', False))
     sync_folder_force = parametres.get('sync_folder', '').strip() or None
+    suspects_dir_force = (parametres.get('suspects_dir', '') or '').strip() or None
     radiodj_api_url = parametres.get('radiodj_api_url', 'http://192.168.1.39:7777')
     radiodj_api_pass = parametres.get('radiodj_api_pass', '')
     radiodj_event_id = int(parametres.get('radiodj_event_id', RADIODJ_EVENT_ID_DEFAUT))
@@ -643,6 +650,8 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
     mode_label = "EXECUTION RÉELLE" if execute else "DRY-RUN (simulation)"
     log(f"=== IMPORT DE MASSE - {mode_label} ===")
     log(f"Source (saisie)   : {source_raw}")
+    log(f"Paramètres : execute={execute}, recursive={recursive}, skip_mp3gain={skip_mp3gain}, "
+        f"convert_flac={convert_flac}, flac_bitrate={flac_bitrate}, flac_delete_source={flac_delete_source}")
 
     # ── Conversion du chemin source Windows -> Linux ──
     if not source_raw:
@@ -671,19 +680,89 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
     sync_dir = _dossier_sync_courant(sync_folder_force)
     log(f"Dossier sync     : {sync_dir}")
 
-    # ── Scan MP3 ──
+    # ── Scan fichiers audio (MP3 + FLAC) ──
     if recursive:
-        mp3s = sorted(src_dir.rglob("*.mp3")) + sorted(src_dir.rglob("*.MP3"))
+        fichiers_audio = sorted(src_dir.rglob("*.mp3")) + sorted(src_dir.rglob("*.MP3")) + sorted(src_dir.rglob("*.flac")) + sorted(src_dir.rglob("*.FLAC"))
     else:
-        mp3s = sorted(src_dir.glob("*.mp3")) + sorted(src_dir.glob("*.MP3"))
-    mp3s = list(dict.fromkeys(mp3s))  # déduplication
+        fichiers_audio = sorted(src_dir.glob("*.mp3")) + sorted(src_dir.glob("*.MP3")) + sorted(src_dir.glob("*.flac")) + sorted(src_dir.glob("*.FLAC"))
+    fichiers_audio = list(dict.fromkeys(fichiers_audio))  # déduplication
 
-    if not mp3s:
-        log(f"Aucun fichier MP3 dans : {src_dir}")
+    if not fichiers_audio:
+        log(f"Aucun fichier audio (MP3/FLAC) dans : {src_dir}")
         log("=== IMPORT DE MASSE TERMINE (aucun fichier) ===")
         return
 
-    log(f"{len(mp3s)} fichier(s) MP3 trouvé(s)")
+    log(f"{len(fichiers_audio)} fichier(s) audio trouvé(s)")
+
+    # ── Conversion FLAC vers MP3 (si exécution réelle + convert_flac=True) ──
+    # temp_dir est initialisé à None pour permettre un cleanup final en toutes circonstances.
+    temp_dir = None
+    flac_files = [f for f in fichiers_audio if f.suffix.lower() == '.flac']
+    if flac_files and convert_flac:
+        if not execute:
+            log(f"[DRY-RUN] {len(flac_files)} fichier(s) FLAC seraient convertis en MP3 ({flac_bitrate} kbps)")
+        else:
+            log(f"--- ETAPE 0 : CONVERSION FLAC -> MP3 ({len(flac_files)} fichier(s), {flac_bitrate} kbps) ---")
+            import tempfile
+            import shutil as _shutil
+            temp_dir = Path(tempfile.mkdtemp(prefix="airvs_convert_"))
+            log(f"Dossier temporaire de conversion : {temp_dir}")
+            
+            mp3_converted = []
+            for i, flac_path in enumerate(flac_files, 1):
+                mp3_path = temp_dir / (flac_path.stem + ".mp3")
+                try:
+                    proc = subprocess.run(
+                        ["ffmpeg", "-y", "-i", str(flac_path), "-codec:a", "libmp3lame",
+                         "-b:a", f"{flac_bitrate}k", str(mp3_path)],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300
+                    )
+                    if proc.returncode == 0 and mp3_path.exists():
+                        log(f"  [{i}/{len(flac_files)}] {flac_path.name} -> {mp3_path.name} ({flac_bitrate} kbps)")
+                        mp3_converted.append(mp3_path)
+                        # Supprimer le fichier FLAC source si demandé
+                        if flac_delete_source:
+                            try:
+                                flac_path.unlink()
+                                log(f"    -> FLAC source supprimé : {flac_path.name}")
+                            except Exception as e_del:
+                                log(f"    -> Erreur suppression FLAC source : {e_del}")
+                    else:
+                        err = proc.stderr[-200:] if proc.stderr else "Erreur inconnue"
+                        log(f"  [{i}/{len(flac_files)}] {flac_path.name} -> ERREUR ffmpeg : {err}")
+                except FileNotFoundError:
+                    log("  ERREUR : ffmpeg non trouvé. Installez avec 'sudo apt install ffmpeg'")
+                    break
+                except subprocess.TimeoutExpired:
+                    log(f"  [{i}/{len(flac_files)}] {flac_path.name} -> TIMEOUT ffmpeg")
+                except Exception as e:
+                    log(f"  [{i}/{len(flac_files)}] {flac_path.name} -> ERREUR : {e}")
+            
+            # Remplacer les FLAC par les MP3 convertis dans la liste
+            fichiers_audio = [f for f in fichiers_audio if f.suffix.lower() != '.flac'] + mp3_converted
+            log(f"Conversion terminée : {len(mp3_converted)}/{len(flac_files)} FLAC convertis en MP3")
+            
+            # ── Nettoyage du dossier temporaire de conversion ──
+            # On attend la fin du pipeline principal pour supprimer, mais ici les MP3
+            # sont déjà référencés dans `fichiers_audio`. On nettoie seulement les
+            # éventuels résidus (fichiers MP3 d'échecs restés dans temp_dir).
+            try:
+                # Ne supprimer que les fichiers qui ne sont PAS dans mp3_converted
+                # (les MP3 convertis avec succès sont encore nécessaires au pipeline).
+                fichiers_audio_set = set(f.resolve() for f in fichiers_audio)
+                for entry in temp_dir.iterdir():
+                    if entry.resolve() not in fichiers_audio_set:
+                        try:
+                            entry.unlink()
+                        except Exception:
+                            pass
+                # Le temp_dir sera supprimé en fin de tâche (voir bloc finally plus bas).
+                log(f"Nettoyage intermédiaire du temp_dir effectué (résidus éventuels).")
+            except Exception as e_cleanup:
+                log(f"  (avertissement) nettoyage intermédiaire temp_dir : {e_cleanup}")
+    elif flac_files and not convert_flac:
+        log(f"{len(flac_files)} fichier(s) FLAC ignoré(s) — convert_flac=False, ils ne seront pas importés.")
+        fichiers_audio = [f for f in fichiers_audio if f.suffix.lower() != '.flac']
 
     # ════════════════════════════════════════════════════════════
     # ETAPE 1 : DEDOUBLONNAGE
@@ -706,7 +785,7 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
     suspects = []
     nouveaux = []
 
-    for fichier in mp3s:
+    for fichier in fichiers_audio:
         try:
             trouve, methode, detail, song_id, bdd_row = _verifier_en_base(cursor, fichier)
         except Exception as e:
@@ -819,7 +898,9 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
 
     # Déplacer les suspects vers un dossier séparé
     if nb_suspects > 0 and execute:
-        dir_suspects = src_dir / "suspects"
+        # Dossier suspects : paramètre optionnel 'suspects_dir', sinon défaut hardcodé
+        # (chemin Linux du dossier suspects global U:\Musique\import\suspects)
+        dir_suspects = Path(suspects_dir_force or "/mnt/stockage_160go/Musique/import/suspects")
         log(f"Déplacement de {nb_suspects} suspect(s) vers {dir_suspects}...")
         log("  (À vérifier manuellement : possibles remasters, versions live, etc.)")
         for s in suspects:
@@ -856,6 +937,12 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
 
     if nb_nouveaux == 0:
         log("Aucune nouveauté à traiter. Pipeline terminé.")
+        # Cleanup final du temp_dir si créé (les MP3 ont été déplacés en doublons/suspects)
+        if temp_dir is not None:
+            try:
+                _shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
         log("=== IMPORT DE MASSE TERMINE (que des doublons) ===")
         return
 
@@ -864,6 +951,12 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
     # ════════════════════════════════════════════════════════════
     if not execute:
         log(f"[DRY-RUN] {nb_nouveaux} fichier(s) seraient traités avec execute=true")
+        # Cleanup final du temp_dir (en dry-run, temp_dir reste None — aucune action)
+        if temp_dir is not None:
+            try:
+                _shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
         log("=== IMPORT DE MASSE TERMINE (dry-run) ===")
         return
 
@@ -930,7 +1023,7 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
     log("")
     log("========================================")
     log("  RAPPORT FINAL")
-    log(f"  Scannés      : {len(mp3s)}")
+    log(f"  Scannés      : {len(fichiers_audio)}")
     log(f"  Doublons     : {nb_doublons}")
     log(f"  Suspects     : {nb_suspects}")
     log(f"  Normalisés   : {len(etape2['succes'])}")
@@ -938,4 +1031,13 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
     log(f"  Sync RadioDJ : {'OK' if etape4['ok'] else 'non déclenchée'}")
     log(f"  Dossier sync : {sync_dir}")
     log("========================================")
+    # ── Cleanup final du temp_dir de conversion FLAC ──
+    # À ce stade, tous les MP3 convertis avec succès ont été déplacés vers sync_dir
+    # (ÉTAPE 3) → le temp_dir ne contient plus que d'éventuels résidus d'échecs.
+    if temp_dir is not None:
+        try:
+            _shutil.rmtree(temp_dir, ignore_errors=True)
+            log(f"Dossier temporaire supprimé : {temp_dir}")
+        except Exception as e_clean:
+            log(f"  (avertissement) cleanup temp_dir : {e_clean}")
     log("=== IMPORT DE MASSE TERMINE ===")
