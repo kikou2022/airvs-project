@@ -808,9 +808,13 @@ def api_pipeline_test_mp3gain():
     # Verifier le chemin
     result = {'path': MP3GAIN_PATH, 'exists': os.path.exists(MP3GAIN_PATH) if os.path.isabs(MP3GAIN_PATH) else None}
     try:
+        creationflags = 0
+        if platform.system() == 'Windows':
+            creationflags = subprocess.CREATE_NO_WINDOW
         proc = subprocess.run(
             [MP3GAIN_PATH, '-v'],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=10,
+            creationflags=creationflags
         )
         result['version'] = (proc.stdout or proc.stderr or '').strip()[:200]
         result['returncode'] = proc.returncode
@@ -858,9 +862,13 @@ def api_pipeline_flac_convert():
 
     # Verifier que ffmpeg est disponible
     try:
+        creationflags = 0
+        if platform.system() == 'Windows':
+            creationflags = subprocess.CREATE_NO_WINDOW
         proc = subprocess.run(
             ['ffmpeg', '-version'],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            creationflags=creationflags
         )
         if proc.returncode != 0:
             return jsonify({"error": "ffmpeg n'est pas disponible sur ce systeme"}), 500
@@ -889,8 +897,12 @@ def api_pipeline_flac_convert():
             mp3_path
         ]
         _logger.info(f"Conversion FLAC → MP3 : {source} → {mp3_path} ({bitrate}k)")
+        creationflags = 0
+        if platform.system() == 'Windows':
+            creationflags = subprocess.CREATE_NO_WINDOW
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=300
+            cmd, capture_output=True, text=True, timeout=300,
+            creationflags=creationflags
         )
         if proc.returncode != 0:
             return jsonify({
@@ -1101,9 +1113,14 @@ def _lire_tags_suspect(filepath):
 def _run_mp3gain_windows(filepath):
     """Normalise un fichier MP3 a 89 dB via mp3gain local (Windows)."""
     try:
+        # CREATE_NO_WINDOW pour éviter qu'une fenêtre console s'ouvre sur Windows
+        creationflags = 0
+        if platform.system() == 'Windows':
+            creationflags = subprocess.CREATE_NO_WINDOW
         proc = subprocess.run(
             [MP3GAIN_PATH, '-r', '-c', '-k', str(filepath)],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=120,
+            creationflags=creationflags
         )
         if proc.returncode in (0, 2):
             dB_info = ''

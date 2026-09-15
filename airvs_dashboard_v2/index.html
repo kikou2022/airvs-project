@@ -4238,7 +4238,7 @@
                                         </select>
                                     </div>
                                     <div class="form-check mb-2" style="padding-left:1.5rem;">
-                                        <input class="form-check-input" type="checkbox" id="pipeline_flac_delete_source">
+                                        <input class="form-check-input" type="checkbox" id="pipeline_flac_delete_source" checked>
                                         <label class="form-check-label small" for="pipeline_flac_delete_source">
                                             Supprimer le FLAC source après conversion
                                         </label>
@@ -6078,6 +6078,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     execute: document.getElementById('pipeline_execute').checked,
                     recursive: document.getElementById('pipeline_recursive').checked,
                     skip_mp3gain: !document.getElementById('pipeline_do_mp3gain').checked,
+                    convert_flac: document.getElementById('pipeline_convert_flac').checked,
+                    flac_bitrate: parseInt(document.getElementById('pipeline_flac_bitrate').value) || 320,
+                    flac_delete_source: document.getElementById('pipeline_flac_delete_source').checked,
                     sync_folder: document.getElementById('pipeline_sync_folder').value.trim()
                 };
 

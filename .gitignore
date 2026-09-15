@@ -38,3 +38,9 @@ node_modules/
 data/
 tmp/
 .cache/
+
+# Archives et compte-rendus internes (ne jamais publier sur GitHub)
+Compte-rendus\ techniques\ -\ archives\ et\ bibles/
+*.tar
+git_commit_*.sh
+git_commit_*.sh.sh
