@@ -1,3 +1,88 @@
+# ════════════════════════════════════════════════════════════════════════════════════════
+# ████  ✅✅✅  C'EST CE FICHIER-CI À TÉLÉCHARGER  ✅✅✅  ████
+# ════════════════════════════════════════════════════════════════════════════════════════
+# 
+# 📥 Nom du fichier à télécharger : pipeline_import_fusionne_2026-09-16.py
+# 
+# 📥 Chemin complet (côté agent) :
+#    /home/z/my-project/download/pipeline_import_fusionne_2026-09-16.py
+# 
+# 📊 Caractéristiques :
+#    - Taille  : 86 042 octets
+#    - SHA256  : a83c99e1a43d359fd2c5af784f81d67448e81e115a70a5ae7429b01dbb6ae431
+#    - Lignes  : ~2283
+# 
+# 🎯 Chemin cible sur le dashboard (machine Windows .39) :
+#    airvs_dashboard_v2/blueprints/pipeline_import.py
+#    (renomme le fichier en "pipeline_import.py" après téléchargement, sans le suffixe _fusionne_2026-09-16)
+# 
+# 📋 Contenu de cette version (fusion production + bugfix Bug 2) :
+# 
+#    ✅ Endpoints existants PRÉSERVÉS (non modifiés) :
+#       - POST /api/pipeline/launch           (INSERT tâche IMPORT_MASSE en DB)
+#       - GET  /api/pipeline/status/<id>        (état d'une tâche pipeline)
+#       - POST /api/pipeline/sync-radiodj       (sync FolderSync)
+#       - GET  /api/pipeline/browse            (navigateur de dossiers)
+#       - GET  /api/suspects                   (liste suspects + match DB)
+#       - GET  /api/suspects/play/<fn>         (stream un suspect)
+#       - GET  /api/suspects/play-existing/<id> (stream fichier existant)
+#       - POST /api/suspects/validate          (valide un suspect)
+#       - POST /api/suspects/reject            (rejette/supprime un suspect)
+#       - GET  /api/manquants/liste            (liste avec filtres/pagination)
+#       - GET  /api/manquants/stats            (compteurs par source/statut)
+#       - POST /api/manquants/resolve           (marque résolu - faux positif)
+#       - DELETE /api/manquants/delete          (supprime un manquant)
+# 
+#    ✅ Ajouts Windows subprocess PRÉSERVÉS de ta version prod :
+#       - 4 blocs `creationflags=CREATE_NO_WINDOW` aux lignes 811, 865, 900, 1117
+#         → évite l'ouverture de fenêtres console noires sur le dashboard Windows
+# 
+#    🆕 NOUVEAUX endpoints POUR BUG 2 (correction titres après synchro VPS) :
+#       - POST /api/manquants/corriger  (lignes 2018-2153)
+#         Body: {row_id, table: 'animateurs'|'shazam', correction_artiste, correction_titre, motif}
+#         Effet: marque l'originale statut='rejete_corrige' + crée une nouvelle ligne
+#                corrigée avec statut='nouveau' et source='corrige'
+#         Retour: {ok: true, new_id, original_id, table, correction: {artiste, titre}}
+# 
+#       - POST /api/manquants/rejeter   (lignes 2156-2242)
+#         Body: {row_id, table: 'animateurs'|'shazam', motif}
+#         Effet: marque l'entrée statut='rejete' + ajoute le motif au commentaire
+#         Retour: {ok: true, id, table, statut: 'rejete'}
+# 
+# 📦 Les 3 autres fichiers déjà déployés (bug 1 + bug 3) :
+#    - azuracast_bugfix.py         (SHA256 1dfe4f6f72d68e16e36f4ac8d71be0310464604f1a3b7b59c89fdaee3b4dccd9)
+#    - shazam_bugfix.py            (SHA256 7cfa4e3f2b70ac9108115786b152bf2c73bc3a4bd85850dbbc21efe5a4b4bcee)
+#    - shazam-animateurs_bugfix.js (SHA256 be7f954ed30731ac22b3ffe95f5f1ae3b4c0d0552d031cfb4ead7003d2b74681)
+# 
+# 🚀 Procédure de déploiement :
+#    1. Sauvegarder le pipeline_import.py actuel (backup)
+#       cp pipeline_import.py pipeline_import.py.bak_$(date +%Y%m%d_%H%M)
+#    2. Télécharger ce fichier : pipeline_import_fusionne_2026-09-16.py
+#    3. Vérifier le SHA256 :
+#       sha256sum pipeline_import_fusionne_2026-09-16.py
+#       → doit retourner a83c99e1a43d359fd2c5af784f81d67448e81e115a70a5ae7429b01dbb6ae431
+#    4. Renommer en pipeline_import.py et déposer dans :
+#       airvs_dashboard_v2/blueprints/pipeline_import.py
+#    5. Redémarrer le service Flask du dashboard
+#    6. Ctrl+F5 dans le navigateur (pas nécessaire pour ce fichier côté Python, mais OK)
+# 
+# 🧪 Test Bug 2 après déploiement :
+#    1. Aller dans Programmation → Animateurs (VPS) ou Shazam (VPS)
+#    2. Faire une synchro VPS pour avoir de nouvelles entrées
+#    3. Cliquer sur l'icône ✎ Corriger d'une entrée
+#    4. Saisir un artiste/titre corrigé + motif
+#    5. Valider
+#    ✅ SUCCÈS : l'entrée originale est marquée 'rejete_corrige',
+#       une nouvelle entrée corrigée est créée avec 'statut=nouveau'.
+#       Plus de pop-up HTTP 404.
+#    6. Tester aussi ❌ Rejeter → statut 'rejete'
+# 
+# ⚠️ À NE PAS TÉLÉCHARGER :
+#    - Tout autre fichier pipeline_import*.py qui pourrait apparaître dans la zone
+#      de téléchargement (anciens fichiers non patchés). Ce fichier-ci est le SEUL
+#      qui contient les 2 nouveaux endpoints /corriger et /rejeter.
+# ════════════════════════════════════════════════════════════════════════════════════════
+
 """blueprints/pipeline_import.py -- Routes pipeline import de masse.
 
 Permet de lancer le pipeline dedoublonnage -> mp3gain -> dossier sync RadioDJ
@@ -2013,6 +2098,233 @@ def api_manquants_resolve():
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"ok": True, "id": manq_id, "statut": "resolu"})
+
+
+@pipeline_import_bp.route('/api/manquants/corriger', methods=['POST'])
+@login_requis
+def api_manquants_corriger():
+    """Corrige artiste/titre d'une entrée (airvs_animateurs ou airvs_shazam).
+
+    Body JSON : {
+        row_id: int,                  # ID de la ligne à corriger
+        table: 'animateurs' | 'shazam',  # Table cible
+        correction_artiste: str,
+        correction_titre: str,
+        motif: str (optionnel)
+    }
+
+    Effet :
+      1. La ligne originale est marquée statut='rejete_corrige' (si la colonne
+         statut existe) et le motif est ajouté au commentaire.
+      2. Une nouvelle ligne est insérée dans la MÊME table avec les valeurs
+         corrigées, statut='nouveau', source='corrige'.
+      3. Retourne {ok: true, new_id: int}.
+    """
+    data = request.json or {}
+    row_id = data.get('row_id')
+    table = (data.get('table') or '').strip().lower()
+    new_artiste = (data.get('correction_artiste') or '').strip()
+    new_titre = (data.get('correction_titre') or '').strip()
+    motif = (data.get('motif') or '').strip()
+
+    # Validation des entrées
+    if not row_id:
+        return jsonify({"error": "'row_id' est obligatoire"}), 400
+    if table not in ('animateurs', 'shazam'):
+        return jsonify({"error": "'table' doit être 'animateurs' ou 'shazam'"}), 400
+    if not new_artiste or not new_titre:
+        return jsonify({"error": "'correction_artiste' et 'correction_titre' sont obligatoires"}), 400
+
+    # Mapping table → nom SQL réel
+    table_sql = 'airvs_animateurs' if table == 'animateurs' else 'airvs_shazam'
+    # Colonne de date selon la table
+    date_col = 'date_soumission' if table == 'animateurs' else 'date_reconnaissance'
+
+    db = get_db_connection()
+    if not db:
+        return jsonify({"error": "Erreur DB"}), 500
+
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+
+        # 1. Vérifier que la ligne originale existe
+        cursor.execute(f"SELECT * FROM {table_sql} WHERE id = %s", (row_id,))
+        original = cursor.fetchone()
+        if not original:
+            return jsonify({"error": f"Ligne {row_id} introuvable dans {table_sql}"}), 404
+
+        # 2. Détecter si la colonne statut existe
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = %s AND column_name = 'statut'",
+            (table_sql,)
+        )
+        has_statut = bool(cursor.fetchone())
+
+        # 3. Marquer l'originale comme rejetée-corigée
+        if has_statut:
+            cursor.execute(
+                f"UPDATE {table_sql} SET statut = 'rejete_corrige' WHERE id = %s",
+                (row_id,)
+            )
+        # Ajouter le motif au commentaire si la colonne commentaire existe
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = %s AND column_name = 'commentaire'",
+            (table_sql,)
+        )
+        has_commentaire = bool(cursor.fetchone())
+        if has_commentaire and motif:
+            cursor.execute(
+                f"UPDATE {table_sql} SET commentaire = CONCAT(IFNULL(commentaire, ''), "
+                f"' | corrige: ', %s) WHERE id = %s",
+                (motif, row_id)
+            )
+
+        # 4. Récupérer l'animateur de la ligne originale pour le propagr à la nouvelle
+        animateur_orig = original.get('animateur') if 'animateur' in original else None
+
+        # 5. Construire l'INSERT de la nouvelle ligne corrigée
+        # Colonnes communes : artiste, titre, source, animateur, date_*, statut
+        # (on évite de toucher à id, vps_id, video_url, etc. qui ne sont pas pertinents ici)
+        if table == 'animateurs':
+            insert_cols = ['artiste', 'titre', 'source', 'animateur', date_col, 'date_sync']
+            if has_statut:
+                insert_cols.append('statut')
+            insert_vals = [new_artiste, new_titre, 'corrige', animateur_orig,
+                           datetime.now(), datetime.now()]
+            if has_statut:
+                insert_vals.append('nouveau')
+        else:  # shazam
+            insert_cols = ['artiste', 'titre', 'source', 'animateur', date_col]
+            if has_statut:
+                insert_cols.append('statut')
+            insert_vals = [new_artiste, new_titre, 'corrige', animateur_orig,
+                           datetime.now()]
+            if has_statut:
+                insert_vals.append('nouveau')
+
+        placeholders = ', '.join(['%s'] * len(insert_vals))
+        cols_str = ', '.join(f'`{c}`' for c in insert_cols)
+        cursor.execute(
+            f"INSERT INTO {table_sql} ({cols_str}) VALUES ({placeholders})",
+            tuple(insert_vals)
+        )
+        new_id = cursor.lastrowid
+
+        db.commit()
+        return jsonify({
+            "ok": True,
+            "new_id": new_id,
+            "original_id": row_id,
+            "table": table,
+            "correction": {"artiste": new_artiste, "titre": new_titre}
+        })
+
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _logger.error(f"[manquants/corriger] Erreur : {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        try:
+            if cursor:
+                cursor.close()
+            db.close()
+        except Exception:
+            pass
+
+
+@pipeline_import_bp.route('/api/manquants/rejeter', methods=['POST'])
+@login_requis
+def api_manquants_rejeter():
+    """Rejette une entrée (airvs_animateurs ou airvs_shazam) avec motif.
+
+    Body JSON : {
+        row_id: int,
+        table: 'animateurs' | 'shazam',
+        motif: str (optionnel)
+    }
+
+    Effet :
+      1. La ligne est marquée statut='rejete' (si la colonne statut existe).
+      2. Le motif est ajouté au commentaire (si la colonne commentaire existe).
+      3. Retourne {ok: true}.
+    """
+    data = request.json or {}
+    row_id = data.get('row_id')
+    table = (data.get('table') or '').strip().lower()
+    motif = (data.get('motif') or '').strip()
+
+    if not row_id:
+        return jsonify({"error": "'row_id' est obligatoire"}), 400
+    if table not in ('animateurs', 'shazam'):
+        return jsonify({"error": "'table' doit être 'animateurs' ou 'shazam'"}), 400
+
+    table_sql = 'airvs_animateurs' if table == 'animateurs' else 'airvs_shazam'
+
+    db = get_db_connection()
+    if not db:
+        return jsonify({"error": "Erreur DB"}), 500
+
+    cursor = None
+    try:
+        cursor = db.cursor()
+
+        # Vérifier l'existence de la ligne
+        cursor.execute(f"SELECT id FROM {table_sql} WHERE id = %s", (row_id,))
+        if not cursor.fetchone():
+            return jsonify({"error": f"Ligne {row_id} introuvable dans {table_sql}"}), 404
+
+        # Détecter la colonne statut
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = %s AND column_name = 'statut'",
+            (table_sql,)
+        )
+        has_statut = bool(cursor.fetchone())
+
+        if has_statut:
+            cursor.execute(
+                f"UPDATE {table_sql} SET statut = 'rejete' WHERE id = %s",
+                (row_id,)
+            )
+
+        # Détecter la colonne commentaire
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = %s AND column_name = 'commentaire'",
+            (table_sql,)
+        )
+        has_commentaire = bool(cursor.fetchone())
+
+        if has_commentaire and motif:
+            cursor.execute(
+                f"UPDATE {table_sql} SET commentaire = CONCAT(IFNULL(commentaire, ''), "
+                f"' | rejete: ', %s) WHERE id = %s",
+                (motif, row_id)
+            )
+
+        db.commit()
+        return jsonify({"ok": True, "id": row_id, "table": table, "statut": "rejete"})
+
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _logger.error(f"[manquants/rejeter] Erreur : {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        try:
+            if cursor:
+                cursor.close()
+            db.close()
+        except Exception:
+            pass
 
 
 @pipeline_import_bp.route('/api/manquants/delete', methods=['DELETE'])
