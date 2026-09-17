@@ -570,8 +570,23 @@ def api_shazam_log():
 @shazam_bp.route('/api/shazam/list')
 @login_requis
 def api_shazam_list():
-    """Renvoie les N dernières reconnaissances Shazam (avec statut si disponible)."""
-    limite = min(max(int(request.args.get('limit', '50')), 1), 500)
+    """Renvoie les N dernières reconnaissances Shazam (avec statut si disponible).
+
+    Deux modes :
+      • Legacy : ``?limit=N`` → renvoie un array JSON (rétro-compatibilité)
+      • Pagination : ``?page=N&page_size=M`` → renvoie
+        {rows: [...], page, page_size, total_count, total_pages}
+    """
+    limite_arg = request.args.get('limit')
+    page_arg = request.args.get('page')
+    page_size_arg = request.args.get('page_size', '20')
+
+    # Mode pagination (préféré si page est fourni)
+    use_pagination = bool(page_arg)
+    page = max(int(page_arg or '1'), 1)
+    page_size = min(max(int(page_size_arg), 1), 100)
+    # Legacy : limite codée (max 500)
+    limite = min(max(int(limite_arg or '50'), 1), 500)
 
     try:
         db = get_db_connection()
@@ -583,27 +598,45 @@ def api_shazam_list():
         except Exception:
             _has_statut = False
 
-        if _has_statut:
+        select_cols = ("id, artiste, titre, date_reconnaissance, source, animateur "
+                       + (", statut, match_song_id, match_passe" if _has_statut else ""))
+
+        if use_pagination:
+            # Compter le total
+            cursor.execute("SELECT COUNT(*) AS c FROM airvs_shazam")
+            total_count = cursor.fetchone()['c']
+            total_pages = max((total_count + page_size - 1) // page_size, 1)
+            offset = (page - 1) * page_size
             cursor.execute(
-                "SELECT id, artiste, titre, date_reconnaissance, source, animateur, "
-                "statut, match_song_id, match_passe "
-                "FROM airvs_shazam ORDER BY date_reconnaissance DESC LIMIT %s",
-                (limite,)
+                f"SELECT {select_cols} FROM airvs_shazam "
+                f"ORDER BY date_reconnaissance DESC LIMIT %s OFFSET %s",
+                (page_size, offset)
             )
+            rows = cursor.fetchall()
+            cursor.close()
+            db.close()
+            for r in rows:
+                if isinstance(r.get('date_reconnaissance'), datetime):
+                    r['date_reconnaissance'] = r['date_reconnaissance'].strftime('%d/%m/%Y %H:%M')
+            return jsonify({
+                "rows": rows,
+                "page": page,
+                "page_size": page_size,
+                "total_count": total_count,
+                "total_pages": total_pages
+            })
         else:
             cursor.execute(
-                "SELECT id, artiste, titre, date_reconnaissance, source, animateur "
-                "FROM airvs_shazam ORDER BY date_reconnaissance DESC LIMIT %s",
+                f"SELECT {select_cols} FROM airvs_shazam ORDER BY date_reconnaissance DESC LIMIT %s",
                 (limite,)
             )
-        rows = cursor.fetchall()
-        cursor.close()
-        db.close()
-        # Convertir les datetime en string pour JSON
-        for r in rows:
-            if isinstance(r.get('date_reconnaissance'), datetime):
-                r['date_reconnaissance'] = r['date_reconnaissance'].strftime('%d/%m/%Y %H:%M')
-        return jsonify(rows)
+            rows = cursor.fetchall()
+            cursor.close()
+            db.close()
+            for r in rows:
+                if isinstance(r.get('date_reconnaissance'), datetime):
+                    r['date_reconnaissance'] = r['date_reconnaissance'].strftime('%d/%m/%Y %H:%M')
+            return jsonify(rows)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -686,9 +719,22 @@ def api_shazam_delete(shazam_id):
 @login_requis
 def api_animateurs_list():
     """Renvoie les N dernières soumissions animateurs (table airvs_animateurs).
-    Cette table est alimentée par le worker via sync VPS soumissions."""
-    limite = min(max(int(request.args.get('limit', '150')), 1), 500)
+    Cette table est alimentée par le worker via sync VPS soumissions.
+
+    Deux modes :
+      • Legacy : ``?limit=N`` → renvoie un array JSON (rétro-compatibilité)
+      • Pagination : ``?page=N&page_size=M`` → renvoie
+        {rows: [...], page, page_size, total_count, total_pages}
+    """
+    limite_arg = request.args.get('limit')
+    page_arg = request.args.get('page')
+    page_size_arg = request.args.get('page_size', '20')
     animateur_filter = (request.args.get('animateur') or '').strip()
+
+    use_pagination = bool(page_arg)
+    page = max(int(page_arg or '1'), 1)
+    page_size = min(max(int(page_size_arg), 1), 100)
+    limite = min(max(int(limite_arg or '150'), 1), 500)
 
     try:
         db = get_db_connection()
@@ -704,7 +750,9 @@ def api_animateurs_list():
         if not cursor.fetchone().get('c', 0):
             cursor.close()
             db.close()
-            return jsonify([])
+            return jsonify([] if not use_pagination else
+                           {"rows": [], "page": page, "page_size": page_size,
+                            "total_count": 0, "total_pages": 0})
 
         # Construire le SELECT dynamiquement en fonction des colonnes existantes
         cursor.execute(
@@ -722,29 +770,56 @@ def api_animateurs_list():
         if not _select_cols:
             cursor.close()
             db.close()
-            return jsonify([])
+            return jsonify([] if not use_pagination else
+                           {"rows": [], "page": page, "page_size": page_size,
+                            "total_count": 0, "total_pages": 0})
 
-        query = "SELECT " + ", ".join(_select_cols) + " FROM airvs_animateurs"
+        select_str = ", ".join(_select_cols)
+        where_clause = ""
         params = ()
-
         if animateur_filter:
-            query += " WHERE animateur = %s"
+            where_clause = " WHERE animateur = %s"
             params = (animateur_filter,)
 
-        query += " ORDER BY date_soumission DESC LIMIT %s"
-        params = params + (limite,)
-
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        cursor.close()
-        db.close()
-
-        for r in rows:
-            for k in ('date_soumission', 'date_sync'):
-                if isinstance(r.get(k), datetime):
-                    r[k] = r[k].strftime('%d/%m/%Y %H:%M')
-
-        return jsonify(rows)
+        if use_pagination:
+            # Compter le total (avec filtre éventuel)
+            cursor.execute(f"SELECT COUNT(*) AS c FROM airvs_animateurs{where_clause}", params)
+            total_count = cursor.fetchone()['c']
+            total_pages = max((total_count + page_size - 1) // page_size, 1)
+            offset = (page - 1) * page_size
+            cursor.execute(
+                f"SELECT {select_str} FROM airvs_animateurs{where_clause} "
+                f"ORDER BY date_soumission DESC LIMIT %s OFFSET %s",
+                params + (page_size, offset)
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+            db.close()
+            for r in rows:
+                for k in ('date_soumission', 'date_sync'):
+                    if isinstance(r.get(k), datetime):
+                        r[k] = r[k].strftime('%d/%m/%Y %H:%M')
+            return jsonify({
+                "rows": rows,
+                "page": page,
+                "page_size": page_size,
+                "total_count": total_count,
+                "total_pages": total_pages
+            })
+        else:
+            cursor.execute(
+                f"SELECT {select_str} FROM airvs_animateurs{where_clause} "
+                f"ORDER BY date_soumission DESC LIMIT %s",
+                params + (limite,)
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+            db.close()
+            for r in rows:
+                for k in ('date_soumission', 'date_sync'):
+                    if isinstance(r.get(k), datetime):
+                        r[k] = r[k].strftime('%d/%m/%Y %H:%M')
+            return jsonify(rows)
 
     except Exception as e:
         _logger.error(f"Erreur animateurs list : {e}")
@@ -781,6 +856,108 @@ def api_animateurs_distinct():
     except Exception as e:
         _logger.error(f"Erreur animateurs distincts : {e}")
         return jsonify({"animateurs": [], "error": str(e)}), 500
+
+
+# ── Stats agrégées par animateur (pour vue synthétique au-dessus de la liste) ──
+@shazam_bp.route('/api/animateurs/stats')
+@login_requis
+def api_animateurs_stats():
+    """Retourne les compteurs agrégés par animateur depuis airvs_animateurs.
+
+    Response JSON :
+    {
+        "total": 150,                          # nombre total d'entrées
+        "par_animateur": [                    # trié par count décroissant
+            {"animateur": "Vince", "count": 42, "derniere_date": "12/09/2026 14:30"},
+            {"animateur": "Mary",  "count": 28, "derniere_date": "10/09/2026 09:15"},
+            ...
+        ]
+    }
+    """
+    try:
+        db = get_db_connection()
+        if not db:
+            return jsonify({"error": "DB indisponible"}), 500
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+
+        # Vérifier que la table existe
+        cursor.execute(
+            "SELECT COUNT(*) AS c FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name = 'airvs_animateurs'"
+        )
+        if not cursor.fetchone().get('c', 0):
+            cursor.close()
+            db.close()
+            return jsonify({"total": 0, "par_animateur": []})
+
+        # Total
+        cursor.execute("SELECT COUNT(*) AS c FROM airvs_animateurs")
+        total = cursor.fetchone()['c']
+
+        # Par animateur (exclut les entrées sans animateur)
+        cursor.execute(
+            "SELECT animateur, COUNT(*) AS count, MAX(date_soumission) AS derniere_date "
+            "FROM airvs_animateurs "
+            "WHERE animateur IS NOT NULL AND animateur != '' "
+            "GROUP BY animateur ORDER BY count DESC"
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        db.close()
+
+        for r in rows:
+            if isinstance(r.get('derniere_date'), datetime):
+                r['derniere_date'] = r['derniere_date'].strftime('%d/%m/%Y %H:%M')
+
+        return jsonify({
+            "total": total,
+            "par_animateur": rows
+        })
+    except Exception as e:
+        _logger.error(f"Erreur animateurs stats : {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Stats agrégées Shazam (par animateur) ──
+@shazam_bp.route('/api/shazam/stats')
+@login_requis
+def api_shazam_stats():
+    """Retourne les compteurs agrégés par animateur depuis airvs_shazam.
+
+    Response JSON : voir api_animateurs_stats (même structure).
+    """
+    try:
+        db = get_db_connection()
+        if not db:
+            return jsonify({"error": "DB indisponible"}), 500
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+
+        # Total
+        cursor.execute("SELECT COUNT(*) AS c FROM airvs_shazam")
+        total = cursor.fetchone()['c']
+
+        # Par animateur
+        cursor.execute(
+            "SELECT animateur, COUNT(*) AS count, MAX(date_reconnaissance) AS derniere_date "
+            "FROM airvs_shazam "
+            "WHERE animateur IS NOT NULL AND animateur != '' "
+            "GROUP BY animateur ORDER BY count DESC"
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        db.close()
+
+        for r in rows:
+            if isinstance(r.get('derniere_date'), datetime):
+                r['derniere_date'] = r['derniere_date'].strftime('%d/%m/%Y %H:%M')
+
+        return jsonify({
+            "total": total,
+            "par_animateur": rows
+        })
+    except Exception as e:
+        _logger.error(f"Erreur shazam stats : {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @shazam_bp.route('/api/animateurs/<int:anim_id>/animateur', methods=['PUT'])

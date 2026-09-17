@@ -131,14 +131,19 @@ def _construire_select_optionnel(alias='s'):
     """Retourne les fragments SQL pour les colonnes optionnelles détectées.
     
     Retourne :
-      select_parts : liste de "s.nom_col AS cle_logique"
+      select_parts : liste de "s.nom_col AS cle_logique" (ou "nom_col AS ..." si alias vide)
       disponibles  : dict des clés logiques disponibles
+    
+    Note : si ``alias`` est une chaîne vide, le préfixe "<alias>." est omis
+    pour produire du SQL valide (ex. "weight AS sm_weight" au lieu de
+    ".weight AS sm_weight" qui lèverait une erreur de syntaxe MySQL).
     """
     cols = _detecter_colonnes_optionnelles()
+    prefix = f"{alias}." if alias else ""
     select_parts = []
     for cle_logique, nom_sql in cols.items():
         if nom_sql:
-            select_parts.append(f"{alias}.{nom_sql} AS {cle_logique}")
+            select_parts.append(f"{prefix}{nom_sql} AS {cle_logique}")
     return select_parts, {k: v for k, v in cols.items() if v}
 
 
@@ -421,37 +426,52 @@ def _parser_m3u(chemin_fichier):
 
 def _resoudre_titres_m3u(chemins_m3u):
     """Pour chaque chemin de M3U, trouve le titre correspondant en SQL.
-    Inclut les colonnes optionnelles (sm_weight, sm_rating, etc.) si disponibles."""
+    Inclut les colonnes optionnelles (sm_weight, sm_rating, etc.) si disponibles.
+    
+    Sécurité : le corps est enveloppé dans un try/except pour éviter qu'une
+    erreur SQL (ex. syntaxe invalide) ne remonte sous forme de page HTML 500
+    qui serait inexploitable côté frontend (catch-all "Erreur de communication").
+    """
     db = get_db_connection()
     if not db:
         return None, "Erreur DB"
 
-    # Colonnes optionnelles détectées dynamiquement
-    opt_select_parts, opt_disponibles = _construire_select_optionnel('')
-    opt_select_str = (', ' + ', '.join(opt_select_parts)) if opt_select_parts else ''
+    cursor = None
+    try:
+        # Colonnes optionnelles détectées dynamiquement
+        opt_select_parts, opt_disponibles = _construire_select_optionnel('')
+        opt_select_str = (', ' + ', '.join(opt_select_parts)) if opt_select_parts else ''
 
-    cursor = db.cursor()
-    resultats = []
+        cursor = db.cursor()
+        resultats = []
 
-    for chemin in chemins_m3u:
-        filename = os.path.basename(chemin)
-        cursor.execute(
-            f"SELECT ID, artist, title, bpm, duration, `path`, comments, album, year, date_added{opt_select_str} "
-            f"FROM songs WHERE `path` LIKE %s AND song_type = 0 LIMIT 1",
-            (f"%{filename}%",)
-        )
-        row = cursor.fetchone()
-        if row:
-            resultats.append(dict(row))
-        else:
-            resultats.append({
-                "ID": None, "artist": "?", "title": filename,
-                "bpm": 0, "duration": 0, "path": chemin, "_absent": True
-            })
+        for chemin in chemins_m3u:
+            filename = os.path.basename(chemin)
+            cursor.execute(
+                f"SELECT ID, artist, title, bpm, duration, `path`, comments, album, year, date_added{opt_select_str} "
+                f"FROM songs WHERE `path` LIKE %s AND song_type = 0 LIMIT 1",
+                (f"%{filename}%",)
+            )
+            row = cursor.fetchone()
+            if row:
+                resultats.append(dict(row))
+            else:
+                resultats.append({
+                    "ID": None, "artist": "?", "title": filename,
+                    "bpm": 0, "duration": 0, "path": chemin, "_absent": True
+                })
 
-    cursor.close()
-    db.close()
-    return resultats, None
+        return resultats, None
+    except Exception as e:
+        _logger.error(f"[azuracast] Erreur résolution M3U : {e}")
+        return None, f"Erreur résolution M3U : {e}"
+    finally:
+        try:
+            if cursor:
+                cursor.close()
+            db.close()
+        except Exception:
+            pass
 
 
 def _bulk_insert_and_wait(parametres):

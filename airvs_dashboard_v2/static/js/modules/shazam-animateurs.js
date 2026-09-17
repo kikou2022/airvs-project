@@ -332,6 +332,22 @@ let currentShazamFilterByPrefix = {
 var currentAnimFilterByPrefix = { shazam: '', animateurs: '' };
 var currentStatutFilterByPrefix = { shazam: '', animateurs: '' };
 
+// ── Source filter state per prefix (pour le dropdown dynamique de source sur Animateurs) ──
+// Les sources sont des valeurs libres (corrige, Disco., Chronique, etc.)
+// donc on peuple le dropdown dynamiquement à partir des valeurs présentes dans la table.
+var currentSourceFilterByPrefix = { shazam: '', animateurs: '' };
+
+// ── Hide-managed state per prefix (toggle "Masquer gérées") ──
+// Quand true, les lignes dont le statut est dans MANAGED_STATUTS sont masquées.
+var hideManagedByPrefix = { shazam: false, animateurs: false };
+
+// Liste des statuts considérés comme "totalement gérés".
+// Cf. shazam.py pour les valeurs d'enum.
+var MANAGED_STATUTS = ['matche', 'matché', 'rejete', 'rejeté',
+                     'rejete_corrigé', 'rejete_corrige',
+                     'pousse_azura', 'poussé_azura',
+                     'pousse', 'poussé'];
+
 var _prefillController = null;   // AbortController pour le fetch en cours
 var _prefillCancelled = false;   // Flag d'annulation
 
@@ -354,6 +370,54 @@ function setStatutFilter(value, prefix) {
     currentStatutFilterByPrefix[prefix] = value || '';
     renderShazamListTable(allShazamRowsData[prefix] || [], {}, prefix);
     updateShazamModeUI(getShazamFilter(prefix), prefix);
+}
+
+// ── Source filter helpers (pour Animateurs; pour Shazam on a déjà les boutons Tous/Studio/Ext.) ──
+function getSourceFilter(prefix) {
+    return currentSourceFilterByPrefix[prefix] || '';
+}
+function setSourceFilter(value, prefix) {
+    currentSourceFilterByPrefix[prefix] = value || '';
+    renderShazamListTable(allShazamRowsData[prefix] || [], {}, prefix);
+}
+
+// Peuple dynamiquement le dropdown de source à partir des valeurs présentes dans les lignes.
+// Conserve la sélection actuelle si elle est encore disponible.
+function populateSourceDropdown(prefix) {
+    var sel = document.getElementById(prefix + '_source_select');
+    if (!sel) return;
+    var currentVal = sel.value;
+    var sources = {};
+    (allShazamRowsData[prefix] || []).forEach(function(r) {
+        var s = (r.source || '').trim();
+        if (s && !sources[s]) sources[s] = 1;
+    });
+    var sortedSources = Object.keys(sources).sort(function(a, b) {
+        return a.localeCompare(b);
+    });
+    // Re-construire les options : "Toutes sources" + sources présentes
+    var html = '<option value="">Toutes sources</option>';
+    sortedSources.forEach(function(s) {
+        var selAttr = (s === currentVal) ? ' selected' : '';
+        html += '<option value="' + escapeAttr(s) + '"' + selAttr + '>' + escapeHtml(s) + '</option>';
+    });
+    sel.innerHTML = html;
+    // Si la valeur actuelle n'est plus dans la liste, remettre à ""
+    if (currentVal && sources[currentVal] === undefined) {
+        sel.value = '';
+        currentSourceFilterByPrefix[prefix] = '';
+    } else {
+        sel.value = currentVal;
+    }
+}
+
+// ── Hide-managed helpers ──
+function getHideManaged(prefix) {
+    return !!hideManagedByPrefix[prefix];
+}
+function setHideManaged(prefix, val) {
+    hideManagedByPrefix[prefix] = !!val;
+    renderShazamListTable(allShazamRowsData[prefix] || [], {}, prefix);
 }
 
 
@@ -455,6 +519,14 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
         });
     }
 
+    // Filtre source (dropdown dynamique — surtout pour Animateurs où les sources sont libres)
+    var sourceFilterVal = currentSourceFilterByPrefix[prefix] || '';
+    if (sourceFilterVal) {
+        filtered = filtered.filter(function(r) {
+            return (r.source || '') === sourceFilterVal;
+        });
+    }
+
     // Filtre statut (R6)
     if (statutFilter) {
         filtered = filtered.filter(function(r) {
@@ -466,6 +538,17 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
             return true;
         });
     }
+
+    // Filtre "Masquer gérées" (toggle client-side)
+    if (hideManagedByPrefix[prefix]) {
+        filtered = filtered.filter(function(r) {
+            var s = (r.statut || 'nouveau').toLowerCase();
+            return MANAGED_STATUTS.indexOf(s) === -1;
+        });
+    }
+
+    // Peupler le dropdown de source dynamiquement (après chargement des données)
+    populateSourceDropdown(prefix);
 
     let infoEl = getShazamElement(prefix, 'filter_info');
     if (infoEl) {
@@ -538,6 +621,94 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
 }
 
 
+// ── Pagination state per prefix (shazam / animateurs) ──
+var _shazamPageState = {};
+function getShazamPageState(prefix) {
+    if (!_shazamPageState[prefix]) {
+        _shazamPageState[prefix] = {page: 1, page_size: 20};
+    }
+    return _shazamPageState[prefix];
+}
+
+// ── Rendu des stats agrégées au-dessus de la liste ──
+function renderShazamStats(prefix, stats) {
+    if (!stats) return;
+
+    // Trouver ou créer le conteneur de stats
+    var statsId = prefix + '_stats_section';
+    var statsDiv = document.getElementById(statsId);
+    if (!statsDiv) {
+        var tbody = getShazamElement(prefix, 'list_body');
+        if (!tbody) return;
+        var table = tbody.closest('table');
+        if (!table) return;
+        var outer = table.parentNode;
+        statsDiv = document.createElement('div');
+        statsDiv.id = statsId;
+        statsDiv.className = 'mb-2 p-2 bg-light border rounded small';
+        outer.insertBefore(statsDiv, table);
+    }
+
+    var html = '<div class="d-flex align-items-center gap-2 flex-wrap">';
+    html += '<span class="badge bg-primary">Total : ' + (stats.total || 0) + '</span>';
+    if (stats.par_animateur && stats.par_animateur.length > 0) {
+        html += '<span class="text-muted ms-2">Par animateur :</span>';
+        stats.par_animateur.forEach(function(item) {
+            var lastDate = item.derniere_date ? ' <span class="text-muted" style="font-size:0.65rem">(' + escapeHtml(item.derniere_date) + ')</span>' : '';
+            html += '<span class="badge bg-secondary">' + escapeHtml(item.animateur) + ' : ' + item.count + '</span>';
+        });
+    } else {
+        html += '<span class="text-muted ms-2">Aucun animateur enregistré</span>';
+    }
+    html += '</div>';
+    statsDiv.innerHTML = html;
+}
+
+// ── Rendu des contrôles de pagination sous la liste ──
+function renderShazamPagination(prefix, pagination) {
+    var paginationId = prefix + '_pagination';
+    var paginationDiv = document.getElementById(paginationId);
+    if (!paginationDiv) {
+        var tbody = getShazamElement(prefix, 'list_body');
+        if (!tbody) return;
+        var table = tbody.closest('table');
+        if (!table) return;
+        var outer = table.parentNode;
+        paginationDiv = document.createElement('div');
+        paginationDiv.id = paginationId;
+        paginationDiv.className = 'd-flex justify-content-between align-items-center mt-2 small';
+        outer.appendChild(paginationDiv);
+    }
+
+    if (!pagination) {
+        paginationDiv.innerHTML = '';
+        return;
+    }
+
+    var state = getShazamPageState(prefix);
+    var prevDisabled = state.page <= 1 ? ' disabled' : '';
+    var nextDisabled = state.page >= pagination.total_pages ? ' disabled' : '';
+
+    var html = '<div>';
+    html += '<button class="btn btn-sm btn-outline-secondary me-1"' + prevDisabled +
+            ' onclick="window._shazamChangePage(\'' + prefix + '\', -1)"' + prevDisabled + '>← Précédent</button>';
+    html += '<button class="btn btn-sm btn-outline-secondary"' + nextDisabled +
+            ' onclick="window._shazamChangePage(\'' + prefix + '\', 1)"' + nextDisabled + '>Suivant →</button>';
+    html += '</div>';
+    html += '<div class="text-muted">Page ' + state.page + ' / ' + pagination.total_pages +
+            ' — ' + pagination.total_count + ' entrée' + (pagination.total_count > 1 ? 's' : '') + ' au total</div>';
+    paginationDiv.innerHTML = html;
+}
+
+// Handler global pour changer de page
+window._shazamChangePage = function(prefix, delta) {
+    var state = getShazamPageState(prefix);
+    var newPage = state.page + delta;
+    if (newPage < 1) return;
+    state.page = newPage;
+    loadShazamList(prefix);
+};
+
 // ── Charger la liste Shazam & Web (aperçu dans le tableau local) ──
 function loadShazamList(prefix = 'shazam') {
     // Peupler les dropdowns d'animateurs (une seule fois)
@@ -546,51 +717,93 @@ function loadShazamList(prefix = 'shazam') {
     }
 
     // Phase 2 : l'onglet Animateurs lit sa propre table dédiée
-    var url = (prefix === 'animateurs')
-        ? '/api/animateurs/list?limit=150'
-        : '/api/shazam/list?limit=150';
+    // Mode pagination : ?page=N&page_size=M
+    // Le backend renvoie {rows: [...], page, page_size, total_count, total_pages}
+    var state = getShazamPageState(prefix);
+    var baseUrl = (prefix === 'animateurs')
+        ? '/api/animateurs/list'
+        : '/api/shazam/list';
+    var listUrl = baseUrl + '?page=' + state.page + '&page_size=' + state.page_size;
 
-    fetch(url)
-        .then(function(r) { return r.json(); })
-        .then(function(rows) {
-            let countEl = getShazamElement(prefix, 'total_count');
-            let lastSyncEl = getShazamElement(prefix, 'last_sync');
+    var statsUrl = (prefix === 'animateurs')
+        ? '/api/animateurs/stats'
+        : '/api/shazam/stats';
 
-            if (!Array.isArray(rows) || rows.length === 0) {
-                allShazamRowsData[prefix] = [];
-                renderShazamListTable([], {}, prefix);
-                if (countEl) countEl.textContent = '0 entrée';
-                if (lastSyncEl) lastSyncEl.textContent = '—';
-                return;
-            }
+    // Fetch liste + stats en parallèle
+    Promise.all([
+        fetch(listUrl).then(function(r) { return r.json(); }),
+        fetch(statsUrl).then(function(r) { return r.json(); }).catch(function() { return null; })
+    ]).then(function(results) {
+        var data = results[0];
+        var stats = results[1];
 
-            let filtered = rows;
+        // Le backend peut renvoyer un array (legacy) ou un objet {rows, ...} (pagination)
+        var rows, pagination;
+        if (Array.isArray(data)) {
+            rows = data;
+            pagination = null;
+        } else if (data && Array.isArray(data.rows)) {
+            rows = data.rows;
+            pagination = {
+                page: data.page,
+                page_size: data.page_size,
+                total_count: data.total_count,
+                total_pages: data.total_pages
+            };
+        } else {
+            rows = [];
+            pagination = null;
+        }
 
-            // Pour l'onglet Shazam, exclure les sources web résiduelles
-            if (prefix === 'shazam') {
-                var _WEB_SOURCES = ['shazam', 'recommandation', 'saisie manuelle', 'autre', 'formulaire_programmeur'];
-                filtered = rows.filter(function(r) {
-                    let src = (r.source || '').toLowerCase();
-                    return !_WEB_SOURCES.some(function(v) { return src === v; });
-                });
-            }
+        // Render stats
+        renderShazamStats(prefix, stats);
 
-            allShazamRowsData[prefix] = filtered;
+        let countEl = getShazamElement(prefix, 'total_count');
+        let lastSyncEl = getShazamElement(prefix, 'last_sync');
 
-            if (countEl) countEl.textContent = filtered.length + ' entrée' + (filtered.length > 1 ? 's' : '');
-            var lastDate = (filtered[0] && (filtered[0].date_soumission || filtered[0].date_reconnaissance)) || '—';
-            if (lastSyncEl) lastSyncEl.textContent = lastDate;
+        if (rows.length === 0) {
+            allShazamRowsData[prefix] = [];
+            renderShazamListTable([], {}, prefix);
+            if (countEl) countEl.textContent = '0 entrée';
+            if (lastSyncEl) lastSyncEl.textContent = '—';
+            renderShazamPagination(prefix, pagination);
+            return;
+        }
 
-            renderShazamListTable(filtered, {}, prefix);
-        })
-        .catch(function() {
-            let listBody = getShazamElement(prefix, 'list_body');
-            if (listBody) {
-                var colN = (prefix === 'animateurs') ? 8 : 6;
-                listBody.innerHTML =
-                    '<tr><td colspan="' + colN + '" class="text-center text-danger p-2 small">Erreur de chargement.</td></tr>';
-            }
-        });
+        // Pour l'onglet Shazam, exclure les sources web résiduelles
+        // (filtre client-side — peut réduire le nombre de lignes visibles par page)
+        let filtered = rows;
+        if (prefix === 'shazam') {
+            var _WEB_SOURCES = ['shazam', 'recommandation', 'saisie manuelle', 'autre', 'formulaire_programmeur'];
+            filtered = rows.filter(function(r) {
+                let src = (r.source || '').toLowerCase();
+                return !_WEB_SOURCES.some(function(v) { return src === v; });
+            });
+        }
+
+        allShazamRowsData[prefix] = filtered;
+
+        // Affichage du total : utiliser le total_count du backend si dispo (plus précis)
+        var totalCount = pagination ? pagination.total_count : filtered.length;
+        if (countEl) countEl.textContent = totalCount + ' entrée' + (totalCount > 1 ? 's' : '');
+        var lastDate = (filtered[0] && (filtered[0].date_soumission || filtered[0].date_reconnaissance)) || '—';
+        if (lastSyncEl) lastSyncEl.textContent = lastDate;
+
+        renderShazamListTable(filtered, {}, prefix);
+        renderShazamPagination(prefix, pagination);
+    }).catch(function() {
+        let listBody = getShazamElement(prefix, 'list_body');
+        if (listBody) {
+            var colN = (prefix === 'animateurs') ? 8 : 6;
+            listBody.innerHTML =
+                '<tr><td colspan="' + colN + '" class="text-center text-danger p-2 small">Erreur de chargement.</td></tr>';
+        }
+        // En cas d'erreur, vider aussi les stats et la pagination
+        var statsDiv = document.getElementById(prefix + '_stats_section');
+        if (statsDiv) statsDiv.innerHTML = '<span class="text-danger small">Erreur chargement stats.</span>';
+        var pagDiv = document.getElementById(prefix + '_pagination');
+        if (pagDiv) pagDiv.innerHTML = '';
+    });
 }
 
 // ── Helpers Shazam / Animateurs ──
@@ -851,7 +1064,12 @@ function syncVpsNow(prefix) {
         }
     }
     var statusEl = getShazamElement(prefix, 'filter_info');
+    // Rediriger aussi le log de synchro VPS dans le terminal élargi (250-400px de haut)
+    var terminalEl = getShazamElement(prefix, 'pipeline_terminal');
+    var logCard = getShazamElement(prefix, 'pipeline_log_card');
     if (statusEl) statusEl.textContent = '⬇ Récupération VPS en cours...';
+    if (terminalEl) terminalEl.textContent = '⬇ Récupération VPS en cours...\nConnexion au serveur VPS OVH...';
+    if (logCard) logCard.style.display = 'block';
     if (vpsBtn) { vpsBtn.disabled = true; vpsBtn.textContent = '⬇ ...'; }
     fetch('/api/sync/vps/now', { method: 'POST' })
         .then(function(r) {
@@ -861,6 +1079,15 @@ function syncVpsNow(prefix) {
         .then(function(data) {
             var logCount = (data.logs || []).length;
             if (statusEl) statusEl.textContent = '⬇ ' + logCount + ' opération(s) récupérée(s)';
+            // Afficher les logs VPS dans le terminal élargi
+            if (terminalEl) {
+                if (data.logs && data.logs.length > 0) {
+                    terminalEl.textContent = data.logs.join('\n');
+                } else {
+                    terminalEl.textContent = '⬇ Synchronisation VPS terminée. Aucun log retourné.';
+                }
+            }
+            if (logCard) logCard.style.display = 'block';
             if (vpsBtn) { vpsBtn.disabled = false; vpsBtn.textContent = '⬇ VPS'; }
             // Forcer le rechargement de la liste (nouveaux possibles)
             window._dynamicAnimateurList = null;
@@ -868,6 +1095,8 @@ function syncVpsNow(prefix) {
         })
         .catch(function(err) {
             if (statusEl) statusEl.textContent = '❌ Erreur VPS: ' + err.message;
+            if (terminalEl) terminalEl.textContent = '❌ Erreur VPS: ' + err.message + '\n\nVérifie la connexion réseau et le service VPS OVH.';
+            if (logCard) logCard.style.display = 'block';
             if (vpsBtn) { vpsBtn.disabled = false; vpsBtn.textContent = '⬇ VPS'; }
             console.error('[SYNC-VPS]', err);
         });
@@ -1105,6 +1334,13 @@ function _loadSuggestions() {
             case 'prefill': handleShazamPrefill(prefix); break;
             case 'filter': setShazamFilter(prefix, extra); setAnimFilter('', prefix); break;
             case 'statutFilter': setStatutFilter(extra || '', prefix); break;
+            case 'toggleHideManaged': {
+                setHideManaged(prefix, !hideManagedByPrefix[prefix]);
+                // Mettre à jour l'état de la checkbox (au cas où le handler est appelé manuellement)
+                var cb = document.getElementById(prefix + '_hide_managed');
+                if (cb) cb.checked = hideManagedByPrefix[prefix];
+                break;
+            }
             case 'closeLog':
                 var logCard = getShazamElement(prefix, 'pipeline_log_card');
                 if (logCard) logCard.style.display = 'none';
@@ -1141,6 +1377,8 @@ function _loadSuggestions() {
         getFilter: getShazamFilter,
         setAnimFilter: setAnimFilter,
         getAnimFilter: getAnimFilter,
+        setSourceFilter: setSourceFilter,
+        getSourceFilter: getSourceFilter,
         setStatutFilter: setStatutFilter,
         getStatutFilter: getStatutFilter,
         populateAnimDropdowns: populateAnimateurDropdowns,

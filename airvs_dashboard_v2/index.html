@@ -2537,6 +2537,20 @@
                                                         onchange="window._shazamFns.setAnimFilter(this.value, 'shazam')">
                                                     <option value="">Tous</option>
                                                 </select>
+                                                <select class="form-select form-select-sm" id="shazam_statut_select"
+                                                        style="width:auto;max-width:120px;"
+                                                        onchange="window._shazamClick.call(this,'statutFilter','shazam',this.value)"
+                                                        title="Filtrer par statut">
+                                                    <option value="">Tous statuts</option>
+                                                    <option value="nouveau">Nouveau</option>
+                                                    <option value="matche">Matché</option>
+                                                    <option value="rejete">Rejeté</option>
+                                                    <option value="pousse">Poussé Azura</option>
+                                                </select>
+                                                <div class="form-check form-switch mb-0">
+                                                    <input class="form-check-input" type="checkbox" id="shazam_hide_managed" onchange="window._shazamClick.call(this,'toggleHideManaged','shazam')">
+                                                    <label class="form-check-label small" for="shazam_hide_managed" title="Masquer les lignes matchées/rejetées/poussées">Masquer gérées</label>
+                                                </div>
                                             </div>
                                             <div class="d-flex align-items-center gap-2">
                                                 <small class="text-muted" id="shazam_filter_info"></small>
@@ -2544,7 +2558,7 @@
                                         </div>
     
                                         <!-- Tableau local des titres Shazam & Animateurs (aperçu avant prefill) -->
-                                        <div class="border rounded" style="max-height: 220px; overflow-y: auto;" id="shazam_list_wrapper">
+                                        <div class="border rounded" style="max-height: 550px; overflow-y: auto;" id="shazam_list_wrapper">
                                             <table class="table table-sm table-hover mb-0">
                                                 <thead class="table-light sticky-top">
     <tr>
@@ -2573,7 +2587,7 @@
                                                 <button class="btn btn-sm btn-outline-light py-0 px-2" id="shazam_pipeline_log_close" onclick="window._shazamClick('closeLog','shazam')">✕</button>
                                             </div>
                                             <div class="card-body p-2">
-                                                <pre class="mb-0 small" id="shazam_pipeline_terminal" style="max-height:150px; overflow-y:auto; color:#0f0;">En attente...</pre>
+                                                <pre class="mb-0 small" id="shazam_pipeline_terminal" style="min-height:125px; max-height:200px; overflow-y:auto; color:#0f0;">En attente...</pre>
                                             </div>
                                         </div>
                                     </div>
@@ -2627,8 +2641,28 @@
                                                 <select class="form-select form-select-sm" id="animateurs_animateur_select"
                                                         style="width:auto;max-width:140px;"
                                                         onchange="window._shazamFns.setAnimFilter(this.value, 'animateurs')">
-                                                    <option value="">Tous</option>
+                                                    <option value="">Tous animateurs</option>
                                                 </select>
+                                                <select class="form-select form-select-sm" id="animateurs_source_select"
+                                                        style="width:auto;max-width:140px;"
+                                                        onchange="window._shazamFns.setSourceFilter(this.value, 'animateurs')"
+                                                        title="Filtrer par source">
+                                                    <option value="">Toutes sources</option>
+                                                </select>
+                                                <select class="form-select form-select-sm" id="animateurs_statut_select"
+                                                        style="width:auto;max-width:120px;"
+                                                        onchange="window._shazamClick.call(this,'statutFilter','animateurs',this.value)"
+                                                        title="Filtrer par statut">
+                                                    <option value="">Tous statuts</option>
+                                                    <option value="nouveau">Nouveau</option>
+                                                    <option value="matche">Matché</option>
+                                                    <option value="rejete">Rejeté</option>
+                                                    <option value="pousse">Poussé Azura</option>
+                                                </select>
+                                                <div class="form-check form-switch mb-0">
+                                                    <input class="form-check-input" type="checkbox" id="animateurs_hide_managed" onchange="window._shazamClick.call(this,'toggleHideManaged','animateurs')">
+                                                    <label class="form-check-label small" for="animateurs_hide_managed" title="Masquer les lignes matchées/rejetées/poussées">Masquer gérées</label>
+                                                </div>
                                             </div>
                                             <div class="d-flex align-items-center gap-2">
                                                 <small class="text-muted" id="animateurs_filter_info"></small>
@@ -2636,7 +2670,7 @@
                                         </div>
     
                                         <!-- Tableau local des titres Animateurs (aperçu avant prefill) -->
-                                        <div class="border rounded" style="max-height: 220px; overflow-y: auto;" id="animateurs_list_wrapper">
+                                        <div class="border rounded" style="max-height: 550px; overflow-y: auto;" id="animateurs_list_wrapper">
                                             <table class="table table-sm table-hover mb-0">
                                                 <thead class="table-light sticky-top">
     <tr>
@@ -2670,7 +2704,7 @@
                                                 <button class="btn btn-sm btn-outline-light py-0 px-2" id="animateurs_pipeline_log_close" onclick="window._shazamClick('closeLog','animateurs')">✕</button>
                                             </div>
                                             <div class="card-body p-2">
-                                                <pre class="mb-0 small" id="animateurs_pipeline_terminal" style="max-height:150px; overflow-y:auto; color:#0f0;">En attente...</pre>
+                                                <pre class="mb-0 small" id="animateurs_pipeline_terminal" style="min-height:125px; max-height:200px; overflow-y:auto; color:#0f0;">En attente...</pre>
                                             </div>
                                         </div>
                                     </div>
@@ -4238,7 +4272,7 @@
                                         </select>
                                     </div>
                                     <div class="form-check mb-2" style="padding-left:1.5rem;">
-                                        <input class="form-check-input" type="checkbox" id="pipeline_flac_delete_source" checked>
+                                        <input class="form-check-input" type="checkbox" id="pipeline_flac_delete_source">
                                         <label class="form-check-label small" for="pipeline_flac_delete_source">
                                             Supprimer le FLAC source après conversion
                                         </label>
@@ -6078,9 +6112,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     execute: document.getElementById('pipeline_execute').checked,
                     recursive: document.getElementById('pipeline_recursive').checked,
                     skip_mp3gain: !document.getElementById('pipeline_do_mp3gain').checked,
-                    convert_flac: document.getElementById('pipeline_convert_flac').checked,
-                    flac_bitrate: parseInt(document.getElementById('pipeline_flac_bitrate').value) || 320,
-                    flac_delete_source: document.getElementById('pipeline_flac_delete_source').checked,
                     sync_folder: document.getElementById('pipeline_sync_folder').value.trim()
                 };
 
