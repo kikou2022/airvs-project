@@ -14,7 +14,7 @@
 #                 • Réutilisation du moteur de matching flou de executer_prefill_sheets
 #                 • Dépendance : validation_pool_multiformat.py (même dossier)
 # ═══════════════════════════════════════════════════════════════════
-WORKER_VERSION = "2026.08.29-A"  # + airvs_animateurs: table dédiée soumissions VPS (genre, video_url, commentaire, vps_id)
+WORKER_VERSION = "2026.09.17-A"  # + piges multi-sources (radio + station6) : executer_pige_list accepte base_path
 
 import time
 import datetime
@@ -3603,12 +3603,28 @@ def executer_pige_list(tache_id, parametres):
 
     Paramètres JSON :
       - date : "YYYY-MM-DD" (obligatoire)
+      - source : "radio" (défaut) | "station6" — sélection de la source
+      - base_path : "/var/www/pige" (défaut) | "/var/www/pige/azuracast6" —
+        chemin absolu sur le VPS OVH 1. Si non fourni, déduit de `source`.
     """
     date_str = (parametres.get("date") or "").strip()
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
         raise ValueError(f"Paramètre 'date' invalide ou absent : {date_str!r}")
 
-    remote_dir = f"{PIGES_BASE_PATH}/{date_str}"
+    # Multi-sources : on accepte soit `base_path` explicite (rétro-compatible),
+    # soit `source` qu'on mappe vers le chemin correspondant.
+    source = (parametres.get("source") or "radio").strip().lower()
+    base_path = (parametres.get("base_path") or "").strip()
+    if not base_path:
+        # Mapping source → base_path (doit rester synchro avec config.py
+        # côté dashboard : PIGES_BASE_PATHS)
+        _SOURCES = {
+            "radio": "/var/www/pige",
+            "station6": "/var/www/pige/azuracast6",
+        }
+        base_path = _SOURCES.get(source, PIGES_BASE_PATH)
+
+    remote_dir = f"{base_path}/{date_str}"
 
     # Une seule commande SSH : liste les .mp3, taille (stat) + durée (ffprobe).
     # Sortie : une ligne par fichier au format  nom|taille_octets|duree_sec

@@ -137,6 +137,24 @@ def _ge_times_overlap(s1, e1, s2, e2):
 
 PIGES_BASE_PATH = "/var/www/pige"
 
+# Multi-sources piges (depuis 2026-09-17 — station6 migrée vers cron+ffmpeg).
+# Map : nom de source (utilisé côté frontend + worker) → chemin absolu sur le VPS OVH 1.
+# Le frontend construit les URLs HTTP comme : https://pige.airvs.fr{path_prefix}/{date}/{file}
+# où path_prefix est :
+#   - '' pour la radio principale (fichiers à la racine de /var/www/pige)
+#   - '/azuracast6' pour la station6 (sous-dossier /var/www/pige/azuracast6)
+PIGES_BASE_PATHS = {
+    'radio': '/var/www/pige',
+    'station6': '/var/www/pige/azuracast6',
+}
+
+# Préfixe HTTP pour chaque source (servi par le vhost nginx pigeon.airvs.fr
+# qui a root=/var/www/pige + autoindex on, donc les sous-dossiers sont publics).
+PIGES_HTTP_PREFIXES = {
+    'radio': '',
+    'station6': '/azuracast6',
+}
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Push AzuraCast
@@ -188,7 +206,7 @@ PIGES_ARTWORK_WINDOWS_DIR = os.getenv('PIGES_ARTWORK_WINDOWS_DIR', r"U:\airvs_ar
 # Worker
 # ═══════════════════════════════════════════════════════════════════════
 
-WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.08.29-A')
+WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.09.17-A')  # + piges multi-sources (radio + station6)
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -15,6 +15,25 @@
     // depuis le navigateur du client — le dashboard Flask n'a pas d'accès Internet).
     const PIGE_HTTP_BASE = 'https://pige.airvs.fr';
 
+    // Préfixe HTTP par source (synchro avec config.py PIGES_HTTP_PREFIXES).
+    // 'radio'    → ''           → URL : https://pige.airvs.fr/<date>/<file>
+    // 'station6' → '/azuracast6' → URL : https://pige.airvs.fr/azuracast6/<date>/<file>
+    const PIGE_HTTP_PREFIXES = {
+        radio: '',
+        station6: '/azuracast6',
+    };
+
+    function currentPigeSource() {
+        const sel = document.getElementById('piges-source-select');
+        return sel ? (sel.value || 'radio') : 'radio';
+    }
+
+    function buildPigeUrl(dateStr, fileName) {
+        const source = currentPigeSource();
+        const prefix = PIGE_HTTP_PREFIXES[source] || '';
+        return `${PIGE_HTTP_BASE}${prefix}/${dateStr}/${fileName}`;
+    }
+
     let pigesDatesLoaded = false;
 
     function formatDuration(sec) {
@@ -59,8 +78,9 @@
         tbody.innerHTML = '<tr><td colspan="5" class="text-muted">Chargement...</td></tr>';
         statusEl.textContent = '';
 
+        const source = currentPigeSource();
         try {
-            const r = await fetch(`/api/piges/list/${encodeURIComponent(dateStr)}`);
+            const r = await fetch(`/api/piges/list/${encodeURIComponent(dateStr)}?source=${encodeURIComponent(source)}`);
             const data = await r.json();
 
             if (data.error) {
@@ -96,7 +116,7 @@
                 btn.addEventListener('click', function() {
                     const d = btn.dataset.date;
                     const f = btn.dataset.file;
-                    const url = `${PIGE_HTTP_BASE}/${d}/${f}`;
+                    const url = buildPigeUrl(d, f);
                     const card = document.getElementById('piges-player-card');
                     const audio = document.getElementById('piges-player-audio');
                     document.getElementById('piges-player-title').textContent = `${f} — ${d}`;
@@ -120,6 +140,7 @@
     // ─── Phase 1E : Modal de promotion ───
     let pp_currentDate = null;
     let pp_currentFile = null;
+    let pp_currentSource = 'radio';
     let pp_artworkWindowsPath = null;
     let pp_podcastsLoaded = false;
     let pp_statusPollTimer = null;
@@ -148,6 +169,7 @@
     function ouvrirModalPromotion(dateStr, fileName) {
         pp_currentDate = dateStr;
         pp_currentFile = fileName;
+        pp_currentSource = currentPigeSource();
         pp_artworkWindowsPath = null;
 
         document.getElementById('pp-source-label').textContent = `${dateStr}/${fileName}`;
@@ -234,6 +256,7 @@
         const publishDateUtcIso = new Date(publishDate).toISOString();
 
         const payload = {
+            source: pp_currentSource,
             source_date: pp_currentDate,
             source_file: pp_currentFile,
             podcast_id: podcastId,
@@ -390,6 +413,14 @@
 
     document.getElementById('piges-date-select').addEventListener('change', function() {
         chargerFichiers(this.value);
+    });
+
+    document.getElementById('piges-source-select').addEventListener('change', function() {
+        // Recharger les fichiers pour la date sélectionnée avec la nouvelle source
+        const dateSel = document.getElementById('piges-date-select');
+        if (dateSel && dateSel.value) {
+            chargerFichiers(dateSel.value);
+        }
     });
 
     document.getElementById('btn-piges-refresh').addEventListener('click', function() {

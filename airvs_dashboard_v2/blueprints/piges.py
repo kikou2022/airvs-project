@@ -35,7 +35,7 @@ from datetime import date, timedelta, datetime
 
 from flask import Blueprint, request, jsonify, session
 
-from config import PIGES_BASE_PATH, PIGES_ARTWORK_WINDOWS_DIR
+from config import PIGES_BASE_PATH, PIGES_BASE_PATHS, PIGES_HTTP_PREFIXES, PIGES_ARTWORK_WINDOWS_DIR
 from utils import get_db_connection
 from blueprints.auth import login_requis
 
@@ -101,11 +101,12 @@ def _worker_task_proxy(type_action, parametres, timeout=20):
 @piges_bp.route('/api/piges/dates')
 @login_requis
 def api_piges_dates():
-    """Liste des dates disponibles pour les piges (les 4 derniers jours,
+    """Liste des dates disponibles pour les piges (les 7 derniers jours,
     aujourd'hui inclus). Purement calculée côté dashboard, pas besoin du
-    worker pour cette route."""
+    worker pour cette route. Le VPS OVH 1 conserve 7 jours de piges
+    (nettoyage automatique par /usr/local/bin/nettoyeur-piges.sh à 5h30)."""
     today = date.today()
-    dates = [(today - timedelta(days=i)).isoformat() for i in range(4)]
+    dates = [(today - timedelta(days=i)).isoformat() for i in range(7)]
     return jsonify({"dates": dates})
 
 
@@ -113,11 +114,28 @@ def api_piges_dates():
 @login_requis
 def api_piges_list(date_str):
     """Liste les fichiers de piges d'une date donnée sur le VPS OVH 1,
-    via la tâche worker PIGE_LIST (SSH + stat + ffprobe)."""
+    via la tâche worker PIGE_LIST (SSH + stat + ffprobe).
+
+    Query param `source` (optionnel, défaut 'radio') :
+      - 'radio' : pige principale AIRVS (/var/www/pige/<date>)
+      - 'station6' : pige Station 6 Azuracast 6 (/var/www/pige/azuracast6/<date>)
+    """
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
         return jsonify({"error": "Format de date invalide (attendu YYYY-MM-DD)"}), 400
 
-    _, body, status = _worker_task_proxy('PIGE_LIST', {"date": date_str}, timeout=20)
+    source = (request.args.get('source') or 'radio').strip().lower()
+    base_path = PIGES_BASE_PATHS.get(source, PIGES_BASE_PATH)
+
+    _, body, status = _worker_task_proxy('PIGE_LIST', {
+        "date": date_str,
+        "source": source,
+        "base_path": base_path,
+    }, timeout=20)
+    # Injecter le préfixe HTTP dans la réponse pour que le frontend sache
+    # construire l'URL audio correcte (radio → '' , station6 → '/azuracast6')
+    if status == 200 and isinstance(body, dict):
+        body['source'] = source
+        body['http_prefix'] = PIGES_HTTP_PREFIXES.get(source, '')
     return jsonify(body), status
 
 
@@ -137,7 +155,11 @@ def api_piges_extract():
     if not source_file or '/' in source_file or '..' in source_file:
         return jsonify({"error": "source_file invalide"}), 400
 
-    remote_path = f"{PIGES_BASE_PATH}/{source_date}/{source_file}"
+    # Multi-sources : choix du base_path en fonction de `source`
+    source = (data.get('source') or 'radio').strip().lower()
+    base_path = PIGES_BASE_PATHS.get(source, PIGES_BASE_PATH)
+
+    remote_path = f"{base_path}/{source_date}/{source_file}"
     _, body, status = _worker_task_proxy('PIGE_EXTRACT', {
         "source_file": remote_path,
         "start_time": start_time,
@@ -230,7 +252,11 @@ def api_piges_promote():
     publish_date_iso = pd_clean + 'Z'
     publish_date_sql = pd_clean.replace('T', ' ')[:19]
 
-    remote_path = f"{PIGES_BASE_PATH}/{source_date}/{source_file}"
+    # Multi-sources : choix du base_path en fonction de `source`
+    source = (data.get('source') or 'radio').strip().lower()
+    base_path = PIGES_BASE_PATHS.get(source, PIGES_BASE_PATH)
+
+    remote_path = f"{base_path}/{source_date}/{source_file}"
 
     try:
         db = get_db_connection()
