@@ -347,7 +347,7 @@ def _assurer_schema_browse_roots():
             'N:/': 'Musique Debian (SSHFS)',
             'Z:/': 'Disque Externe (Debian SSHFS)',
             'W:/': 'Stockage 500 Go (Ubuntu Studio)',
-            'Y:/': 'Stockage 80 Go (Ubuntu Studio)',
+            'Y:/': 'Stockage 80 Go (Debian Master)',
         }
 
         # Peuplement par défaut si table vide
@@ -390,10 +390,11 @@ def _assurer_schema_browse_roots():
                     )
                 # Désactiver l'ancien lecteur T:/ (1 To mort)
                 cursor.execute("UPDATE airvs_browse_roots SET actif=0 WHERE root='T:/'")
-                # Mettre à jour les labels des anciens lecteurs avec des noms descriptifs
+                # Mettre à jour les labels UNIQUEMENT s'ils sont vides
+                # (ne pas écraser les labels personnalisés par l'utilisateur via l'UI)
                 for root, label in drive_labels.items():
                     cursor.execute(
-                        "UPDATE airvs_browse_roots SET label=%s WHERE root=%s",
+                        "UPDATE airvs_browse_roots SET label=%s WHERE (label IS NULL OR label='') AND root=%s",
                         (label, root)
                     )
                 db.commit()

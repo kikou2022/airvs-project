@@ -4145,6 +4145,7 @@
                                     <option value="/mnt/musique_47_go">L:\ = /mnt/musique_47_go</option>
                                     <option value="/media/sebastien/musique_debian">N:\ = /media/...</option>
                                     <option value="/mnt/stockage_160go">U:\ = /mnt/stockage_160go</option>
+                                    <option value="/mnt/stockage_80go">Y:\ = /mnt/stockage_80go</option>
                                     <option value="/home/sebastien/music_azuracast6_7">📡 AzuraCast (Flux tendu)</option>
                                     <option value="custom">✏️ Saisie manuelle...</option>
                                 </select>
@@ -6958,6 +6959,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         var mountBadge = r.mounted ? '<span class="badge bg-info" style="font-size:0.55rem;">monté</span>' : '<span class="badge bg-danger" style="font-size:0.55rem;">non monté</span>';
                         html += '<div class="d-flex align-items-center gap-1 py-1 border-bottom small" data-root-id="' + r.id + '">'
                             + '<span class="flex-grow-1">' + r.root + ' <span class="text-muted">(' + (r.label || '') + ')</span> ' + activeBadge + ' ' + mountBadge + '</span>'
+                            + '<button class="btn btn-outline-primary btn-sm py-0 px-1" onclick="_editBrowseRootLabel(' + r.id + ',this)" title="Modifier le label">✎</button>'
                             + '<button class="btn btn-outline-secondary btn-sm py-0 px-1" onclick="_toggleBrowseRoot(' + r.id + ',' + (r.actif ? 0 : 1) + ')" title="' + (r.actif ? 'Désactiver' : 'Activer') + '">' + (r.actif ? '⏸' : '▶') + '</button>'
                             + '<button class="btn btn-outline-danger btn-sm py-0 px-1" onclick="_deleteBrowseRoot(' + r.id + ')" title="Supprimer">✕</button>'
                             + '</div>';
@@ -6985,6 +6987,24 @@ document.addEventListener('DOMContentLoaded', function() {
                 .then(function(r) { return r.json(); })
                 .then(function() { _loadBrowseRootsUI(); browseTo(''); })
                 .catch(function(err) { alert('Erreur : ' + err.message); });
+        };
+
+        window._editBrowseRootLabel = function(id, btnEl) {
+            // Récupère le label actuel depuis le span text-muted à côté de la racine
+            var row = btnEl.closest('[data-root-id]');
+            var labelSpan = row ? row.querySelector('span.text-muted') : null;
+            var currentLabel = labelSpan ? (labelSpan.textContent || '').replace(/^\(|\)$/g, '').trim() : '';
+            var newLabel = prompt('Nouveau label pour cette racine :', currentLabel);
+            if (newLabel === null) return; // Annulé
+            newLabel = newLabel.trim();
+            if (newLabel === currentLabel) return; // Pas de changement
+            fetch('/api/browse/roots/' + id, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({label: newLabel})
+            }).then(function(r) { return r.json(); })
+              .then(function() { _loadBrowseRootsUI(); })
+              .catch(function(err) { alert('Erreur : ' + err.message); });
         };
 
         window._addBrowseRoot = function() {

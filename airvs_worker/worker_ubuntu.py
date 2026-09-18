@@ -88,6 +88,7 @@ MOUNT_MAP = {
     "L:\\": "/mnt/musique_47_go",
     "N:\\": "/media/sebastien/musique_debian",
     "U:\\": "/mnt/stockage_160go/",
+    "Y:\\": "/mnt/stockage_80go",
     "Z:\\": "/mnt/externe",
 }
 DOSSIERS_A_IGNORER = {"projet_radio"}
