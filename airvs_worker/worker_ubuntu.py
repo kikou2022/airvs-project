@@ -3748,18 +3748,24 @@ def _pige_extraire_ou_copier(remote_source, remote_output, extract):
             f"&& (ffprobe -v error -show_entries format=duration -of csv=p=0 {shlex.quote(remote_output)} || echo 0)"
         )
     else:
-        # Ré-encodage systématique (plutôt qu'une simple copie) : les MP3
-        # bruts issus d'Icecast/Liquidsoap ont parfois une structure de
-        # frame abîmée (cf. erreur ffprobe "Failed to read frame size").
-        # AzuraCast peut alors accepter l'upload en apparence (HTTP 200,
-        # "success": true) sans jamais ingérer le fichier (has_media reste
-        # False). Le ré-encodage reconstruit des frames MP3 propres et
-        # standard, ce qui corrige ce problème à la source.
+        # Copie directe (instantané, 0% CPU) avec fallback ré-encodage.
+        # Les MP3 bruts issus d'Icecast/Liquidsoap ont parfois une structure
+        # de frame abîmée. On tente d'abord -c copy (copie de flux, quasi
+        # instantané) avec err_detect=ignore_err. Si la copie échoue ou
+        # produit un fichier vide, on retombe sur un ré-encodage complet
+        # qui reconstruit des frames MP3 propres (libmp3lame 192k).
+        # L'opérateur shell || enchaîne le fallback automatiquement.
+        probe_cmd = f"stat -c%s {shlex.quote(remote_output)} && (ffprobe -v error -show_entries format=duration -of csv=p=0 {shlex.quote(remote_output)} || echo 0)"
         remote_cmd = (
-            f"ffmpeg -y -i {shlex.quote(remote_source)} "
+            # Tentative 1 : copie de flux (instantané, 0% CPU)
+            f"ffmpeg -y -err_detect ignore_err -i {shlex.quote(remote_source)} "
+            f"-c copy -fflags +genpts {shlex.quote(remote_output)} "
+            f"2>&1 && {probe_cmd} "
+            # Fallback : si la copie échoue ou produit un fichier vide,
+            # ré-encodage complet (reconstruit des frames propres)
+            f"|| (ffmpeg -y -i {shlex.quote(remote_source)} "
             f"-c:a libmp3lame -b:a 192k {shlex.quote(remote_output)} "
-            f"2>&1 && stat -c%s {shlex.quote(remote_output)} "
-            f"&& (ffprobe -v error -show_entries format=duration -of csv=p=0 {shlex.quote(remote_output)} || echo 0)"
+            f"2>&1 && {probe_cmd})"
         )
 
     resultat = _pige_ssh(remote_cmd, timeout=180)  # ffmpeg peut prendre du temps sur 1h de son
