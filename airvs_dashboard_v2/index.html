@@ -4796,12 +4796,14 @@
                         </div>
                         <div class="row g-2 mt-1" id="pp-extract-fields" style="display:none;">
                             <div class="col-6">
-                                <label class="form-label small mb-0">Début (HH:MM:SS)</label>
-                                <input type="text" class="form-control form-control-sm" id="pp-extract-start" value="00:00:00" placeholder="00:10:00">
+                                <label class="form-label small mb-0">Début extrait <span class="text-muted">(position dans le fichier)</span></label>
+                                <input type="text" class="form-control form-control-sm" id="pp-extract-start" value="00:00:00" placeholder="00:15:30">
+                                <small class="form-text text-muted" id="pp-extract-start-hint">Format HH:MM:SS depuis le début du fichier</small>
                             </div>
                             <div class="col-6">
-                                <label class="form-label small mb-0">Durée (HH:MM:SS)</label>
-                                <input type="text" class="form-control form-control-sm" id="pp-extract-duration" value="00:10:00" placeholder="00:45:00">
+                                <label class="form-label small mb-0">Durée extrait</label>
+                                <input type="text" class="form-control form-control-sm" id="pp-extract-duration" value="00:10:00" placeholder="00:10:00">
+                                <small class="form-text text-muted">Format HH:MM:SS</small>
                             </div>
                         </div>
                     </div>
@@ -4817,7 +4819,7 @@
                         <input type="text" class="form-control" id="pp-title" maxlength="255">
                     </div>
                     <div class="mb-2">
-                        <label class="form-label">Description</label>
+                        <label class="form-label">Description <span class="text-danger">*</span></label>
                         <textarea class="form-control" id="pp-description" rows="3"></textarea>
                     </div>
                     <div class="row g-2 mb-2">

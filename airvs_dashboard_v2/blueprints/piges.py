@@ -236,6 +236,8 @@ def api_piges_promote():
         return jsonify({"error": "source_file invalide"}), 400
     if not podcast_id or not title:
         return jsonify({"error": "podcast_id et title sont obligatoires"}), 400
+    if not description.strip():
+        return jsonify({"error": "description est obligatoire (Azuracast la requiert)"}), 400
     if not publish_date:
         return jsonify({"error": "publish_date est obligatoire"}), 400
 

@@ -3863,11 +3863,21 @@ def executer_pige_promote_podcast(tache_id, parametres):
         # 1) Préparation du MP3 sur le VPS OVH 1 (découpe ou copie)
         remote_tmp = f"/tmp/podcast-promote-{tache_id}.mp3"
         logger(tache_id, "Préparation du MP3 sur le VPS OVH 1...")
-        _pige_extraire_ou_copier(source_file, remote_tmp, parametres.get("extract"))
+        infos_mp3 = _pige_extraire_ou_copier(source_file, remote_tmp, parametres.get("extract"))
+
+        # ⚠️ Vérification que le MP3 produit n'est pas vide (ffmpeg peut produire
+        # un fichier 0 octets si start_time > durée source, duration=00:00:00, etc.)
+        if not infos_mp3.get("size_bytes") or infos_mp3["size_bytes"] < 1024:
+            raise RuntimeError(
+                f"ffmpeg a produit un fichier vide ou quasi vide "
+                f"({infos_mp3.get('size_bytes')} octets, {infos_mp3.get('duration_sec')} s) — "
+                f"verifier start_time/duration vs duree source"
+            )
+        logger(tache_id, f"MP3 pret : {infos_mp3['size_bytes']} octets, {infos_mp3.get('duration_sec', '?')} s")
 
         # 2) Rapatriement du MP3 vers Ubuntu Studio (scp) — le worker a besoin
         #    du fichier en local pour l'uploader vers Azuracast #2 (upload API,
-        #    pas de SFTP direct VPS-à-VPS dans cette implémentation).
+        #    pas de SFTP direct VPS-a-VPS dans cette implémentation).
         logger(tache_id, "Récupération du MP3 depuis le VPS OVH 1 (scp)...")
         local_mp3 = f"/tmp/airvs_podcast_{tache_id}.mp3"
         scp_cmd = [
@@ -3877,6 +3887,14 @@ def executer_pige_promote_podcast(tache_id, parametres):
         scp_res = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=180)
         if scp_res.returncode != 0:
             raise RuntimeError(f"scp du MP3 a échoué: {(scp_res.stderr or '').strip()}")
+
+        # ⚠️ Vérification post-SCP : le fichier local ne doit pas être vide
+        local_size = os.path.getsize(local_mp3) if os.path.exists(local_mp3) else 0
+        if local_size < 1024:
+            raise RuntimeError(
+                f"MP3 local vide ou quasi vide après scp ({local_size} octets) — "
+                f"fichier distant: {infos_mp3['size_bytes']} octets"
+            )
 
         # 3) Connexion à Azuracast #2 + création de l'épisode (métadonnées seules)
         logger(tache_id, "Création de l'épisode sur Azuracast #2...")

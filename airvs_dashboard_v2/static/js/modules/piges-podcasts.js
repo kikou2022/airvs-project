@@ -166,6 +166,37 @@
         }
     }
 
+    // ─── Helper : conversion heure horloge → offset fichier ───
+    // Les fichiers pige sont nommés "17h00_01_+0200.mp3" (commence à 17h00).
+    // Si l'utilisateur entre 17:15:38, on convertit en 00:15:38 (offset dans le fichier).
+    function _parsePigeStartHour(fileName) {
+        var m = (fileName || '').match(/^(\d{1,2})h(\d{2})/);
+        if (!m) return null;
+        return { hour: parseInt(m[1], 10), minute: parseInt(m[2], 10) };
+    }
+
+    function _wallClockToOffset(wallClockStr, fileStart) {
+        var m = (wallClockStr || '').match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
+        if (!m || !fileStart) return null;
+        var wallSecs = parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3], 10);
+        var fileStartSecs = fileStart.hour * 3600 + fileStart.minute * 60;
+        var offsetSecs = wallSecs - fileStartSecs;
+        if (offsetSecs < 0) offsetSecs += 24 * 3600;
+        var oh = Math.floor(offsetSecs / 3600);
+        var om = Math.floor((offsetSecs % 3600) / 60);
+        var os = offsetSecs % 60;
+        return String(oh).padStart(2, '0') + ':' + String(om).padStart(2, '0') + ':' + String(os).padStart(2, '0');
+    }
+
+    function _isLikelyWallClock(timeStr) {
+        var m = (timeStr || '').match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
+        if (!m) return false;
+        var totalSecs = parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3], 10);
+        // Si les heures >= 1 et total > 3600 (1h), c'est probablement une heure horloge
+        // car un fichier pige dure 1h → les offsets valides sont 00:00:00 à 01:00:00
+        return totalSecs > 3600;
+    }
+
     function ouvrirModalPromotion(dateStr, fileName) {
         pp_currentDate = dateStr;
         pp_currentFile = fileName;
@@ -177,6 +208,14 @@
         document.getElementById('pp-extract-fields').style.display = 'none';
         document.getElementById('pp-extract-start').value = '00:00:00';
         document.getElementById('pp-extract-duration').value = '00:10:00';
+
+        // Mettre à jour le hint avec l'heure de début du fichier
+        var fileStart = _parsePigeStartHour(fileName);
+        var hintEl = document.getElementById('pp-extract-start-hint');
+        if (hintEl && fileStart) {
+            var startStr = String(fileStart.hour).padStart(2, '0') + 'h' + String(fileStart.minute).padStart(2, '0');
+            hintEl.textContent = `Fichier démarre à ${startStr} — entrez l'offset (00:00:00 à 01:00:00) ou l'heure réelle (conversion auto)`;
+        }
         document.getElementById('pp-title').value = '';
         document.getElementById('pp-description').value = '';
         document.getElementById('pp-episode-number').value = '';
@@ -200,6 +239,27 @@
 
     document.getElementById('pp-extract-enabled').addEventListener('change', function() {
         document.getElementById('pp-extract-fields').style.display = this.checked ? '' : 'none';
+    });
+
+    // Auto-conversion : si l'utilisateur entre une heure horloge (ex: 17:15:38)
+    // au lieu d'un offset de fichier, convertir automatiquement en offset.
+    document.getElementById('pp-extract-start').addEventListener('blur', function() {
+        var val = this.value.trim();
+        if (!val) return;
+        // Si la valeur ressemble à une heure horloge (> 1h → au-delà de la durée d'un fichier pige)
+        if (_isLikelyWallClock(val)) {
+            var fileStart = _parsePigeStartHour(pp_currentFile);
+            if (fileStart) {
+                var offset = _wallClockToOffset(val, fileStart);
+                if (offset) {
+                    this.value = offset;
+                    var hintEl = document.getElementById('pp-extract-start-hint');
+                    if (hintEl) {
+                        hintEl.innerHTML = '<span class="text-success">Converti : ' + val + ' -> ' + offset + ' (offset dans le fichier)</span><br>Fichier demarre a ' + String(fileStart.hour).padStart(2, '0') + 'h' + String(fileStart.minute).padStart(2, '0') + ' -- entrez offset ou heure reelle (conversion auto)';
+                    }
+                }
+            }
+        }
     });
 
     document.getElementById('pp-artwork-file').addEventListener('change', async function() {
@@ -241,9 +301,11 @@
         const title = document.getElementById('pp-title').value.trim();
         const podcastId = document.getElementById('pp-podcast-select').value;
         const publishDate = document.getElementById('pp-publish-date').value;
+        const description = document.getElementById('pp-description').value.trim();
 
         if (!title) { statusEl.innerHTML = '<span class="text-danger">Le titre est obligatoire</span>'; return; }
         if (!podcastId) { statusEl.innerHTML = '<span class="text-danger">Sélectionne un podcast</span>'; return; }
+        if (!description) { statusEl.innerHTML = '<span class="text-danger">La description est obligatoire (Azuracast la requiert)</span>'; return; }
         if (!publishDate) { statusEl.innerHTML = '<span class="text-danger">Date de publication requise</span>'; return; }
 
         // Le <input type="datetime-local"> renvoie une chaîne SANS fuseau,
@@ -261,7 +323,7 @@
             source_file: pp_currentFile,
             podcast_id: podcastId,
             title: title,
-            description: document.getElementById('pp-description').value,
+            description: description,
             episode_number: document.getElementById('pp-episode-number').value
                 ? parseInt(document.getElementById('pp-episode-number').value, 10) : null,
             season_number: document.getElementById('pp-season-number').value
