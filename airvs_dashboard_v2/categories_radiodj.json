@@ -1,0 +1,44 @@
+{
+  "destinations": [
+    {
+      "id": "auto",
+      "label": "Auto (semaine courante)",
+      "sous_categorie": "NOUVELLES ENTRÉES",
+      "base_path": null,
+      "sous_dossier_semaine": true,
+      "periode": "auto"
+    },
+    {
+      "id": "nouvelles_entrees",
+      "label": "Nouvelles Entrées",
+      "sous_categorie": "NOUVELLES ENTRÉES",
+      "base_path": "/mnt/projet_radio3/Musique/NOUVELLES_ENTREES",
+      "sous_dossier_semaine": true,
+      "periode": "sept_juin"
+    },
+    {
+      "id": "nouvelles_entrees_ete",
+      "label": "Nouvelles Entrées (Été)",
+      "sous_categorie": "NOUVELLES ENTRÉES ETE",
+      "base_path": "/mnt/projet_radio3/Musique/NOUVELLES_ENTREES_ETE",
+      "sous_dossier_semaine": true,
+      "periode": "juil_aout"
+    },
+    {
+      "id": "concert_live_mary",
+      "label": "Concert Live MARY",
+      "sous_categorie": "Concert Live MARY",
+      "base_path": "/mnt/projet_radio3/Musique/LIVES/MARY_MERCREDI",
+      "sous_dossier_semaine": false,
+      "periode": "all"
+    },
+    {
+      "id": "music_bag",
+      "label": "Music Bag",
+      "sous_categorie": "music_bag",
+      "base_path": "/mnt/projet_radio3/Musique/MUSIC_BAG",
+      "sous_dossier_semaine": false,
+      "periode": "all"
+    }
+  ]
+}

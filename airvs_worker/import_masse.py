@@ -22,6 +22,7 @@
 
 import re
 import json
+import os
 import shutil
 import subprocess
 import unicodedata
@@ -63,6 +64,12 @@ LOT_TAILLE = 50
 # ID événement RadioDJ par défaut (SyncFolderSync)
 RADIODJ_EVENT_ID_DEFAUT = 182
 
+# Chemin vers le fichier de config des catégories RadioDJ
+# Le fichier est dans airvs_dashboard_v2/ (sibling de airvs_worker/)
+_CATEGORIES_JSON = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'airvs_dashboard_v2', 'categories_radiodj.json')
+)
+
 # mutagen (optionnel — fallback sur dédoublonnage par nom seul)
 try:
     from mutagen.mp3 import MP3
@@ -101,6 +108,84 @@ def _dossier_sync_courant(sync_folder_force=None):
     dossier = base / f"SEMAINE_{semaine}"
     dossier.mkdir(parents=True, exist_ok=True)
     return dossier
+
+
+# ─── Gestion des catégories RadioDJ ──────────────────────────
+
+def _charger_categories():
+    """Charge le fichier categories_radiodj.json.
+
+    Retourne une liste de dicts, chaque dict représentant une destination.
+    Si le fichier n'existe pas ou est invalide, retourne une liste vide.
+    """
+    try:
+        with open(_CATEGORIES_JSON, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get('destinations', [])
+    except FileNotFoundError:
+        return []
+    except json.JSONDecodeError as e:
+        print(f"[IMPORT_MASSE] ERREUR lecture categories_radiodj.json : {e}")
+        return []
+
+
+def _resoudre_destination(category_id, sync_folder_force, log_fn=None):
+    """Résout le dossier de sync FolderSync selon la catégorie sélectionnée.
+
+    Logique de priorité :
+      1. sync_folder_force (manuel, le plus prioritaire)
+      2. category_id (si fourni et trouvé dans le JSON)
+      3. Auto (comportement par défaut selon le mois)
+
+    Args:
+        category_id (str): ID de la catégorie (ex: "concert_live_mary")
+        sync_folder_force (str): chemin forcé manuellement (override)
+        log_fn (callable): fonction de log optionnelle
+
+    Returns:
+        Path: le dossier de sync à utiliser
+    """
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    # 1. Priorité : sync_folder manuel (override)
+    if sync_folder_force:
+        p = Path(sync_folder_force)
+        p.mkdir(parents=True, exist_ok=True)
+        log(f"  Destination : manuelle (override) → {p}")
+        return p
+
+    # 2. Si category_id fourni, chercher dans le JSON
+    if category_id and category_id != 'auto':
+        categories = _charger_categories()
+        dest = None
+        for cat in categories:
+            if cat.get('id') == category_id:
+                dest = cat
+                break
+
+        if dest and dest.get('base_path'):
+            base = Path(dest['base_path'])
+            base.mkdir(parents=True, exist_ok=True)
+
+            if dest.get('sous_dossier_semaine', False):
+                semaine = datetime.now().isocalendar()[1]
+                dossier = base / f"SEMAINE_{semaine}"
+                dossier.mkdir(parents=True, exist_ok=True)
+                log(f"  Destination : {dest['label']} → {dossier}")
+                return dossier
+            else:
+                log(f"  Destination : {dest['label']} → {base}")
+                return base
+        elif dest and not dest.get('base_path'):
+            # category_id avec base_path null → fallback au comportement auto
+            pass
+        else:
+            log(f"  ATTENTION : category_id '{category_id}' introuvable dans categories_radiodj.json → fallback auto")
+
+    # 3. Fallback : comportement auto (selon le mois)
+    return _dossier_sync_courant(None)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────
@@ -642,6 +727,7 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
     flac_bitrate = int(parametres.get('flac_bitrate', 320))
     flac_delete_source = bool(parametres.get('flac_delete_source', False))
     sync_folder_force = parametres.get('sync_folder', '').strip() or None
+    category_id = parametres.get('category_id', '').strip() or None
     suspects_dir_force = (parametres.get('suspects_dir', '') or '').strip() or None
     radiodj_api_url = parametres.get('radiodj_api_url', 'http://192.168.1.39:7777')
     radiodj_api_pass = parametres.get('radiodj_api_pass', '')
@@ -650,6 +736,7 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
     mode_label = "EXECUTION RÉELLE" if execute else "DRY-RUN (simulation)"
     log(f"=== IMPORT DE MASSE - {mode_label} ===")
     log(f"Source (saisie)   : {source_raw}")
+    log(f"Category ID       : {category_id or 'auto'}")
     log(f"Paramètres : execute={execute}, recursive={recursive}, skip_mp3gain={skip_mp3gain}, "
         f"convert_flac={convert_flac}, flac_bitrate={flac_bitrate}, flac_delete_source={flac_delete_source}")
 
@@ -677,7 +764,7 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
     log(f"Source (Linux)   : {src_dir}")
 
     # ── Détermination du dossier de sync ──
-    sync_dir = _dossier_sync_courant(sync_folder_force)
+    sync_dir = _resoudre_destination(category_id, sync_folder_force, log)
     log(f"Dossier sync     : {sync_dir}")
 
     # ── Scan fichiers audio (MP3 + FLAC) ──

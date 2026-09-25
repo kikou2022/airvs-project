@@ -67,6 +67,7 @@ STATIC_DIR="static"
 CONFIG_FILES=(
     "config.json"
     "flux_radio.json"
+    "categories_radiodj.json"
 )
 
 # ─── Couleurs ANSI ───────────────────────────────────────────────────────────

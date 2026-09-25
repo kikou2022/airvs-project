@@ -164,6 +164,61 @@ RADIODJ_WORKER_PORT = os.getenv('RADIODJ_WORKER_PORT', RADIODJ_API_PORT)
 # Pour trouver l'ID : SELECT id, name FROM events WHERE name='SyncFolderSync';
 RADIODJ_EVENT_ID = int(os.getenv('RADIODJ_EVENT_ID', '182'))
 
+# Chemin vers le fichier de config des catégories RadioDJ (dans airvs_dashboard_v2/)
+_CATEGORIES_JSON = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'categories_radiodj.json')
+)
+
+
+def _charger_categories_radiodj():
+    """Charge le fichier categories_radiodj.json.
+    
+    Retourne une liste de dicts, chaque dict représentant une destination.
+    Fallback hardcodé si le fichier n'existe pas.
+    """
+    try:
+        with open(_CATEGORIES_JSON, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get('destinations', [])
+    except FileNotFoundError:
+        return [
+            {
+                "id": "auto",
+                "label": "Auto (semaine courante)",
+                "sous_categorie": "NOUVELLES ENTRÉES",
+                "base_path": None,
+                "sous_dossier_semaine": True,
+                "periode": "auto"
+            }
+        ]
+    except json.JSONDecodeError as e:
+        _logger(f"[pipeline_import] ERREUR lecture categories_radiodj.json : {e}")
+        return []
+
+
+@pipeline_import_bp.route('/api/pipeline/destinations', methods=['GET'])
+@login_requis
+def api_pipeline_destinations():
+    """Retourne la liste des destinations RadioDJ disponibles.
+    
+    Utilisé par le dashboard pour peupler le dropdown de sélection
+    de destination lors de l'import en masse.
+    
+    Returns:
+        JSON: { "destinations": [ { "id", "label", "sous_categorie", "sous_dossier_semaine", "periode" }, ... ] }
+    """
+    cats = _charger_categories_radiodj()
+    result = []
+    for cat in cats:
+        result.append({
+            'id': cat.get('id', ''),
+            'label': cat.get('label', cat.get('id', '')),
+            'sous_categorie': cat.get('sous_categorie', ''),
+            'sous_dossier_semaine': cat.get('sous_dossier_semaine', False),
+            'periode': cat.get('periode', 'all'),
+        })
+    return jsonify({"destinations": result})
+
 
 @pipeline_import_bp.route('/api/pipeline/launch', methods=['POST'])
 @login_requis
@@ -203,6 +258,7 @@ def api_pipeline_launch():
         'flac_bitrate': int(data.get('flac_bitrate', 320)),
         'flac_delete_source': bool(data.get('flac_delete_source', False)),
         'sync_folder': data.get('sync_folder', ''),
+        'category_id': data.get('category_id', ''),
         'radiodj_api_url': data.get(
             'radiodj_api_url',
             f'http://{RADIODJ_WORKER_HOST}:{RADIODJ_WORKER_PORT}'

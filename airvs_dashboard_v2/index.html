@@ -4233,10 +4233,17 @@
                                         <div class="mt-1"><button type="button" class="btn btn-outline-secondary btn-sm" id="btn_browse_source" title="Parcourir les dossiers">📁 Parcourir</button></div>
                                     </div>
                                     <div class="mb-2">
+                                        <label class="form-label small fw-bold" for="pipeline_destination">Destination RadioDJ :</label>
+                                        <select class="form-select form-select-sm" id="pipeline_destination">
+                                            <option value="auto" selected>Auto (semaine courante)</option>
+                                        </select>
+                                        <div class="form-text small">Sélectionner la sous-catégorie de destination dans RadioDJ.</div>
+                                    </div>
+                                    <div class="mb-2">
                                         <label class="form-label small fw-bold" for="pipeline_sync_folder">Dossier sync (optionnel) :</label>
                                         <input type="text" class="form-control form-control-sm" id="pipeline_sync_folder"
-                                               placeholder="Auto = SEMAINE_XX courante">
-                                        <div class="form-text small">Laisser vide pour le dossier de la semaine automatique.</div>
+                                               placeholder="Auto = selon destination choisie">
+                                        <div class="form-text small">Laisser vide = résolu automatiquement selon la destination.</div>
                                     </div>
                                     <hr class="my-2">
                                     <div class="form-check mb-1">
@@ -5503,6 +5510,34 @@ document.addEventListener('DOMContentLoaded', function() {
     var _pipelinePollTimer = null;
     var _pipelineLastLen = 0;
 
+    // Charger le dropdown des destinations RadioDJ
+    (function() {
+        var select = document.getElementById('pipeline_destination');
+        if (!select) return;
+        fetch('/api/pipeline/destinations')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.destinations || !data.destinations.length) return;
+                select.innerHTML = '';
+                data.destinations.forEach(function(dest) {
+                    var opt = document.createElement('option');
+                    opt.value = dest.id;
+                    var label = dest.label;
+                    if (dest.sous_dossier_semaine && dest.periode === 'sept_juin') {
+                        label += ' (Sept-Juin)';
+                    } else if (dest.sous_dossier_semaine && dest.periode === 'juil_aout') {
+                        label += ' (Juil-Août)';
+                    }
+                    opt.textContent = label;
+                    select.appendChild(opt);
+                });
+                select.value = 'auto';
+            })
+            .catch(function(err) {
+                console.error('[Pipeline] Erreur chargement destinations :', err);
+            });
+    })();
+
     // Bouton principal : lancer le pipeline
     document.getElementById('btn_pipeline_launch').addEventListener('click', function() {
         var source = document.getElementById('pipeline_source').value.trim();
@@ -5516,7 +5551,8 @@ document.addEventListener('DOMContentLoaded', function() {
             convert_flac: document.getElementById('pipeline_convert_flac').checked,
             flac_bitrate: parseInt(document.getElementById('pipeline_flac_bitrate').value) || 320,
             flac_delete_source: document.getElementById('pipeline_flac_delete_source').checked,
-            sync_folder: document.getElementById('pipeline_sync_folder').value.trim()
+            sync_folder: document.getElementById('pipeline_sync_folder').value.trim(),
+            category_id: document.getElementById('pipeline_destination').value
         };
 
         var statusDiv = document.getElementById('pipeline_launch_status');
@@ -6125,7 +6161,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     convert_flac: document.getElementById('pipeline_convert_flac').checked,
                     flac_bitrate: parseInt(document.getElementById('pipeline_flac_bitrate').value) || 320,
                     flac_delete_source: document.getElementById('pipeline_flac_delete_source').checked,
-                    sync_folder: document.getElementById('pipeline_sync_folder').value.trim()
+                    sync_folder: document.getElementById('pipeline_sync_folder').value.trim(),
+                    category_id: document.getElementById('pipeline_destination').value
                 };
 
                 var statusDiv = document.getElementById('pipeline_launch_status');
