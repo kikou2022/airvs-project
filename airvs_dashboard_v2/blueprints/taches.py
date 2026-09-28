@@ -1,5 +1,6 @@
 import json
 import datetime
+import traceback
 
 import pymysql
 from flask import Blueprint, jsonify, request
@@ -235,7 +236,10 @@ def api_maintenance_config_update():
         
         # Vérifier que la table existe
         db = get_db_connection()
-        cursor = db.cursor()
+        # IMPORTANT : get_db_connection() configure cursorclass=DictCursor
+        # globalement. Pour utiliser fetchone()[0] (accès par index),
+        # on force pymysql.cursors.Cursor (curseur tuple).
+        cursor = db.cursor(pymysql.cursors.Cursor)
         cursor.execute(
             "SELECT COUNT(*) FROM information_schema.tables "
             "WHERE table_schema = DATABASE() AND table_name = 'airvs_maintenance_config'"
@@ -264,7 +268,14 @@ def api_maintenance_config_update():
             "updated_fields": [u.split(' = ')[0] for u in updates]
         })
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        # 2026.09.28 — diagnostic : on retourne le traceback complet
+        # pour permettre de diagnostiquer les erreurs 500 vides
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "exception_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }), 500
 
 
 @taches_bp.route('/api/maintenance/tables_sizes')
