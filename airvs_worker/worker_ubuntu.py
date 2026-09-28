@@ -108,7 +108,8 @@ AZURA_API_URL = "https://azuracast.2026.airvs.fr/api/station/7/files"
 AZURA_API_KEY = "5e256834da4da4cf:1cadd3936115612949a795cd5a48e12d"
 _DEFAULT_STATION_ID = 7
 
-PURGE_RETENTION_JOURS = 7
+PURGE_RETENTION_JOURS = 14  # Valeur par défaut (surchargée par airvs_maintenance_config)
+INTERVALLE_PURGE_TERMINEES = 6 * 3600  # Purge auto des tâches terminées toutes les 6h
 
 # ── Colonnes optionnelles de la table songs (RadioDJ) ──
 # Les noms de colonnes varient selon la version de RadioDJ.
@@ -242,23 +243,54 @@ def get_azura_api(station_id=None):
     return _azura_api_instances[station_id]
 
 def purger_anciennes_taches():
-    """Supprime les tâches terminées datant de plus de PURGE_RETENTION_JOURS jours."""
+    """Supprime les tâches terminées/erronées/annulées de plus de N jours.
+    
+    Lit la rétention depuis airvs_maintenance_config (table créée au démarrage).
+    Si la purge auto est désactivée (purge_auto_active=0), ne fait rien.
+    Si la table n'existe pas, fallback sur PURGE_RETENTION_JOURS.
+    """
     try:
         db = pymysql.connect(**DB_CONFIG)
         cursor = db.cursor()
-        seuil = datetime.now() - timedelta(days=PURGE_RETENTION_JOURS)
+        
+        # Lire la config (rétention + activation)
+        retention_jours = PURGE_RETENTION_JOURS
+        purge_active = True
+        try:
+            cursor.execute(
+                "SELECT purge_retention_jours, purge_auto_active "
+                "FROM airvs_maintenance_config WHERE id = 1"
+            )
+            row = cursor.fetchone()
+            if row:
+                retention_jours = int(row[0]) if row[0] else PURGE_RETENTION_JOURS
+                purge_active = bool(row[1])
+        except Exception:
+            # Table inexistante ou erreur → fallback config codée en dur
+            pass
+        
+        if not purge_active:
+            cursor.close()
+            db.close()
+            return  # Purge auto désactivée depuis le dashboard
+        
+        seuil = datetime.now() - timedelta(days=retention_jours)
+        # Purger les 3 statuts "finis" : termine / erreur / annule
         cursor.execute(
-            "DELETE FROM taches_planifiees WHERE statut = 'termine' AND date_fin < %s",
+            "DELETE FROM taches_planifiees "
+            "WHERE statut IN ('termine', 'erreur', 'annule') "
+            "AND date_fin < %s",
             (seuil,)
         )
         nb_supprimees = cursor.rowcount
         if nb_supprimees > 0:
             db.commit()
-            print(f"[PURGE] {nb_supprimees} tâche(s) ancienne(s) supprimée(s).")
+            print(f"[PURGE AUTO] {nb_supprimees} tâche(s) supprimée(s) "
+                  f"(rétention={retention_jours} jours).")
         cursor.close()
         db.close()
     except Exception as e:
-        print(f"[PURGE] Erreur : {e}")
+        print(f"[PURGE AUTO] Erreur : {e}")
 
 
 def windows_vers_linux(chemin_windows: str) -> Path:
@@ -316,9 +348,17 @@ def resoudre_chemin_insensible(src_path: Path) -> Path:
 def logger(tache_id, message, raw_append=False):
     """Ajoute une ligne au log_resultat de la tâche.
 
-    Par défaut, tronque à MAX_LOG_APPEND (50 Ko) pour protéger la colonne TEXT.
-    Si raw_append=True, écrit le message tel quel sans troncature
-    (utile pour les payloads JSON qui sont concaténés puis parsés par le frontend).
+    Par défaut (raw_append=False) :
+      - Tronque le message à MAX_LOG_APPEND (50 Ko) par appel
+      - Plafonne le total log_resultat à MAX_LOG_TOTAL (100 Ko) en gardant
+        la fin (messages les plus récents) via RIGHT(). Cela évite qu'une
+        tâche bavarde (ex: SYNC_PLAYLISTS_CACHE qui logge 18 Ko/exécution)
+        ne fasse grossir taches_planifiees indéfiniment.
+
+    Si raw_append=True :
+      - Écrit le message tel quel (sans troncature ni plafond RIGHT)
+      - Utilisé pour les payloads JSON concaténés et parsés par le frontend
+        (ne PAS appliquer RIGHT() sinon le JSON devient invalide).
     """
     try:
         if not raw_append:
@@ -327,9 +367,23 @@ def logger(tache_id, message, raw_append=False):
             MAX_LOG_APPEND = 50000  # 50 Ko par appel
             if len(message) > MAX_LOG_APPEND:
                 message = message[:MAX_LOG_APPEND] + '\n... [TRONQUÉ]'
+
         db = pymysql.connect(**DB_CONFIG)
         cursor = db.cursor()
-        query = "UPDATE taches_planifiees SET log_resultat = CONCAT(IFNULL(log_resultat, ''), %s) WHERE id = %s"
+
+        if raw_append:
+            # Mode JSON : pas de plafond (préserve l'intégrité du JSON parsé)
+            query = ("UPDATE taches_planifiees "
+                     "SET log_resultat = CONCAT(IFNULL(log_resultat, ''), %s) "
+                     "WHERE id = %s")
+        else:
+            # Mode logs classiques : plafond RIGHT(..., 100000) garde la fin
+            MAX_LOG_TOTAL = 100000  # 100 Ko max par tâche (vs ~5 MB théorique avant)
+            query = (f"UPDATE taches_planifiees "
+                     f"SET log_resultat = RIGHT("
+                     f"CONCAT(IFNULL(log_resultat, ''), %s), {MAX_LOG_TOTAL}"
+                     f") WHERE id = %s")
+
         cursor.execute(query, (message + "\n", tache_id))
         db.commit()
         cursor.close()
@@ -6309,6 +6363,35 @@ def main():
     except Exception as e:
         print(f"  ⚠ Impossible de creer la table airvs_manquants : {e}")
 
+    # -- 2026.09.28 : Table airvs_maintenance_config (paramétrage purge auto) --
+    try:
+        db_mc = pymysql.connect(**DB_CONFIG)
+        cur_mc = db_mc.cursor()
+        cur_mc.execute("""
+            CREATE TABLE IF NOT EXISTS airvs_maintenance_config (
+                id                      INT PRIMARY KEY DEFAULT 1,
+                purge_retention_jours   INT NOT NULL DEFAULT 14,
+                purge_auto_active       TINYINT NOT NULL DEFAULT 1,
+                purge_interval_secondes INT NOT NULL DEFAULT 21600,
+                derniere_purge_le       DATETIME DEFAULT NULL,
+                maj_le                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+                CONSTRAINT chk_single_row CHECK (id = 1)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        # Insérer la ligne par défaut si elle n'existe pas
+        cur_mc.execute(
+            "INSERT IGNORE INTO airvs_maintenance_config "
+            "(id, purge_retention_jours, purge_auto_active, purge_interval_secondes) "
+            "VALUES (1, 14, 1, 21600)"
+        )
+        db_mc.commit()
+        cur_mc.close()
+        db_mc.close()
+        print("  ✓ Table airvs_maintenance_config creee/verifiee (rétention=14j, auto=ON)")
+    except Exception as e:
+        print(f"  ⚠ Impossible de creer la table airvs_maintenance_config : {e}")
+
 
     # Compteur pour la vérification périodique des créneaux
     dernier_check_couleur = 0
@@ -6317,6 +6400,7 @@ def main():
     dernier_check_sync_azura_auto = 0
     dernier_check_sync_vps = 0
     dernier_check_orphelines = 0
+    dernier_check_purge_terminees = 0  # 2026.09.28 : purge auto tâches terminées
     while True:
         try:
             # ── Vérification périodique des créneaux PROGRAMMATION_COULEUR ──
@@ -6370,6 +6454,26 @@ def main():
                 except Exception:
                     pass
                 dernier_check_orphelines = now_ts
+
+            # ── Purge auto des tâches terminées/erronées (toutes les 6h par défaut) ──
+            # 2026.09.28 : corrige le bug "table taches_planifiees grossit indéfiniment"
+            # La fonction lit elle-même la rétention depuis airvs_maintenance_config.
+            if now_ts - dernier_check_purge_terminees >= INTERVALLE_PURGE_TERMINEES:
+                try:
+                    purger_anciennes_taches()
+                    # Mettre à jour le timestamp de dernière exécution
+                    _pc = pymysql.connect(**DB_CONFIG)
+                    _pcc = _pc.cursor()
+                    _pcc.execute(
+                        "UPDATE airvs_maintenance_config "
+                        "SET derniere_purge_le = NOW() WHERE id = 1"
+                    )
+                    _pc.commit()
+                    _pcc.close()
+                    _pc.close()
+                except Exception as _pe:
+                    print(f"[PURGE AUTO] Exception boucle : {_pe}")
+                dernier_check_purge_terminees = now_ts
 
             db = pymysql.connect(**DB_CONFIG)
             cursor = db.cursor(pymysql.cursors.DictCursor)
