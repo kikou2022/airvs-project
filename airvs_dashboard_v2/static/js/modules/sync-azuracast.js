@@ -717,7 +717,7 @@ function getDossierCible(selectId, inputId) {
     return sel ? sel.value.trim() : '';
 }
 
-// Charger les playlists AzuraCast dans les dropdowns (3 selects action + 3 selects push)
+// Charger les playlists AzuraCast dans les dropdowns dynamiques (action)
 function loadActionPlaylists() {
     if (window.actionPlaylistsLoaded) return;
     let sid = getActionStationId();
@@ -725,41 +725,20 @@ function loadActionPlaylists() {
         .then(function(r) { return r.json(); })
         .then(function(playlists) {
             if (!Array.isArray(playlists)) return;
-            let html = '<option value="">-- Sélectionner --</option>';
+            var html = '<option value="">-- Sélectionner --</option>';
             playlists.forEach(function(pl) {
-                html += '<option value="' + pl.id + '">' + pl.name + ' (' + pl.nb_tracks + ' titres)</option>';
+                html += '<option value="' + pl.id + '" title="' + pl.name + '">' + pl.name + ' (' + pl.nb_tracks + ' titres)</option>';
             });
-            html += '<option value="__new__">+ Créer une nouvelle playlist</option>';
-            document.getElementById('action_playlist_select_1').innerHTML = html;
-            // Les selects 2 et 3 n'ont pas l'option "nouvelle"
-            let html2 = '<option value="">-- Aucune --</option>';
-            playlists.forEach(function(pl) {
-                html2 += '<option value="' + pl.id + '">' + pl.name + ' (' + pl.nb_tracks + ' titres)</option>';
-            });
-            document.getElementById('action_playlist_select_2').innerHTML = html2;
-            document.getElementById('action_playlist_select_3').innerHTML = html2;
+            _actionPlaylistOptionsHtml = html;
             window.actionPlaylistsLoaded = true;
+            // Ajouter une première ligne si vide
+            if (document.getElementById('action_playlist_container').children.length === 0) {
+                addActionPlaylistRow();
+            }
         });
 }
 
-// Collecter les IDs de playlists sélectionnées (action rapide)
-function getActionPlaylistIds() {
-    let ids = [];
-    let v1 = document.getElementById('action_playlist_select_1').value;
-    let v2 = document.getElementById('action_playlist_select_2').value;
-    let v3 = document.getElementById('action_playlist_select_3').value;
-    if (v1 && v1 !== '__new__') ids.push(parseInt(v1));
-    if (v2 && v2 !== '__new__') ids.push(parseInt(v2));
-    if (v3 && v3 !== '__new__') ids.push(parseInt(v3));
-    return ids;
-}
-
-// Quand on choisit "Créer nouvelle playlist"
-document.getElementById('action_playlist_select_1').addEventListener('change', function() {
-    if (this.value === '__new__') {
-        document.getElementById('action_new_playlist_name').focus();
-    }
-});
+// (getActionPlaylistIds est déjà défini plus haut dans la section dynamique)
 
 // Action : Copier vers AzuraCast
 document.getElementById('btn_action_copier').addEventListener('click', function() {
@@ -1262,82 +1241,160 @@ function chargerPlaylistsCache() {
         });
 }
 
-// ── Charger les playlists existantes dans le <select> du Pont ──
+// ── Charger les playlists existantes dans les sélecteurs dynamiques ──
+// Stocke le HTML des options pour pouvoir peupler de nouveaux sélecteurs
+var _pushPlaylistOptionsHtml = '<option value="">-- Aucune --</option>';
+var _pushPlaylistCounter = 0;
+var _actionPlaylistOptionsHtml = '<option value="">-- Aucune --</option>';
+var _actionPlaylistCounter = 0;
+
 function loadPushPlaylists() {
     let sid = getPushStationId();
     fetch('/api/azuracast/playlists?t=' + Date.now() + '&station_id=' + sid)
         .then(function(r) { return r.json(); })
         .then(function(playlists) {
-            let sel1 = document.getElementById('push_playlist_select');
-            let sel2 = document.getElementById('push_playlist_select_2');
-            let sel3 = document.getElementById('push_playlist_select_3');
-            if (!sel1) return;
-            // Select 1 : avec option "aucune" et "nouvelle"
-            let html1 = '<option value="">-- Aucune playlist (copie uniquement) --</option>';
+            // Construire le HTML des options (sans l'option "nouvelle" qui est gérée séparément)
+            var html = '<option value="">-- Aucune --</option>';
             if (Array.isArray(playlists) && playlists.length > 0) {
                 playlists.forEach(function(pl) {
-                    html1 += '<option value="' + pl.id + '">' + pl.name + ' (' + pl.nb_tracks + ' titres)</option>';
-                });
-                html1 += '<option value="__new__">+ Créer une nouvelle playlist</option>';
-            } else {
-                html1 += '<option value="__new__">+ Créer une nouvelle playlist</option>';
-            }
-            sel1.innerHTML = html1;
-            // Selects 2 et 3 : option "aucune" seulement
-            let html23 = '<option value="">-- Aucune --</option>';
-            if (Array.isArray(playlists)) {
-                playlists.forEach(function(pl) {
-                    html23 += '<option value="' + pl.id + '">' + pl.name + ' (' + pl.nb_tracks + ' titres)</option>';
+                    html += '<option value="' + pl.id + '" title="' + pl.name + '">' + pl.name + ' (' + pl.nb_tracks + ' titres)</option>';
                 });
             }
-            if (sel2) sel2.innerHTML = html23;
-            if (sel3) sel3.innerHTML = html23;
+            _pushPlaylistOptionsHtml = html;
+            _actionPlaylistOptionsHtml = html;
             window.pushPlaylistsLoaded = true;
+            
+            // Ajouter une première ligne vide
+            if (document.getElementById('push_playlist_container').children.length === 0) {
+                addPushPlaylistRow();
+            }
+            // Peupler aussi les sélecteurs d'action si visibles
+            if (document.getElementById('action_playlist_container').children.length === 0) {
+                addActionPlaylistRow();
+            }
         })
         .catch(function() {
-            let sel1 = document.getElementById('push_playlist_select');
-            if (sel1) sel1.innerHTML = '<option value="">-- Erreur de chargement --</option><option value="__new__">+ Créer une nouvelle playlist</option>';
+            _pushPlaylistOptionsHtml = '<option value="">-- Erreur de chargement --</option>';
+            _actionPlaylistOptionsHtml = _pushPlaylistOptionsHtml;
+            if (document.getElementById('push_playlist_container').children.length === 0) {
+                addPushPlaylistRow();
+            }
         });
 }
 
-// Collecter les IDs de playlists sélectionnées (Push)
+// Ajouter une ligne de sélecteur de playlist (Push)
+function addPushPlaylistRow() {
+    var container = document.getElementById('push_playlist_container');
+    if (!container) return;
+    _pushPlaylistCounter++;
+    var rowId = 'push_pl_row_' + _pushPlaylistCounter;
+    
+    var row = document.createElement('div');
+    row.className = 'row g-1 mb-1 push-playlist-row';
+    row.id = rowId;
+    row.innerHTML = 
+        '<div class="col">' +
+            '<select class="form-select form-select-sm push-playlist-select" data-row-id="' + rowId + '">' +
+                _pushPlaylistOptionsHtml +
+            '</select>' +
+            '<div class="select-display" id="' + rowId + '_display"></div>' +
+        '</div>' +
+        '<div class="col-auto">' +
+            '<button type="button" class="btn btn-outline-danger btn-sm py-0 px-2" ' +
+                    'onclick="removePushPlaylistRow(\'' + rowId + '\')" title="Retirer">✕</button>' +
+        '</div>';
+    container.appendChild(row);
+    
+    // Attacher l'événement change pour afficher le texte complet
+    var sel = row.querySelector('select');
+    var display = row.querySelector('.select-display');
+    sel.addEventListener('change', function() {
+        var opt = sel.options[sel.selectedIndex];
+        display.textContent = opt && opt.value ? opt.text : '';
+    });
+}
+
+// Retirer une ligne de sélecteur de playlist (Push)
+function removePushPlaylistRow(rowId) {
+    var row = document.getElementById(rowId);
+    if (row) row.remove();
+}
+
+// Collecter les IDs de playlists sélectionnées (Push) — version dynamique
 function getPushPlaylistIds() {
-    let ids = [];
-    let v1 = document.getElementById('push_playlist_select').value;
-    let v2 = document.getElementById('push_playlist_select_2').value;
-    let v3 = document.getElementById('push_playlist_select_3').value;
-    if (v1 && v1 !== '__new__') ids.push(parseInt(v1));
-    if (v2 && v2 !== '__new__') ids.push(parseInt(v2));
-    if (v3 && v3 !== '__new__') ids.push(parseInt(v3));
+    var ids = [];
+    var selects = document.querySelectorAll('#push_playlist_container .push-playlist-select');
+    selects.forEach(function(sel) {
+        var v = sel.value;
+        if (v && v !== '__new__' && v !== '') {
+            ids.push(parseInt(v));
+        }
+    });
     return ids;
 }
 
-// Quand on choisit "Créer nouvelle playlist" dans le Pont
-document.getElementById('push_playlist_select').addEventListener('change', function() {
-    let typeCol = document.getElementById('push_new_playlist_type_col');
-    let orderCol = document.getElementById('push_new_playlist_order_col');
-    let nameInput = document.getElementById('push_new_playlist_name');
-    if (this.value === '__new__') {
-        if (typeCol) typeCol.style.display = '';
-        if (orderCol) orderCol.style.display = '';
-        if (nameInput) nameInput.focus();
-    } else {
-        if (typeCol) typeCol.style.display = 'none';
-        if (orderCol) orderCol.style.display = 'none';
-        if (this.value) {
-            if (nameInput) nameInput.value = '';
-        }
-    }
-});
+// Ajouter une ligne de sélecteur de playlist (Action sur 1 titre)
+function addActionPlaylistRow() {
+    var container = document.getElementById('action_playlist_container');
+    if (!container) return;
+    _actionPlaylistCounter++;
+    var rowId = 'action_pl_row_' + _actionPlaylistCounter;
+    
+    var row = document.createElement('div');
+    row.className = 'row g-1 mb-1 action-playlist-row';
+    row.id = rowId;
+    row.innerHTML = 
+        '<div class="col">' +
+            '<select class="form-select form-select-sm action-playlist-select" data-row-id="' + rowId + '">' +
+                _actionPlaylistOptionsHtml +
+            '</select>' +
+            '<div class="select-display" id="' + rowId + '_display"></div>' +
+        '</div>' +
+        '<div class="col-auto">' +
+            '<button type="button" class="btn btn-outline-danger btn-sm py-0 px-2" ' +
+                    'onclick="removeActionPlaylistRow(\'' + rowId + '\')" title="Retirer">✕</button>' +
+        '</div>';
+    container.appendChild(row);
+    
+    var sel = row.querySelector('select');
+    var display = row.querySelector('.select-display');
+    sel.addEventListener('change', function() {
+        var opt = sel.options[sel.selectedIndex];
+        display.textContent = opt && opt.value ? opt.text : '';
+    });
+}
 
-// Quand on saisit un nouveau nom de playlist → afficher type+order
+// Retirer une ligne de sélecteur de playlist (Action)
+function removeActionPlaylistRow(rowId) {
+    var row = document.getElementById(rowId);
+    if (row) row.remove();
+}
+
+// Collecter les IDs de playlists sélectionnées (Action)
+function getActionPlaylistIds() {
+    var ids = [];
+    var selects = document.querySelectorAll('#action_playlist_container .action-playlist-select');
+    selects.forEach(function(sel) {
+        var v = sel.value;
+        if (v && v !== '') {
+            ids.push(parseInt(v));
+        }
+    });
+    return ids;
+}
+
+// Boutons "Ajouter une playlist"
+document.getElementById('btn_add_push_playlist').addEventListener('click', addPushPlaylistRow);
+document.getElementById('btn_add_action_playlist').addEventListener('click', addActionPlaylistRow);
+
+// Quand on choisit "Créer nouvelle playlist" (géré par le champ texte)
 document.getElementById('push_new_playlist_name').addEventListener('input', function() {
-    let typeCol = document.getElementById('push_new_playlist_type_col');
-    let orderCol = document.getElementById('push_new_playlist_order_col');
+    var typeCol = document.getElementById('push_new_playlist_type_col');
+    var orderCol = document.getElementById('push_new_playlist_order_col');
     if (this.value.trim()) {
         if (typeCol) typeCol.style.display = '';
         if (orderCol) orderCol.style.display = '';
-    } else if (document.getElementById('push_playlist_select').value !== '__new__') {
+    } else {
         if (typeCol) typeCol.style.display = 'none';
         if (orderCol) orderCol.style.display = 'none';
     }
