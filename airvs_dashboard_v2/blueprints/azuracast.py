@@ -1546,6 +1546,7 @@ def api_azuracast_grille_editoriale():
 
     azura = _charger_azura_config()
     if not azura:
+        _logger.error("[grille_editoriale] Section azuracast absente de config.json")
         return jsonify({'error': 'Section azuracast absente de config.json'}), 500
 
     base_url = azura.get('base_url', '')
@@ -1556,6 +1557,8 @@ def api_azuracast_grille_editoriale():
     if not base_url.endswith('/api'):
         base_url = base_url.rstrip('/') + '/api'
 
+    _logger.info(f"[grille_editoriale] station_id={station_id} base_url={base_url} api_key={'***' + api_key[-8:] if api_key and len(api_key) > 8 else '(vide)'}")
+
     # Appeler GET /api/station/{station_id}/playlists
     try:
         playlists = _azura_api_get_station(
@@ -1565,6 +1568,8 @@ def api_azuracast_grille_editoriale():
     except Exception as e:
         _logger.error(f"[grille_editoriale] Erreur API playlists station {station_id} : {e}")
         return jsonify({'error': f'Erreur appel API AzuraCast : {e}'}), 500
+
+    _logger.info(f"[grille_editoriale] {len(playlists) if playlists else 0} playlists retournées pour station {station_id}")
 
     if not playlists or not isinstance(playlists, list):
         return jsonify({

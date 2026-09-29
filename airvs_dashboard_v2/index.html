@@ -3849,7 +3849,7 @@
                     <i class="bi bi-upload"></i> Importer
                 </button>
                 <div class="vr mx-1" style="height:24px;"></div>
-                <button class="btn btn-sm btn-outline-info" onclick="remplirGrilleDepuisAzuraCast()">
+                <button class="btn btn-sm btn-outline-info" id="btn_remplir_azura" onclick="remplirGrilleDepuisAzuraCast(event)">
                     <i class="bi bi-cloud-download"></i> Remplir depuis AzuraCast
                 </button>
                 <select class="form-select form-select-sm" id="grille_azura_station" style="width:auto; max-width:130px;" title="Station AzuraCast pour le pré-remplissage">
@@ -5497,11 +5497,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // ════════════════════════════════════
     // GRILLE ÉDITORIALE : Pré-remplissage depuis AzuraCast
     // ════════════════════════════════════
-    function remplirGrilleDepuisAzuraCast() {
+    window.remplirGrilleDepuisAzuraCast = function(evt) {
         var stationSel = document.getElementById('grille_azura_station');
         var stationId = stationSel ? stationSel.value : '7';
-        var btn = event.target.closest('button');
+        var btn = (evt && evt.target) ? evt.target.closest('button') : document.getElementById('btn_remplir_azura');
         if (btn) { btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Chargement...'; }
+        console.log('[grille-azura] Appel /api/azuracast/grille_editoriale?station_id=' + stationId);
 
         fetch('/api/azuracast/grille_editoriale?station_id=' + encodeURIComponent(stationId))
         .then(function(r) {
@@ -5510,6 +5511,7 @@ document.addEventListener('DOMContentLoaded', function() {
         })
         .then(function(data) {
             if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-cloud-download"></i> Remplir depuis AzuraCast'; }
+            console.log('[grille-azura] Réponse reçue :', JSON.stringify(data).substring(0, 300));
 
             if (!data.blocs || data.blocs.length === 0) {
                 alert(data.message || 'Aucune playlist programmée trouvée sur cette station.');
@@ -5560,6 +5562,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         })
         .catch(function(err) {
+            console.error('[grille-azura] Erreur :', err);
             if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-cloud-download"></i> Remplir depuis AzuraCast'; }
             alert('Erreur AzuraCast : ' + err.message);
         });
