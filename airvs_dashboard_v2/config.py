@@ -1,3 +1,13 @@
+# ==============================================================================
+# FICHIER DE DEPLOIEMENT - AIRVS Dashboard v2
+# Date     : 2026-09-29
+# Contexte : Fix grille editoriale - pre-remplissage AzuraCast
+# Probleme : Flask (Windows, sans internet) -> urlopen timeout
+# Solution : Router via worker Ubuntu (taches_planifiees)
+# Changt.  : GRILLE_EDITORIALE_POLL_TIMEOUT = 60
+# Dest.    : Windows (Flask) -> airvs_dashboard_v2/config.py
+# ==============================================================================
+
 """config.py — Constantes partagees du dashboard AIRVS.
 
 Extraites de app.py pour eviter les imports circulaires lors de la
@@ -215,6 +225,8 @@ WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.09.17-A')  
 
 BULK_SCHEDULE_MAX_PLAYLISTS = 50
 BULK_SCHEDULE_POLL_TIMEOUT = 180  # secondes max pour attendre le worker
+
+GRILLE_EDITORIALE_POLL_TIMEOUT = 60  # secondes max pour attendre le worker (grille éditoriale)
 
 
 # ═══════════════════════════════════════════════════════════════════════

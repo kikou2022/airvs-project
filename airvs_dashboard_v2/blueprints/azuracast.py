@@ -1,3 +1,27 @@
+# ==============================================================================
+# FICHIER DE DEPLOIEMENT - AIRVS Dashboard v2
+# Date     : 2026-09-29
+# Contexte : Fix grille editoriale - pre-remplissage AzuraCast
+# Probleme : Flask (Windows, sans internet) ne peut pas appeler l'API AzuraCast
+# Solution : api_azuracast_grille_editoriale() insere tache GRILLE_EDITORIALE_AZURA
+#            dans taches_planifiees + poll resultat (pattern BULK_SCHEDULE)
+# Changt.  : Import GRILLE_EDITORIALE_POLL_TIMEOUT, reecriture endpoint
+# Dest.    : Windows (Flask) -> blueprints/azuracast.py
+# ==============================================================================
+
+# ╔════════════════════════════════════════════════════════════════════╗
+# ║  FICHIER DE DÉPLOIEMENT — AIRVS Dashboard v2                       ║
+# ║  Date : 2026-09-29                                                ║
+# ║  Contexte : Fix grille éditoriale pré-remplissage AzuraCast        ║
+# ║  Problème résolu : Flask (Windows, sans internet) ne peut pas      ║
+# ║    appeler l'API AzuraCast directement (urlopen timeout).          ║
+# ║  Solution : api_azuracast_grille_editoriale() insère tâche         ║
+# ║    GRILLE_EDITORIALE_AZURA dans taches_planifiees, puis poll       ║
+# ║    le résultat (pattern __BULK_RESULT__ comme BULK_SCHEDULE).       ║
+# ║  Changement principal : Réécriture complète de l'endpoint           ║
+# ║    /api/azuracast/grille_editoriale (suppression urlopen direct)    ║
+# ║  Destination déploiement : Windows (Flask) — blueprints/           ║
+# ╚════════════════════════════════════════════════════════════════════╝
 """blueprints/azuracast.py -- Routes AzuraCast (push, sync, stations, folders, playlists, M3U, bulk schedule, diagnostic, mark).
 
 Routes extraites de app.py pour le blueprint azuracast_bp.
@@ -53,6 +77,7 @@ from config import (
     AZURA_API_URL, AZURA_API_KEY, AZURA_MEDIA_BASE,
     PUSH_LIMIT_HARDCAP,
     BULK_SCHEDULE_MAX_PLAYLISTS, BULK_SCHEDULE_POLL_TIMEOUT,
+    GRILLE_EDITORIALE_POLL_TIMEOUT,
 )
 from utils import get_db_connection, _logger, _charger_config_json
 from blueprints.auth import login_requis
@@ -1517,6 +1542,9 @@ def _jours_noms(days_list):
 def api_azuracast_grille_editoriale():
     """Pré-remplissage de la grille éditoriale depuis l'API AzuraCast.
 
+    Passe par le worker Ubuntu (tâche GRILLE_EDITORIALE_AZURA) car la machine
+    Windows n'a pas accès à Internet.
+
     Parametres query :
       - station_id (int, optionnel) : ID de la station (defaut: première station configurée)
 
@@ -1544,142 +1572,85 @@ def api_azuracast_grille_editoriale():
     if not station_id:
         station_id = _station_par_defaut()
 
-    azura = _charger_azura_config()
-    if not azura:
-        _logger.error("[grille_editoriale] Section azuracast absente de config.json")
-        return jsonify({'error': 'Section azuracast absente de config.json'}), 500
+    _logger.info(f"[grille_editoriale] Demande grille station {station_id} → dispatch au worker")
 
-    base_url = azura.get('base_url', '')
-    if not base_url:
-        base_url = AZURA_API_URL.rsplit('/station/', 1)[0]
-    api_key = azura.get('api_key', AZURA_API_KEY)
-
-    if not base_url.endswith('/api'):
-        base_url = base_url.rstrip('/') + '/api'
-
-    _logger.info(f"[grille_editoriale] station_id={station_id} base_url={base_url} api_key={'***' + api_key[-8:] if api_key and len(api_key) > 8 else '(vide)'}")
-
-    # Appeler GET /api/station/{station_id}/playlists
+    # Insérer la tâche GRILLE_EDITORIALE_AZURA dans taches_planifiees
+    parametres = {'station_id': station_id}
+    conn = get_db_connection()
+    if not conn:
+        _logger.error("[grille_editoriale] Connexion DB impossible")
+        return jsonify({'error': 'Connexion DB impossible'}), 500
     try:
-        playlists = _azura_api_get_station(
-            base_url, api_key,
-            f'/station/{station_id}/playlists'
-        )
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO taches_planifiees (type_action, parametres, statut, date_creation)
+            VALUES ('GRILLE_EDITORIALE_AZURA', %s, 'en_attente', NOW())
+        """, (json.dumps(parametres),))
+        tache_id = cur.lastrowid
+        conn.commit()
+        conn.close()
     except Exception as e:
-        _logger.error(f"[grille_editoriale] Erreur API playlists station {station_id} : {e}")
-        return jsonify({'error': f'Erreur appel API AzuraCast : {e}'}), 500
+        _logger.error(f"[grille_editoriale] Insertion tâche échouée : {e}")
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return jsonify({'error': f'Insertion tâche échouée : {e}'}), 500
 
-    _logger.info(f"[grille_editoriale] {len(playlists) if playlists else 0} playlists retournées pour station {station_id}")
+    _logger.info(f"[grille_editoriale] Tâche {tache_id} insérée, polling (timeout={GRILLE_EDITORIALE_POLL_TIMEOUT}s)...")
 
-    if not playlists or not isinstance(playlists, list):
-        return jsonify({
-            'station_id': station_id,
-            'blocs': [],
-            'message': 'Aucune playlist retournée par AzuraCast'
-        })
-
-    # Filtrer : uniquement les playlists activées avec des schedule_items
-    playlists_schedulees = []
-    for pl in playlists:
-        if not isinstance(pl, dict):
+    # Poll le statut jusqu'à termine/erreur ou timeout
+    start = time.time()
+    while time.time() - start < GRILLE_EDITORIALE_POLL_TIMEOUT:
+        conn = get_db_connection()
+        if not conn:
+            time.sleep(1)
             continue
-        if not pl.get('is_enabled', False):
-            continue
-        items = pl.get('schedule_items') or []
-        if not items:
-            continue
-        playlists_schedulees.append(pl)
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT statut, log_resultat
+                FROM taches_planifiees WHERE id = %s
+            """, (tache_id,))
+            row = cur.fetchone()
+            conn.close()
+            if not row:
+                time.sleep(1)
+                continue
+            statut = row['statut']
+            if statut == 'termine':
+                # Récupérer le résultat depuis log_resultat
+                log_raw = row.get('log_resultat', '') or ''
+                result = None
+                marker = '__BULK_RESULT__:'
+                if marker in log_raw:
+                    idx = log_raw.index(marker) + len(marker)
+                    json_candidate = log_raw[idx:]
+                    json_candidate = json_candidate.rstrip('\n\r ')
+                    try:
+                        result = json.loads(json_candidate)
+                    except json.JSONDecodeError:
+                        pass
+                if result:
+                    _logger.info(f"[grille_editoriale] Résultat reçu : {result.get('total_blocs', '?')} blocs")
+                    return jsonify(result)
+                _logger.warning("[grille_editoriale] Tâche terminée mais aucun résultat parsable")
+                return jsonify({'error': 'Aucun résultat retourné par le worker'}), 500
+            elif statut == 'erreur':
+                log_raw = row.get('log_resultat', '') or ''
+                _logger.error(f"[grille_editoriale] Worker erreur : {log_raw[:500]}")
+                return jsonify({'error': f'Worker erreur : {log_raw[:300]}'}), 500
+            # Sinon en_attente ou en_cours → continuer à poller
+        except Exception as e:
+            _logger.error(f"[grille_editoriale] Poll erreur : {e}")
+            try:
+                conn.close()
+            except Exception:
+                pass
+        time.sleep(1)
 
-    if not playlists_schedulees:
-        return jsonify({
-            'station_id': station_id,
-            'blocs': [],
-            'message': 'Aucune playlist programmée (schedule_items) trouvée'
-        })
-
-    # Construire les tranches horaires à partir des schedule_items
-    tranches_brutes = []
-    for pl in playlists_schedulees:
-        pl_info = {
-            'id': pl.get('id'),
-            'name': pl.get('name', ''),
-            'weight': pl.get('weight', 1),
-            'source': pl.get('source', ''),
-            'order': pl.get('order', ''),
-            'is_enabled': pl.get('is_enabled', True),
-            'num_songs': pl.get('num_songs', 0),
-        }
-        for si in pl.get('schedule_items', []):
-            start_min = _hhmm_to_minutes(si.get('start_time'))
-            end_min = _hhmm_to_minutes(si.get('end_time'))
-            days = si.get('days') or []
-            if start_min is not None and end_min is not None:
-                tranches_brutes.append({
-                    'start_min': start_min,
-                    'end_min': end_min,
-                    'days': days,
-                    'playlist': pl_info,
-                })
-
-    # Regrouper par tranche horaire identique (start, end, days)
-    from collections import defaultdict
-    groupes = defaultdict(list)
-    for t in tranches_brutes:
-        cle = (t['start_min'], t['end_min'], frozenset(t['days']))
-        groupes[cle].append(t)
-
-    # Construire les blocs de la grille
-    blocs = []
-    for (start_min, end_min, days_set), items in sorted(groupes.items()):
-        days_list = sorted(days_set)
-        start_h = start_min // 60
-        start_m = start_min % 60
-        end_h = end_min // 60
-        end_m = end_min % 60
-        tranche_label = f"{start_h:02d}h{start_m:02d}-{end_h:02d}h{end_m:02d}"
-
-        playlists_du_bloc = []
-        poids_list = []
-        for item in items:
-            pl = item['playlist']
-            playlists_du_bloc.append({
-                'id': pl['id'],
-                'name': pl['name'],
-                'weight': pl['weight'],
-                'source': pl['source'],
-                'order': pl['order'],
-                'is_enabled': pl['is_enabled'],
-                'num_songs': pl['num_songs'],
-                'schedule_days': _jours_noms(item['days']),
-            })
-            poids_list.append(pl['weight'])
-
-        nb = len(playlists_du_bloc)
-        if nb == 1:
-            mode = 'auto'
-            badge = None
-        else:
-            mode = 'multi'
-            poids_str = '/'.join(str(p) for p in sorted(poids_list, reverse=True))
-            badge = f"{nb} playlists (poids {poids_str}) — saisie manuelle"
-
-        blocs.append({
-            'tranche': tranche_label,
-            'start_time': start_h * 100 + start_m,
-            'end_time': end_h * 100 + end_m,
-            'days': _jours_noms(days_list),
-            'mode': mode,
-            'playlists': playlists_du_bloc,
-            'badge': badge,
-        })
-
-    return jsonify({
-        'station_id': station_id,
-        'blocs': blocs,
-        'total_blocs': len(blocs),
-        'auto_count': sum(1 for b in blocs if b['mode'] == 'auto'),
-        'multi_count': sum(1 for b in blocs if b['mode'] == 'multi'),
-    })
+    _logger.error(f"[grille_editoriale] Timeout ({GRILLE_EDITORIALE_POLL_TIMEOUT}s)")
+    return jsonify({'error': f'Timeout ({GRILLE_EDITORIALE_POLL_TIMEOUT}s) — le worker n\'a pas traité la tâche'}), 504
 
 
 # ═══════════════════════════════════════════════════════════════════════

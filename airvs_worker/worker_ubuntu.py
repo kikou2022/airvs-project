@@ -1,4 +1,34 @@
+# ==============================================================================
+# FICHIER DE DEPLOIEMENT - AIRVS Worker Ubuntu
+# Date     : 2026-09-29
+# Contexte : Fix grille editoriale - pre-remplissage AzuraCast
+# Ajout    : Nouveau type tache GRILLE_EDITORIALE_AZURA
+#            - executer_grille_editoriale_azura() : appelle _bulk_list_playlists()
+#              via API AzuraCast (internet dispo sur Ubuntu), structure tranches
+#              horaires, renvoie resultat via __BULK_RESULT__ marker
+#            - Ajout dans type_action IN (...) et dispatch elif
+# Dest.    : Ubuntu studio (192.168.1.17) -> airvs_worker/worker_ubuntu.py
+# ATTENTION: Redemarrer le worker apres deploiement pour prise en compte
+# ==============================================================================
+
 #!/usr/bin/env python3
+# ╔════════════════════════════════════════════════════════════════════╗
+# ║  FICHIER DE DÉPLOIEMENT — AIRVS Worker Ubuntu                      ║
+# ║  Date : 2026-09-29                                                ║
+# ║  Contexte : Fix grille éditoriale pré-remplissage AzuraCast        ║
+# ║  Problème résolu : Flask (Windows, sans internet) ne peut pas      ║
+# ║    appeler l'API AzuraCast directement (urlopen timeout).          ║
+# ║  Solution : Nouvelle tâche GRILLE_EDITORIALE_AZURA prise en charge ║
+# ║    par le worker (a internet). executer_grille_editoriale_azura()  ║
+# ║    appelle _bulk_list_playlists(), structure par tranches horaires, ║
+# ║    renvoie résultat via __BULK_RESULT__ marker.                     ║
+# ║  Changements :                                                     ║
+# ║    - Ajout 'GRILLE_EDITORIALE_AZURA' dans type_action IN (...)     ║
+# ║    - Ajout dispatch elif + fonction executer_grille_editoriale_azura║
+# ║    + helpers _grille_hhmm_to_minutes, _grille_jours_noms           ║
+# ║  Destination déploiement : Ubuntu studio (192.168.1.17)             ║
+# ║  ⚠️ Déployer AVANT ou EN MÊME TEMPS que le côté Flask             ║
+# ╚════════════════════════════════════════════════════════════════════╝
 # PATCH 31/08/2026 ~17h00 — Fix sync différentielle dossiers AzuraCast (plus de vidage)
 # ═══════════════════════════════════════════════════════════════════
 # WORKER_VERSION : à incrémenter à chaque modification significative.
@@ -2759,6 +2789,168 @@ def _bulk_store_result(tache_id, result_dict):
         db.close()
     except Exception as e:
         print(f"[Bulk schedule] Erreur stockage résultat: {e}")
+
+
+def _grille_hhmm_to_minutes(hhmm):
+    """Convertit un entier HHMM (ex: 900 → 540, 2200 → 1320) en minutes depuis minuit."""
+    if hhmm is None:
+        return None
+    hhmm = int(hhmm)
+    heures = hhmm // 100
+    minutes = hhmm % 100
+    return heures * 60 + minutes
+
+
+def _grille_jours_noms(days_list):
+    """Convertit une liste de jours ISO-8601 (1=Lundi…7=Dimanche) en noms français abrégés."""
+    noms = {1: 'Lun', 2: 'Mar', 3: 'Mer', 4: 'Jeu', 5: 'Ven', 6: 'Sam', 7: 'Dim'}
+    return [noms.get(d, str(d)) for d in (days_list or [])]
+
+
+def executer_grille_editoriale_azura(tache_id, parametres):
+    """Exécute une tâche GRILLE_EDITORIALE_AZURA.
+
+    Récupère les playlists programmées d'une station via l'API AzuraCast,
+    les structure par tranches horaires pour pré-remplir la grille éditoriale.
+    Le résultat est renvoyé via __BULK_RESULT__ dans log_resultat.
+    """
+    station_id = parametres.get('station_id')
+    if not station_id:
+        raise RuntimeError("station_id requis dans parametres")
+
+    logger(tache_id, f"=== GRILLE EDITORIALE AZURA (station {station_id}) ===")
+
+    # Récupérer toutes les playlists de la station via l'API AzuraCast
+    try:
+        playlists = _bulk_list_playlists(station_id)
+    except Exception as e:
+        logger(tache_id, f"Erreur API playlists station {station_id} : {e}")
+        raise RuntimeError(f"Erreur API playlists : {e}")
+
+    logger(tache_id, f"  {len(playlists)} playlist(s) récupérée(s) pour station {station_id}")
+
+    if not playlists or not isinstance(playlists, list):
+        result = {
+            'station_id': station_id,
+            'blocs': [],
+            'total_blocs': 0,
+            'auto_count': 0,
+            'multi_count': 0,
+            'message': 'Aucune playlist retournée par AzuraCast'
+        }
+        logger(tache_id, "__BULK_RESULT__:" + json.dumps(result, ensure_ascii=False))
+        return
+
+    # Filtrer : uniquement les playlists activées avec des schedule_items
+    playlists_schedulees = []
+    for pl in playlists:
+        if not isinstance(pl, dict):
+            continue
+        if not pl.get('is_enabled', False):
+            continue
+        items = pl.get('schedule_items') or []
+        if not items:
+            continue
+        playlists_schedulees.append(pl)
+
+    if not playlists_schedulees:
+        result = {
+            'station_id': station_id,
+            'blocs': [],
+            'total_blocs': 0,
+            'auto_count': 0,
+            'multi_count': 0,
+            'message': 'Aucune playlist programmée (schedule_items) trouvée'
+        }
+        logger(tache_id, "__BULK_RESULT__:" + json.dumps(result, ensure_ascii=False))
+        return
+
+    # Construire les tranches horaires à partir des schedule_items
+    tranches_brutes = []
+    for pl in playlists_schedulees:
+        pl_info = {
+            'id': pl.get('id'),
+            'name': pl.get('name', ''),
+            'weight': pl.get('weight', 1),
+            'source': pl.get('source', ''),
+            'order': pl.get('order', ''),
+            'is_enabled': pl.get('is_enabled', True),
+            'num_songs': pl.get('num_songs', 0),
+        }
+        for si in pl.get('schedule_items', []):
+            start_min = _grille_hhmm_to_minutes(si.get('start_time'))
+            end_min = _grille_hhmm_to_minutes(si.get('end_time'))
+            days = si.get('days') or []
+            if start_min is not None and end_min is not None:
+                tranches_brutes.append({
+                    'start_min': start_min,
+                    'end_min': end_min,
+                    'days': days,
+                    'playlist': pl_info,
+                })
+
+    # Regrouper par tranche horaire identique (start, end, days)
+    from collections import defaultdict
+    groupes = defaultdict(list)
+    for t in tranches_brutes:
+        cle = (t['start_min'], t['end_min'], frozenset(t['days']))
+        groupes[cle].append(t)
+
+    # Construire les blocs de la grille
+    blocs = []
+    for (start_min, end_min, days_set), items in sorted(groupes.items()):
+        days_list = sorted(days_set)
+        start_h = start_min // 60
+        start_m = start_min % 60
+        end_h = end_min // 60
+        end_m = end_min % 60
+        tranche_label = f"{start_h:02d}h{start_m:02d}-{end_h:02d}h{end_m:02d}"
+
+        playlists_du_bloc = []
+        poids_list = []
+        for item in items:
+            pl = item['playlist']
+            playlists_du_bloc.append({
+                'id': pl['id'],
+                'name': pl['name'],
+                'weight': pl['weight'],
+                'source': pl['source'],
+                'order': pl['order'],
+                'is_enabled': pl['is_enabled'],
+                'num_songs': pl['num_songs'],
+                'schedule_days': _grille_jours_noms(item['days']),
+            })
+            poids_list.append(pl['weight'])
+
+        nb = len(playlists_du_bloc)
+        if nb == 1:
+            mode = 'auto'
+            badge = None
+        else:
+            mode = 'multi'
+            poids_str = '/'.join(str(p) for p in sorted(poids_list, reverse=True))
+            badge = f"{nb} playlists (poids {poids_str}) — saisie manuelle"
+
+        blocs.append({
+            'tranche': tranche_label,
+            'start_time': start_h * 100 + start_m,
+            'end_time': end_h * 100 + end_m,
+            'days': _grille_jours_noms(days_list),
+            'mode': mode,
+            'playlists': playlists_du_bloc,
+            'badge': badge,
+        })
+
+    result = {
+        'station_id': station_id,
+        'blocs': blocs,
+        'total_blocs': len(blocs),
+        'auto_count': sum(1 for b in blocs if b['mode'] == 'auto'),
+        'multi_count': sum(1 for b in blocs if b['mode'] == 'multi'),
+    }
+
+    logger(tache_id, f"  {len(blocs)} bloc(s) construit(s) ({result['auto_count']} auto, {result['multi_count']} multi)")
+    logger(tache_id, "__BULK_RESULT__:" + json.dumps(result, ensure_ascii=False))
 
 
 def executer_bulk_schedule(tache_id, parametres):
@@ -6485,6 +6677,7 @@ def main():
                 "    'SYNC_AZURA_STATUS', 'PROGRAMMATION_COULEUR', "
                 "    'IMPORT_SHEETS_COULEUR', 'VALIDATION_POOL_SHEETS', "
                 "    'AUTO_CHECK_SHEETS', 'SYNC_GRILLE_WEB', 'BULK_SCHEDULE', "
+                "    'GRILLE_EDITORIALE_AZURA', "
                 "    'AUDIENCE_GET_DATA', 'PIGE_LIST', 'PIGE_EXTRACT', "
                 "    'PIGE_PROMOTE_PODCAST', 'PODCASTS_LIST', 'PODCASTS_EPISODES', "
                 "    'SHAZAM_SYNC_SHEET', 'SYNC_VPS_SOUMISSIONS', 'SYNC_VPS_SHAZAM_EXT', "
@@ -6535,6 +6728,8 @@ def main():
                         executer_sync_grille_web(tache_id, parametres)
                     elif type_action == 'BULK_SCHEDULE':
                         executer_bulk_schedule(tache_id, parametres)
+                    elif type_action == 'GRILLE_EDITORIALE_AZURA':
+                        executer_grille_editoriale_azura(tache_id, parametres)
                     elif type_action == 'AUDIENCE_GET_DATA':
                         executer_audience_get_data(tache_id, parametres)
                     elif type_action == 'PIGE_LIST':
