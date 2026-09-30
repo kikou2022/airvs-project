@@ -62,6 +62,11 @@ import logging
 import ftplib
 import traceback
 from io import BytesIO
+try:
+    import paramiko  # Push SFTP des grilles (cible 'chantier' sur VPS OVH)
+    PARAMIKO_DISPONIBLE = True
+except ImportError:
+    PARAMIKO_DISPONIBLE = False
 from google.oauth2.service_account import Credentials
 from pathlib import Path, PureWindowsPath
 from datetime import datetime, timedelta
@@ -109,6 +114,43 @@ DB_CONFIG = {
     "password": "idylle@SL2026!",
     "database": "airvs_dashboard",
     "charset": "utf8mb4"
+}
+
+# ── Cibles de publication de la grille éditoriale (SYNC_GRILLE_WEB) ─────
+# La tâche ne transporte PLUS les identifiants FTP (ils étaient stockés en
+# clair dans taches_planifiees) : elle ne porte que la clé 'target', résolue
+# ici. Deux transports :
+#   'sftp' → cible 'chantier' : VPS OVH 1 — RÉUTILISE le canal SSH déjà en
+#            place depuis le worker (ubuntu@54.37.38.117, cf.
+#            VPS_OVH1_SSH_HOST / flux piges) : aucun user, sshd_config,
+#            authorized_keys ni chroot modifié côté VPS.
+#   'ftps' → cible 'prod' : airvs.fr sur hébergement OVH mutualisé,
+#            FTP-TLS explicite (port 21 + STARTTLS).
+CIBLES_GRILLE_WEB = {
+    "chantier": {
+        "transport": "sftp",
+        "host": "54.37.38.117",               # identique à VPS_OVH1_SSH_HOST (piges) :
+                                              # hôte déjà connu du known_hosts du user worker
+        "port": 22,
+        "user": "ubuntu",                     # même utilisateur SSH que le canal piges existant
+        "password": "",                       # auth par clé uniquement
+        "key_file": "",                       # vide → paramiko essaie les clés par défaut du
+                                              # user worker (~/.ssh/id_*), exactement comme les
+                                              # appels ssh piges existants (aucune clé à créer)
+        "remote_dir": "/var/www/testprod.comlelievre.com/airvs-test-grille",
+                                              # chemin ABSOLU (pas de chroot) ; l'utilisateur SSH
+                                              # doit avoir l'écriture (chown ubuntu:www-data côté VPS)
+        "file_name": "grille.json",
+    },
+    # "prod": {                             # à décommenter pour airvs.fr
+    #     "transport": "ftps",
+    #     "host": "<hote_ftp_ovh>",
+    #     "port": 21,
+    #     "user": "<user_ftp>",
+    #     "password": "<mdp_ftp>",
+    #     "remote_dir": "/www",
+    #     "file_name": "grille.json",
+    # },
 }
 
 MOUNT_MAP = {
@@ -2256,36 +2298,50 @@ def _construire_dictionnaire_chemins_azuracast(station_id=None):
 # SYNC GRILLE WEB — Pousse grille.json vers l'hébergement airvs.fr
 # ═══════════════════════════════════════════════════════════════
 def executer_sync_grille_web(tache_id, parametres):
-    """Sync la grille éditoriale vers le site airvs.fr via FTP.
+    """Publie la grille éditoriale vers la cible web ('chantier' ou 'prod').
 
-    Deux modes selon les parametres :
-      - Mode HTTP  (dev)  : tire grille.json depuis le dashboard dev (token)
-      - Mode Fichier     : lit un fichier grille.json local (fallback)
+    Deux modes pour obtenir le JSON :
+      - Mode HTTP    : tire grille.json depuis le dashboard (token)
+      - Mode Fichier : lit un fichier grille.json local (fallback/dépannage)
 
-    Puis pousse via FTP vers l'hebergement web.
+    Puis pousse vers la cible via le transport défini dans CIBLES_GRILLE_WEB
+    (sftp → chantier sur VPS OVH, ftps → prod sur OVH mutualisé).
+    Les identifiants ne transitent PLUS par les paramètres de la tâche :
+    celle-ci ne porte que la clé 'target', résolue côté worker.
 
     Parametres attendus dans tache['parametres'] :
-      - dashboard_url    : URL du dashboard dev (ex: http://192.168.1.30:5050)
-      - api_token        : Token API du dashboard dev
-      - local_file       : (optionnel) Chemin local du grille.json en fallback
-      - ftp_host         : Hote FTP de l'hebergement web
-      - ftp_user         : Utilisateur FTP
-      - ftp_pass         : Mot de passe FTP
-      - ftp_remote_path  : Chemin distant (ex: /www/airvs.fr/)
+      - dashboard_url : URL LAN du dashboard (ex: http://192.168.1.39:5000)
+      - api_token     : Token API du dashboard
+      - target        : clé de CIBLES_GRILLE_WEB ('chantier' par défaut)
+      - local_file    : (optionnel) Chemin local du grille.json en fallback
     """
     dashboard_url = parametres.get('dashboard_url', '').rstrip('/')
     api_token = parametres.get('api_token', '')
     local_file = parametres.get('local_file', '')
-    ftp_host = parametres.get('ftp_host', '')
-    ftp_user = parametres.get('ftp_user', '')
-    ftp_pass = parametres.get('ftp_pass', '')
-    ftp_remote_path = parametres.get('ftp_remote_path', '/')
+
+    # Résolution de la cible — aucun secret dans la DB, tout est ici
+    target_id = parametres.get('target', 'chantier')
+    cible = CIBLES_GRILLE_WEB.get(target_id)
+    if not cible:
+        logger(tache_id, f"ECHEC : cible grille inconnue '{target_id}' "
+                         f"(cibles configurées : {', '.join(CIBLES_GRILLE_WEB)})")
+        raise RuntimeError(f"Cible grille inconnue : {target_id}")
 
     logger(tache_id, "=== SYNC GRILLE WEB ===")
 
     # ── Etape 1 : obtenir le JSON de la grille ──
     grille_content = None
     source_desc = ""
+
+    # Garde-fou : le worker ne doit jamais tirer la grille sur lui-même.
+    # dashboard_url = 127.0.0.1/localhost ⇒ DASHBOARD_LAN_URL absente du
+    # .env du dashboard Windows (ancien défaut de grille.py avant patch).
+    if dashboard_url and ('127.0.0.1' in dashboard_url or 'localhost' in dashboard_url):
+        logger(tache_id, "ECHEC : dashboard_url pointe vers 127.0.0.1/localhost")
+        logger(tache_id, "→ renseignez DASHBOARD_LAN_URL dans le .env du dashboard "
+                         "(URL LAN réelle de la machine Windows)")
+        raise RuntimeError("dashboard_url invalide (127.0.0.1) : "
+                           "DASHBOARD_LAN_URL absente du .env du dashboard")
 
     # Mode 1 : HTTP depuis le dashboard dev
     if dashboard_url and api_token:
@@ -2347,61 +2403,118 @@ def executer_sync_grille_web(tache_id, parametres):
         logger(tache_id, f"ECHEC : JSON invalide - {e}")
         raise RuntimeError(f"grille.json invalide : {e}")
 
-    # ── Etape 2 : envoi FTP vers l'hebergement ──
-    # OVH utilise FTP sur TLS explicite (port 21 + STARTTLS) — ftplib.FTP_TLS
-    # gère ce protocole nativement. On garde ftplib.FTP (plain) en fallback
-    # au cas où l'hébergement ne supporte pas TLS.
-    if not ftp_host or not ftp_user:
-        logger(tache_id, "ECHEC : ftp_host et ftp_user sont requis dans les parametres")
-        raise RuntimeError("ftp_host et ftp_user requis")
+    # ── Etape 2 : envoi vers la cible (transport selon le profil) ──
+    if cible.get('transport') == 'sftp':
+        _grille_push_sftp(tache_id, cible, grille_content)
+    else:
+        _grille_push_ftps(tache_id, cible, grille_content)
 
-    logger(tache_id, f"Connexion FTP : {ftp_user}@{ftp_host}")
+    logger(tache_id, f"grille.json publié sur {cible['host']} "
+                     f"(cible : {target_id}, source : {source_desc})")
+    logger(tache_id, "=== SYNC GRILLE WEB TERMINE ===")
 
-    # Tentative 1 : FTP sur TLS explicite (protocole OVH par défaut)
+
+def _grille_push_sftp(tache_id, cible, grille_content):
+    """Pousse grille.json en SFTP (clé SSH) — cible 'chantier' sur VPS OVH.
+
+    Upload atomique : écriture dans <fichier>.tmp puis rename côté serveur,
+    pour que programme.html ne lise jamais un JSON partiellement écrit.
+    Nécessite paramiko sur le worker : pip install paramiko
+
+    Profil attendu (CIBLES_GRILLE_WEB) :
+      host / port / user / password ou key_file / remote_dir / file_name
+    """
+    if not PARAMIKO_DISPONIBLE:
+        raise RuntimeError("transport 'sftp' : module paramiko absent "
+                           "(pip install paramiko sur le worker)")
+
+    remote_dir = cible.get('remote_dir', '').strip('/')
+    file_name = cible.get('file_name', 'grille.json')
+    remote = f"/{remote_dir}/{file_name}" if remote_dir else f"/{file_name}"
+    tmp = remote + '.tmp'
+
+    logger(tache_id, f"Connexion SFTP : {cible['user']}@{cible['host']}:{cible.get('port', 22)}")
+    client = paramiko.SSHClient()
+    # known_hosts : rempli par une première connexion manuelle depuis le
+    # worker (ssh -i <clé> <user>@<host>). On refuse les hôtes inconnus.
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    try:
+        client.connect(
+            cible['host'],
+            port=int(cible.get('port', 22)),
+            username=cible['user'],
+            password=cible.get('password') or None,
+            key_filename=cible.get('key_file') or None,
+            timeout=30,
+        )
+        sftp = client.open_sftp()
+        try:
+            sftp.putfo(BytesIO(grille_content.encode('utf-8')), tmp)
+            sftp.posix_rename(tmp, remote)
+            logger(tache_id, f"grille.json publié (SFTP, atomique) → {cible['host']}:{remote}")
+        finally:
+            sftp.close()
+    except Exception as e:
+        logger(tache_id, f"ECHEC SFTP : {e}")
+        raise
+    finally:
+        client.close()
+
+
+def _grille_push_ftps(tache_id, cible, grille_content):
+    """Pousse grille.json en FTP-TLS explicite — cible 'prod' (OVH mutualisé).
+
+    Ancienne étape 2 d'executer_sync_grille_web, extraite et profilée :
+      - identifiants issus de CIBLES_GRILLE_WEB (plus de creds dans la DB)
+      - fallback FTP plain SUPPRIMÉ (silencieux, envoyait la grille en clair)
+      - upload atomique : STOR <fichier>.tmp puis rename (RNFR/RNTO,
+        supporté par OVH) pour qu'un visiteur ne lise jamais un JSON partiel.
+
+    Profil attendu (CIBLES_GRILLE_WEB) :
+      host / port (21) / user / password / remote_dir / file_name
+    """
+    ftp_host = cible['host']
+    ftp_user = cible['user']
+    ftp_pass = cible.get('password', '')
+    file_name = cible.get('file_name', 'grille.json')
+    remote_dir = cible.get('remote_dir', '/')
+
+    logger(tache_id, f"Connexion FTP-TLS : {ftp_user}@{ftp_host}")
     ftp = None
-    connexion_mode = None
     try:
         ftp = ftplib.FTP_TLS(timeout=30)
-        ftp.connect(ftp_host, 21)
+        ftp.connect(ftp_host, int(cible.get('port', 21)))
         ftp.login(ftp_user, ftp_pass)
-        ftp.prot_p()  # Active la protection des données sur le canal chiffré (obligatoire après login en FTP-TLS)
-        connexion_mode = "FTP-TLS explicite"
-        logger(tache_id, f"  Connexion FTP-TLS établie (mode sécurisé)")
-    except ftplib.all_errors as e_tls:
-        logger(tache_id, f"  FTP-TLS échoué : {e_tls}")
-        logger(tache_id, f"  Tentative fallback : FTP plain (non chiffré)")
-        # Tentative 2 : FTP plain (fallback)
-        try:
-            ftp = ftplib.FTP(timeout=30)
-            ftp.connect(ftp_host, 21)
-            ftp.login(ftp_user, ftp_pass)
-            connexion_mode = "FTP plain"
-            logger(tache_id, f"  Connexion FTP plain établie (mode non sécurisé)")
-        except ftplib.all_errors as e_plain:
-            logger(tache_id, f"  FTP plain échoué : {e_plain}")
-            raise RuntimeError(f"Erreur FTP : TLS={e_tls} / plain={e_plain}")
+        ftp.prot_p()  # canal de données chiffré (obligatoire après login FTP-TLS)
+        logger(tache_id, "  Connexion FTP-TLS établie (mode sécurisé)")
 
-    try:
         # Naviguer vers le dossier distant (creer si necessaire)
-        ftp_remote_path = ftp_remote_path.strip('/')
-        if ftp_remote_path:
-            for part in ftp_remote_path.split('/'):
+        remote_dir = remote_dir.strip('/')
+        if remote_dir:
+            for part in remote_dir.split('/'):
                 try:
                     ftp.cwd(part)
                 except ftplib.error_perm:
                     ftp.mkd(part)
                     ftp.cwd(part)
 
-        # Stocker en memoire et uploader
-        ftp.storbinary(
-            'STOR grille.json',
-            BytesIO(grille_content.encode('utf-8'))
-        )
+        chemin_distant = f"/{remote_dir}/{file_name}" if remote_dir else f"/{file_name}"
+
+        # Upload atomique : .tmp puis rename
+        tmp_name = file_name + '.tmp'
+        ftp.storbinary(f'STOR {tmp_name}', BytesIO(grille_content.encode('utf-8')))
+        try:
+            ftp.rename(tmp_name, file_name)
+        except ftplib.all_errors:
+            # Certains serveurs refusent RNTO sur un fichier existant
+            try:
+                ftp.delete(file_name)
+            except ftplib.error_perm:
+                pass
+            ftp.rename(tmp_name, file_name)
         ftp.quit()
-
-        logger(tache_id, f"grille.json publie avec succes sur {ftp_host} (source : {source_desc}, mode : {connexion_mode})")
-        logger(tache_id, "=== SYNC GRILLE WEB TERMINE ===")
-
+        logger(tache_id, f"grille.json publié (FTP-TLS, atomique) → {ftp_host}:{chemin_distant}")
     except ftplib.all_errors as e:
         logger(tache_id, f"ECHEC FTP : {e}")
         raise RuntimeError(f"Erreur FTP : {e}")
