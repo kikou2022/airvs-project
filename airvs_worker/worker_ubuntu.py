@@ -348,11 +348,16 @@ def purger_anciennes_taches():
         
         seuil = datetime.now() - timedelta(days=retention_jours)
         # Purger les 3 statuts "finis" : termine / erreur / annule
+        # 2026.09.30 — gère aussi les tâches "zombies" avec date_fin = NULL
+        # (worker bloqué puis tâche reset manuellement) en fallback sur date_creation
         cursor.execute(
             "DELETE FROM taches_planifiees "
             "WHERE statut IN ('termine', 'erreur', 'annule') "
-            "AND date_fin < %s",
-            (seuil,)
+            "AND ("
+            "    date_fin < %s "
+            "    OR (date_fin IS NULL AND date_creation < %s)"
+            ")",
+            (seuil, seuil)
         )
         nb_supprimees = cursor.rowcount
         if nb_supprimees > 0:
@@ -3943,7 +3948,23 @@ def _tache_store_json_result(tache_id, result_text):
     """Stocke un résultat JSON brut dans log_resultat de taches_planifiees.
     UPDATE direct (pas CONCAT) : le champ doit contenir exactement le JSON,
     sans rien d'autre, pour que app.py puisse faire json.loads() directement.
-    Utilisé par plusieurs types de tâches (AUDIENCE_GET_DATA, PIGE_LIST, ...)."""
+    Utilisé par plusieurs types de tâches (AUDIENCE_GET_DATA, PIGE_LIST, ...).
+
+    2026.09.30 — plafond 100 Ko : si le payload dépasse, on stocke un JSON
+    d'erreur valide au lieu du payload complet (préserve le contrat json.loads()
+    du frontend). Cause : AUDIENCE_GET_DATA produit ~200 Ko de JSON."""
+    MAX_JSON_PAYLOAD = 100000  # 100 Ko max
+    if len(result_text) > MAX_JSON_PAYLOAD:
+        # Stocker un JSON valide indiquant la troncature pour ne pas casser
+        # le json.loads() côté frontend
+        truncation_notice = json.dumps({
+            "truncated": True,
+            "original_size": len(result_text),
+            "max_size": MAX_JSON_PAYLOAD,
+            "preview": result_text[:500],  # extrait pour debug
+            "message": "Payload trop volumineux, non stocké pour éviter le gonflement de la table."
+        }, ensure_ascii=False)
+        result_text = truncation_notice
     db = pymysql.connect(**DB_CONFIG)
     cursor = db.cursor()
     cursor.execute(
