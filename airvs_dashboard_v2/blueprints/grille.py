@@ -630,6 +630,31 @@ def api_grille_activate_version(version_id):
     return jsonify({"status": "ok", "message": f"Version '{ver['label']}' activée"})
 
 
+@grille_bp.route('/api/grille_editoriale/version/desactiver/<int:version_id>', methods=['PUT'])
+@login_requis
+def api_grille_deactivate_version(version_id):
+    """Désactive une version (passe actif=0)."""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Connexion DB impossible"}), 500
+    c = conn.cursor()
+
+    c.execute("SELECT id, label, actif FROM airvs_grille_versions WHERE id = %s", (version_id,))
+    ver = c.fetchone()
+    if not ver:
+        conn.close()
+        return jsonify({"status": "error", "message": "Version introuvable"}), 404
+
+    c.execute("UPDATE airvs_grille_versions SET actif = 0 WHERE id = %s", (version_id,))
+    c.execute("UPDATE airvs_grille_editoriale SET version_actif = 0 WHERE version_label = %s", (ver['label'],))
+    conn.commit()
+    conn.close()
+
+    _ge_ecrire_grille_json_local()
+
+    return jsonify({"status": "ok", "message": f"Version '{ver['label']}' désactivée"})
+
+
 @grille_bp.route('/api/grille_editoriale/version/renommer/<int:version_id>', methods=['PUT'])
 @login_requis
 def api_grille_rename_version(version_id):

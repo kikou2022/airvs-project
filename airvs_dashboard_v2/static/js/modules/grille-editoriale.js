@@ -250,7 +250,7 @@
 
     // ── Modal Bloc (Création / Édition) ──
     window.ouvrirModalBloc = function(blocId, prefillJour) {
-        const modal = new bootstrap.Modal($('modalBloc'));
+        const modal = bootstrap.Modal.getOrCreateInstance($('modalBloc'));
         const isEdit = blocId !== null && blocId !== undefined;
 
         $('modalBlocTitle').textContent = isEdit ? 'Modifier le bloc' : 'Nouveau bloc';
@@ -413,7 +413,7 @@
         try {
             const json = await apiFetch('/api/grille_editoriale/export?t=' + Date.now());
             $('exportJsonBox').textContent = JSON.stringify(json, null, 2);
-            new bootstrap.Modal($('modalExport')).show();
+            bootstrap.Modal.getOrCreateInstance($('modalExport')).show();
         } catch (e) {
             showToast('Erreur export: ' + e.message, 'error');
         }
@@ -452,7 +452,7 @@
                 }
                 container.innerHTML = html;
             }
-            new bootstrap.Modal($('modalValidation')).show();
+            bootstrap.Modal.getOrCreateInstance($('modalValidation')).show();
         } catch (e) {
             showToast('Erreur validation: ' + e.message, 'error');
         }
@@ -460,7 +460,7 @@
 
     // ── Copier un jour ──
     window.ouvrirModalCopierJour = function() {
-        new bootstrap.Modal($('modalCopierJour')).show();
+        bootstrap.Modal.getOrCreateInstance($('modalCopierJour')).show();
     };
 
     window.copierJour = async function() {
@@ -488,21 +488,48 @@
 
     // ── Versions ──
     window.ouvrirModalVersions = async function() {
-        const modal = new bootstrap.Modal($('modalVersions'));
+        const modalEl = $('modalVersions');
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
         try {
             const json = await apiFetch('/api/grille_editoriale/versions?t=' + Date.now());
             if (json.status !== 'ok') throw new Error(json.message);
+
+            // Formatteur de date FR
+            function fmtDate(iso) {
+                if (!iso) return '';
+                try {
+                    const d = new Date(iso);
+                    if (isNaN(d)) return iso;
+                    return d.toLocaleDateString('fr-FR', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+                } catch { return iso; }
+            }
+
             let html = '<div class="list-group">';
             json.versions.forEach(v => {
-                const activeBadge = v.actif ? '<span class="badge bg-success">Active</span>' : '';
-                html += `<div class="list-group-item d-flex justify-content-between align-items-center">
-                    <div>
-                        <strong>${v.label}</strong>
-                        <small class="text-muted ms-2">${v.date_creation || ''}</small>
-                        ${activeBadge}
-                    </div>
-                    <div>
-                        ${!v.actif ? `<button class="btn btn-sm btn-outline-success me-1" onclick="activerVersion(${v.id})"><i class="bi bi-check-circle"></i> Activer</button>` : ''}
+                // Escaping sécurisé pour data-label : encoder " en &quot; pour l'attribut HTML
+                const safeLabel = v.label.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const activeBadge = v.actif
+                    ? '<span class="badge bg-success ms-2">Active</span>'
+                    : '';
+                const activateBtn = !v.actif
+                    ? `<button class="btn btn-sm btn-outline-success" onclick="activerVersion(${v.id})" title="Activer cette version"><i class="bi bi-check-circle"></i> Activer</button>`
+                    : '';
+                const renameBtn = `<button class="btn btn-sm btn-outline-secondary" onclick="renommerVersion(${v.id}, this.dataset.label)" data-label="${safeLabel}" title="Renommer"><i class="bi bi-pencil"></i> Renommer</button>`;
+                const duplicateBtn = `<button class="btn btn-sm btn-outline-info" onclick="dupliquerVersion(${v.id}, this.dataset.label)" data-label="${safeLabel}" title="Dupliquer"><i class="bi bi-copy"></i> Dupliquer</button>`;
+                const deleteBtn = `<button class="btn btn-sm btn-outline-danger" onclick="supprimerVersion(${v.id}, this.dataset.label, ${v.actif})" data-label="${safeLabel}" title="Supprimer"><i class="bi bi-trash"></i> Supprimer</button>`;
+
+                html += `<div class="list-group-item${v.actif ? ' list-group-item-success' : ''}">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-grow-1" style="min-width:0;">
+                            <div class="d-flex align-items-center flex-wrap gap-1">
+                                <strong class="text-nowrap">${v.label}</strong>
+                                ${activeBadge}
+                            </div>
+                            <small class="text-muted">${fmtDate(v.date_creation)}</small>
+                        </div>
+                        <div class="d-flex align-items-center flex-wrap gap-1 ms-2 flex-shrink-0">
+                            ${renameBtn}${duplicateBtn}${activateBtn}${deleteBtn}
+                        </div>
                     </div>
                 </div>`;
             });
@@ -540,9 +567,75 @@
             const json = await apiFetch(`/api/grille_editoriale/version/activer/${versionId}`, { method: 'PUT' });
             if (json.status === 'ok') {
                 showToast(json.message, 'success');
+                // Fermer modale proprement + nettoyer backdrop
                 const modalEl = $('modalVersions');
                 const modalInstance = bootstrap.Modal.getInstance(modalEl);
                 if (modalInstance) modalInstance.hide();
+                document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+                document.body.classList.remove('modal-open');
+                document.body.style.overflow = '';
+                chargerGrille();
+            } else {
+                showToast(json.message, 'error');
+            }
+        } catch (e) {
+            showToast('Erreur: ' + e.message, 'error');
+        }
+    };
+
+    // ── Renommer une version ──
+    window.renommerVersion = async function(versionId, ancienLabel) {
+        const nouveauLabel = prompt('Nouveau nom de la version :', ancienLabel);
+        if (!nouveauLabel || !nouveauLabel.trim() || nouveauLabel.trim() === ancienLabel) return;
+        try {
+            const json = await apiFetch(`/api/grille_editoriale/version/renommer/${versionId}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ label: nouveauLabel.trim() })
+            });
+            if (json.status === 'ok') {
+                showToast(json.message, 'success');
+                ouvrirModalVersions();
+            } else {
+                showToast(json.message, 'error');
+            }
+        } catch (e) {
+            showToast('Erreur: ' + e.message, 'error');
+        }
+    };
+
+    // ── Dupliquer une version ──
+    window.dupliquerVersion = async function(versionId, label) {
+        if (!confirm(`Dupliquer la version "${label}" ?\nUne copie inactive sera créée.`)) return;
+        try {
+            const json = await apiFetch(`/api/grille_editoriale/version/dupliquer/${versionId}`, { method: 'POST' });
+            if (json.status === 'ok') {
+                showToast(json.message, 'success');
+                ouvrirModalVersions();
+            } else {
+                showToast(json.message, 'error');
+            }
+        } catch (e) {
+            showToast('Erreur: ' + e.message, 'error');
+        }
+    };
+
+    // ── Supprimer une version ──
+    window.supprimerVersion = async function(versionId, label, estActive) {
+        let msg = `Supprimer la version "${label}" et tous ses blocs ?\nCette action est irréversible.`;
+        if (estActive) {
+            msg = `⚠️ La version "${label}" est ACTIVE.\nElle sera désactivée puis supprimée.\nVous devrez activer une autre version ensuite.\n\nContinuer ?`;
+        }
+        if (!confirm(msg)) return;
+        try {
+            // Si active, désactiver d'abord
+            if (estActive) {
+                await apiFetch(`/api/grille_editoriale/version/desactiver/${versionId}`, { method: 'PUT' });
+            }
+            const json = await apiFetch(`/api/grille_editoriale/version/${versionId}`, { method: 'DELETE' });
+            if (json.status === 'ok') {
+                showToast(json.message, 'success');
+                ouvrirModalVersions();
                 chargerGrille();
             } else {
                 showToast(json.message, 'error');
@@ -555,7 +648,7 @@
     // ── Import ──
     window.ouvrirModalImport = function() {
         $('importJsonInput').value = '';
-        new bootstrap.Modal($('modalImport')).show();
+        bootstrap.Modal.getOrCreateInstance($('modalImport')).show();
     };
 
     window.importerGrille = async function() {
@@ -617,11 +710,18 @@
     //   - mode "multi" (>1 playlists) → ne crée rien, affiche un badge
     // ═══════════════════════════════════════════════════════════════
 
-    window._remplirBlocsDepuisAzura = async function(blocs) {
+    // ── Pile d'undo pour les remplissages AzuraCast ──
+    // Chaque entrée = { ids: [bloc_db_ids], timestamp, label }
+    let _azuraFillUndoStack = [];
+
+    window._remplirBlocsDepuisAzura = async function(blocs, joursFiltre) {
         if (!blocs || !blocs.length) {
             showToast('Aucun bloc à pré-remplir', 'warning');
             return;
         }
+
+        // joursFiltre : tableau de numéros ISO (1=Lun...7=Dim) ou null/undefined = tous les jours
+        // Si joursFiltre est fourni, on ne crée des blocs QUE pour les jours dans ce filtre
 
         // Mapping jours abrégés → numéro ISO (Lun=1, Mar=2, … Dim=7)
         const JOURS_AZURA_MAP = { 'Lun': 1, 'Mar': 2, 'Mer': 3, 'Jeu': 4, 'Ven': 5, 'Sam': 6, 'Dim': 7 };
@@ -633,6 +733,7 @@
         ];
 
         let crees = 0, ignores = 0, erreurs = 0;
+        const createdIds = []; // IDs des blocs créés pour l'undo
 
         for (const bloc of blocs) {
             // Ne traiter que les blocs "auto" (1 playlist)
@@ -660,11 +761,22 @@
                 joursNums.push(1, 2, 3, 4, 5, 6, 7);
             }
 
+            // Appliquer le filtre de jours si spécifié
+            const joursCibles = joursFiltre
+                ? joursNums.filter(j => joursFiltre.includes(j))
+                : joursNums;
+
+            if (!joursCibles.length) {
+                // Aucun jour du bloc ne correspond au filtre → ignorer
+                ignores++;
+                continue;
+            }
+
             // Choisir une couleur (rotation selon l'index)
             const couleur = COULEURS_PLAYLIST[crees % COULEURS_PLAYLIST.length];
 
-            // Créer le bloc pour chaque jour
-            for (const jour of joursNums) {
+            // Créer le bloc pour chaque jour ciblé
+            for (const jour of joursCibles) {
                 const payload = {
                     heure_debut: heureDebut,
                     heure_fin: heureFin,
@@ -684,6 +796,7 @@
                     });
                     if (json.status === 'ok') {
                         crees++;
+                        if (json.id) createdIds.push(json.id);
                     } else {
                         erreurs++;
                         console.warn(`[grille] Erreur création bloc ${pl.name} (${JOURS_LABELS[jour]}):`, json.message);
@@ -695,6 +808,19 @@
             }
         }
 
+        // Stocker dans la pile d'undo
+        if (createdIds.length > 0) {
+            const joursLabel = joursFiltre
+                ? joursFiltre.map(j => JOURS_COURTS[j]).join('/')
+                : 'semaine';
+            _azuraFillUndoStack.push({
+                ids: createdIds,
+                timestamp: Date.now(),
+                label: `${createdIds.length} bloc(s) [${joursLabel}]`
+            });
+            _updateUndoButton();
+        }
+
         // Rafraîchir la grille
         if (crees > 0) {
             await chargerGrille();
@@ -703,6 +829,55 @@
         // Résumé
         let msg = `${crees} bloc(s) créé(s) depuis AzuraCast`;
         if (ignores > 0) msg += ` — ${ignores} ignoré(s) (multi-playlists)`;
+        if (erreurs > 0) msg += ` — ${erreurs} erreur(s)`;
+        showToast(msg, erreurs > 0 ? 'warning' : 'success');
+    };
+
+    // ── Undo dernier remplissage AzuraCast ──
+    function _updateUndoButton() {
+        const btn = document.getElementById('btn_annuler_remplissage');
+        if (!btn) return;
+        if (_azuraFillUndoStack.length > 0) {
+            const last = _azuraFillUndoStack[_azuraFillUndoStack.length - 1];
+            btn.classList.remove('d-none');
+            btn.innerHTML = `<i class="bi bi-arrow-counterclockwise"></i> Annuler (${last.label})`;
+        } else {
+            btn.classList.add('d-none');
+        }
+    }
+
+    window._annulerDernierRemplissage = async function() {
+        if (_azuraFillUndoStack.length === 0) {
+            showToast('Rien à annuler', 'warning');
+            return;
+        }
+        const last = _azuraFillUndoStack[_azuraFillUndoStack.length - 1];
+        if (!confirm(`Annuler le dernier remplissage (${last.label}) ?\n${last.ids.length} bloc(s) seront supprimés.`)) return;
+
+        let supprimes = 0, erreurs = 0;
+        for (const blocId of last.ids) {
+            try {
+                const json = await apiFetch(`/api/grille_editoriale/bloc/${blocId}`, { method: 'DELETE' });
+                if (json.status === 'ok') {
+                    supprimes++;
+                } else {
+                    erreurs++;
+                    console.warn(`[grille] Erreur suppression bloc ${blocId}:`, json.message);
+                }
+            } catch (e) {
+                erreurs++;
+                console.warn(`[grille] Exception suppression bloc ${blocId}:`, e.message);
+            }
+        }
+
+        // Retirer de la pile
+        _azuraFillUndoStack.pop();
+        _updateUndoButton();
+
+        // Rafraîchir
+        if (supprimes > 0) await chargerGrille();
+
+        let msg = `${supprimes} bloc(s) annulé(s)`;
         if (erreurs > 0) msg += ` — ${erreurs} erreur(s)`;
         showToast(msg, erreurs > 0 ? 'warning' : 'success');
     };

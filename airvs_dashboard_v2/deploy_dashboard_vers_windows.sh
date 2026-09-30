@@ -7,12 +7,18 @@
 #   2. Copie via cp vers le montage réseau Windows :
 #        /mnt/win_dashboard_v2/  (→ C:\airvs_dashboard_v2\)
 #   3. Nettoyage des fichiers obsolètes côté Windows
-#   4. Vérification MD5 post-copie
-#   5. Backup rotatif (3 max)
+#   4. Vérification MD5 post-copie (y compris grille éditoriale hotfix)
+#   5. Vérification cache-buster JS (empêche le cache navigateur obsolète)
+#   6. Backup rotatif (3 max)
 #
 # Fichiers de config déployés (jamais supprimés par le nettoyage) :
 #   - config.json          (config générale du dashboard)
 #   - flux_radio.json      (flux Icecast actif + liste disponible)
+#
+# Hotfix grille éditoriale (sept. 2026) :
+#   - index.html           (modale versions : modal-lg, btn_annuler_remplissage, ?v=3)
+#   - grille-editoriale.js (renommer/dupliquer/supprimer actif, undo AzuraCast)
+#   - grille.py            (endpoints /desactiver, /dupliquer, /renommer)
 # ════════════════════════════════════════════════════════════════════════════════
 
 set -u
@@ -384,6 +390,9 @@ fi
 # Ajouter style.css
 MD5_FILES+=("static/css/style.css")
 
+# Ajouter bootstrap.bundle.min.js (vérification de version Bootstrap)
+MD5_FILES+=("static/js/bootstrap.bundle.min.js")
+
 for f in "${MD5_FILES[@]}"; do
     SRC_FILE="${SOURCE_DIR}${f}"
     DST_FILE="${DEST_DIR}${f}"
@@ -408,7 +417,48 @@ done
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ÉTAPE 8 : Vérification config.json côté Windows
+# ÉTAPE 8 : Vérification cache-buster JS (grille-editoriale.js)
+# ══════════════════════════════════════════════════════════════════════════════
+echo "── Vérification cache-buster grille-editoriale.js ──"
+DEPLOYED_HTML="${DEST_DIR}templates/index.html"
+if [ -f "$DEPLOYED_HTML" ]; then
+    # Extraire le paramètre ?v= de la ligne de chargement du module grille-editoriale.js
+    CACHE_V=$(grep -oP 'grille-editoriale\.js\?v=\K[0-9]+' "$DEPLOYED_HTML" 2>/dev/null || echo '')
+    if [ -n "$CACHE_V" ]; then
+        echo "  ${GREEN}✅${NC} Cache-buster détecté : ?v=${CACHE_V}"
+        if [ "$CACHE_V" -lt 3 ]; then
+            echo "  ${YELLOW}⚠${NC}  Le cache-buster est ?v=${CACHE_V} (< 3)."
+            echo "  ${YELLOW}⚠${NC}  Les navigateurs peuvent servir une version obsolète du JS !"
+            echo "  ${YELLOW}⚠${NC}  → Incrémenter ?v= dans index.html avant déploiement."
+        fi
+    else
+        echo "  ${YELLOW}⚠${NC}  Aucun cache-buster ?v= détecté pour grille-editoriale.js"
+    fi
+else
+    warn "templates/index.html" "non trouvé côté Windows"
+fi
+
+# Vérifier la version Bootstrap
+BOOTSTRAP_FILE="${DEST_DIR}static/js/bootstrap.bundle.min.js"
+if [ -f "$BOOTSTRAP_FILE" ]; then
+    BS_VERSION=$(grep -oP 'Bootstrap v\K[\d.]+' "$BOOTSTRAP_FILE" 2>/dev/null | head -1 || echo '')
+    if [ -n "$BS_VERSION" ]; then
+        echo "  ${GREEN}✅${NC} Bootstrap version : ${BS_VERSION}"
+        # getOrCreateInstance est disponible depuis Bootstrap 5.2.0
+        BS_MAJOR=$(echo "$BS_VERSION" | cut -d. -f1)
+        BS_MINOR=$(echo "$BS_VERSION" | cut -d. -f2)
+        if [ "$BS_MAJOR" -lt 5 ] || { [ "$BS_MAJOR" -eq 5 ] && [ "$BS_MINOR" -lt 2 ]; }; then
+            echo "  ${RED}❌${NC} Bootstrap ${BS_VERSION} < 5.2 — getOrCreateInstance() NON disponible !"
+            echo "  ${RED}❌${NC} Mettre à jour bootstrap.bundle.min.js vers 5.2+ "
+        fi
+    else
+        echo "  ${YELLOW}⚠${NC}  Version Bootstrap non détectée dans bootstrap.bundle.min.js"
+    fi
+fi
+echo ""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ÉTAPE 9 : Vérification config.json côté Windows
 # ══════════════════════════════════════════════════════════════════════════════
 CONFIG_DEST="${DEST_DIR}config.json"
 if [ -f "$CONFIG_DEST" ]; then
@@ -452,4 +502,9 @@ echo "${BOLD}📋 Actions suivantes sur Windows (192.168.1.39) :${NC}"
 echo "   ${CYAN}1.${NC} Vérifier que C:\airvs_dashboard_v2\.env existe"
 echo "   ${CYAN}2.${NC} Relancer : python app.py"
 echo "   ${CYAN}3.${NC} Vérifier : http://192.168.1.39:5001"
-echo "   ${CYAN}4.${NC} Recharger avec Ctrl+Shift+R"
+echo "   ${CYAN}4.${NC} ${BOLD}Recharger avec Ctrl+Shift+R${NC} (cache navigateur)"
+echo ""
+echo "${BOLD}📦 Fichiers grille éditoriale (hotfix sept. 2026) :${NC}"
+echo "   ${CYAN}•${NC} templates/index.html          (modale versions, undo, ?v=3)"
+echo "   ${CYAN}•${NC} static/js/modules/grille-editoriale.js (renommer/dupliquer/supprimer, undo)"
+echo "   ${CYAN}•${NC} blueprints/grille.py           (endpoints /desactiver, /dupliquer, /renommer)"

@@ -1,3 +1,28 @@
+<!-- ============================================================================== -->
+<!-- FICHIER DE DEPLOIEMENT - AIRVS Dashboard v2                                     -->
+<!-- Date     : 2026-09-29 14:20 UTC                                                -->
+<!-- Maj      : Modale Versions : modal-lg, dates FR, boutons alignes, dupliquer    -->
+<!--          + Bouton Annuler remplissage (undo) dans toolbar grille                -->
+<!-- Contexte : Fix grille editoriale - pre-remplissage AzuraCast + undo             -->
+<!-- Ajout    : Selecteur de jours compact [Tous][L][M][M][J][V][S][D] dans toolbar -->
+<!--            Logique toggle _toggleAzuraJour / _getAzuraJoursSelectionnes         -->
+<!--            Passage joursFiltre a _remplirBlocsDepuisAzura                       -->
+<!-- Dest.    : Windows (Flask) -> airvs_dashboard_v2/index.html                     -->
+<!-- ============================================================================== -->
+
+<!--
+╔════════════════════════════════════════════════════════════════════╗
+║  FICHIER DE DÉPLOIEMENT — AIRVS Dashboard v2                       ║
+║  Date : 2026-09-29                                                ║
+║  Contexte : Fix grille éditoriale pré-remplissage AzuraCast        ║
+║  + Ajout sélecteur de jours (un jour / plusieurs / toute semaine)  ║
+║  Changements :                                                     ║
+║    - Toolbar : boutons toggle [Tous][L][M][M][J][V][S][D]         ║
+║    - JS : _toggleAzuraJour(), _getAzuraJoursSelectionnes()        ║
+║    - remplirGrilleDepuisAzuraCast() passe joursFiltre au module    ║
+║  Destination déploiement : Windows (Flask) — racine dashboard      ║
+╚════════════════════════════════════════════════════════════════════╝
+-->
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -5,6 +30,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tableau de bord AIRVS</title>
     <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/css/bootstrap-icons.min.css" rel="stylesheet">
     <link href="/static/css/style.css" rel="stylesheet">
     <style>
         /* ════════════════════════════════════════════════
@@ -3856,6 +3882,20 @@
                     <option value="7">Station 7</option>
                     <option value="6">Station 6</option>
                 </select>
+                <!-- Sélecteur de jours pour le pré-remplissage AzuraCast -->
+                <div class="btn-group btn-group-sm ms-1" id="grille_azura_jours" title="Jours à pré-remplir">
+                    <button type="button" class="btn btn-outline-secondary active" data-jour="0" onclick="_toggleAzuraJour(this)">Tous</button>
+                    <button type="button" class="btn btn-outline-secondary" data-jour="1" onclick="_toggleAzuraJour(this)">L</button>
+                    <button type="button" class="btn btn-outline-secondary" data-jour="2" onclick="_toggleAzuraJour(this)">M</button>
+                    <button type="button" class="btn btn-outline-secondary" data-jour="3" onclick="_toggleAzuraJour(this)">M</button>
+                    <button type="button" class="btn btn-outline-secondary" data-jour="4" onclick="_toggleAzuraJour(this)">J</button>
+                    <button type="button" class="btn btn-outline-secondary" data-jour="5" onclick="_toggleAzuraJour(this)">V</button>
+                    <button type="button" class="btn btn-outline-secondary" data-jour="6" onclick="_toggleAzuraJour(this)">S</button>
+                    <button type="button" class="btn btn-outline-secondary" data-jour="7" onclick="_toggleAzuraJour(this)">D</button>
+                </div>
+                <button class="btn btn-sm btn-outline-warning d-none" id="btn_annuler_remplissage" onclick="_annulerDernierRemplissage()" title="Annuler le dernier pré-remplissage AzuraCast">
+                    <i class="bi bi-arrow-counterclockwise"></i> Annuler remplissage
+                </button>
                 <div class="vr mx-1" style="height:24px;"></div>
                 <button class="btn btn-sm btn-success" onclick="publierGrille()">
                     <i class="bi bi-cloud-arrow-up"></i> Publier
@@ -4013,7 +4053,7 @@
     
     <!-- ═══════ MODALE : Versions ═══════ -->
     <div class="modal fade modal-grille" id="modalVersions" tabindex="-1">
-        <div class="modal-dialog">
+        <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header" style="background:#2c3e50; color:white;">
                     <h5 class="modal-title"><i class="bi bi-layers"></i> Gestion des versions</h5>
@@ -4022,9 +4062,9 @@
                 <div class="modal-body">
                     <div class="input-group mb-3">
                         <input type="text" class="form-control" id="nouvelleVersion" placeholder="Ex: Spécial Noël 2026">
-                        <button class="btn btn-outline-primary" onclick="creerVersion()">Créer</button>
+                        <button class="btn btn-primary" onclick="creerVersion()"><i class="bi bi-plus-circle"></i> Créer</button>
                     </div>
-                    <div id="versionsList">
+                    <div id="versionsList" style="max-height:420px; overflow-y:auto;">
                         <!-- Rempli par JS -->
                     </div>
                 </div>
@@ -4101,7 +4141,7 @@
                 <!-- Utilitaires partagés (chargé en premier) -->
                 <script src="/static/js/modules/utils.js?v=1"></script>
                 <!-- Grille éditoriale (module externe) -->
-                <script src="/static/js/modules/grille-editoriale.js?v=1"></script>
+                <script src="/static/js/modules/grille-editoriale.js?v=3"></script>
 
         <!-- ════════════════════════════════════ -->
         <!-- MAINTENANCE                    -->
@@ -5497,6 +5537,52 @@ document.addEventListener('DOMContentLoaded', function() {
     // ════════════════════════════════════
     // GRILLE ÉDITORIALE : Pré-remplissage depuis AzuraCast
     // ════════════════════════════════════
+    // ── Sélecteur de jours AzuraCast ──
+    window._toggleAzuraJour = function(btn) {
+        var jour = parseInt(btn.getAttribute('data-jour'));
+        var group = document.getElementById('grille_azura_jours');
+        var btns = group.querySelectorAll('button');
+        var btnTous = btns[0]; // data-jour="0"
+
+        if (jour === 0) {
+            // Bouton "Tous" : toggle tous les jours
+            var isActive = btnTous.classList.contains('active');
+            if (isActive) {
+                // Désélectionner tout
+                for (var i = 0; i < btns.length; i++) { btns[i].classList.remove('active'); }
+            } else {
+                // Sélectionner tout
+                for (var i = 0; i < btns.length; i++) { btns[i].classList.add('active'); }
+            }
+        } else {
+            // Toggle un jour individuel
+            btn.classList.toggle('active');
+            // Mettre à jour le bouton "Tous" : actif si tous les jours (1-7) sont actifs
+            var tousActifs = true;
+            for (var i = 1; i < btns.length; i++) {
+                if (!btns[i].classList.contains('active')) { tousActifs = false; break; }
+            }
+            if (tousActifs) { btnTous.classList.add('active'); }
+            else { btnTous.classList.remove('active'); }
+        }
+    };
+
+    window._getAzuraJoursSelectionnes = function() {
+        // Retourne un tableau de numéros ISO (1=Lun...7=Dim) ou null si "Tous"
+        var group = document.getElementById('grille_azura_jours');
+        if (!group) return null;
+        var btns = group.querySelectorAll('button');
+        var btnTous = btns[0];
+        if (btnTous.classList.contains('active')) return null; // null = tous les jours
+        var jours = [];
+        for (var i = 1; i < btns.length; i++) {
+            if (btns[i].classList.contains('active')) {
+                jours.push(parseInt(btns[i].getAttribute('data-jour')));
+            }
+        }
+        return jours.length ? jours : null; // null si aucun sélectionné (fallback = tous)
+    };
+
     window.remplirGrilleDepuisAzuraCast = function(evt) {
         var stationSel = document.getElementById('grille_azura_station');
         var stationId = stationSel ? stationSel.value : '7';
@@ -5548,10 +5634,18 @@ document.addEventListener('DOMContentLoaded', function() {
 
             resume += 'Voulez-vous pré-remplir les ' + data.auto_count + ' bloc(s) automatique(s) ?';
 
+            // Lire les jours sélectionnés pour le filtre
+            var joursFiltre = window._getAzuraJoursSelectionnes ? window._getAzuraJoursSelectionnes() : null;
+            if (joursFiltre) {
+                var nomsJours = {1:'Lundi',2:'Mardi',3:'Mercredi',4:'Jeudi',5:'Vendredi',6:'Samedi',7:'Dimanche'};
+                var labelsJours = joursFiltre.map(function(j) { return nomsJours[j] || j; });
+                resume += '\n\nJours ciblés : ' + labelsJours.join(', ');
+            }
+
             if (confirm(resume)) {
                 // Appeler la fonction du module grille-editoriale.js si disponible
                 if (typeof window._remplirBlocsDepuisAzura === 'function') {
-                    window._remplirBlocsDepuisAzura(data.blocs);
+                    window._remplirBlocsDepuisAzura(data.blocs, joursFiltre);
                 } else {
                     // Fallback : stocker les données et informer l'utilisateur
                     window._grilleAzuraData = data;
