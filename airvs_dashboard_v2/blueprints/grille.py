@@ -18,7 +18,7 @@ import pymysql
 from flask import Blueprint, request, jsonify
 
 from config import (
-    JOURS_MAP, JOURS_LABELS, PALETTE_AIRVS, API_TOKEN, PORT,
+    JOURS_MAP, JOURS_LABELS, PALETTE_AIRVS, API_TOKEN,
     _ge_to_min, _ge_times_overlap,
 )
 from utils import get_db_connection
@@ -152,17 +152,21 @@ def _ge_generer_grille_dict(version_label=None):
         conn.close()
 
 
-def _ge_inserer_tache_sync_grille(ftp_config, dashboard_url):
+def _ge_inserer_tache_sync_grille(dashboard_url, target):
     """Insère une tâche SYNC_GRILLE_WEB dans taches_planifiees.
 
     En production, utilise get_db_connection() (pymysql direct, pas besoin
     de bypass comme en dev). Le worker Ubuntu détecte la tâche et appelle
     /api/grille_editoriale/grille.json pour récupérer le JSON puis le pousse
-    sur airvs.fr via FTP.
+    vers la cible désignée (chantier sur VPS OVH ; prod airvs.fr plus tard).
+
+    La cible ('target') est une simple clé : le worker résout lui-même les
+    identifiants depuis son propre fichier (CIBLES_GRILLE_WEB dans
+    worker_ubuntu.py). Aucun secret FTP ne transite plus par la base.
 
     Paramètres:
-      - ftp_config : dict avec host, user, pass, remote_path
       - dashboard_url : URL LAN du dashboard (ex: http://192.168.1.39:5000)
+      - target : 'chantier' (défaut). 'prod' sera débloqué plus tard.
 
     Retourne l'ID de la tâche insérée.
     """
@@ -177,10 +181,7 @@ def _ge_inserer_tache_sync_grille(ftp_config, dashboard_url):
             json.dumps({
                 'dashboard_url': dashboard_url,
                 'api_token': API_TOKEN,
-                'ftp_host': ftp_config.get('host', ''),
-                'ftp_user': ftp_config.get('user', ''),
-                'ftp_pass': ftp_config.get('pass', ''),
-                'ftp_remote_path': ftp_config.get('remote_path', '/'),
+                'target': target,
             })
         ))
         conn.commit()
@@ -189,14 +190,12 @@ def _ge_inserer_tache_sync_grille(ftp_config, dashboard_url):
         conn.close()
 
 
-def _ge_ftp_config():
-    """Récupère la configuration FTP depuis les variables d'environnement."""
-    return {
-        'host': os.getenv('FTP_HOST', ''),
-        'user': os.getenv('FTP_USER', ''),
-        'pass': os.getenv('FTP_PASS', ''),
-        'remote_path': os.getenv('FTP_REMOTE_PATH', '/'),
-    }
+# Cibles de publication autorisées côté dashboard. Le worker ne connaît que
+# les cibles listées dans CIBLES_GRILLE_WEB (worker_ubuntu.py). 'prod'
+# (airvs.fr, FTP-TLS sur OVH mutualisé) sera ajoutée ici et côté worker
+# le moment venu — aucun autre changement nécessaire.
+CIBLES_PUBLICATION_GRILLE = ('chantier',)
+GRILLE_PUBLISH_TARGET = os.getenv('GRILLE_PUBLISH_TARGET', 'chantier')
 
 
 def _ge_ecrire_grille_json_local():
@@ -515,33 +514,56 @@ def api_grille_json_public():
 @grille_bp.route('/api/grille_editoriale/publier', methods=['POST'])
 @login_requis
 def api_grille_publier():
-    """Publie la grille sur airvs.fr. Effectue en parallèle :
+    """Publie la grille éditoriale vers la cible demandée ('chantier' par
+    défaut ; 'prod' = airvs.fr, à débloquer plus tard). Effectue :
        1. Écriture locale de grille.json dans PUBLISH_PATH (sécurité — immédiat)
        2. Insertion d'une tâche SYNC_GRILLE_WEB dans taches_planifiees
           → le worker Ubuntu va détecter la tâche, appeler l'endpoint
-          /api/grille_editoriale/grille.json et pousser le JSON sur airvs.fr
-          via FTP.
+          /api/grille_editoriale/grille.json puis pousser le JSON vers la
+          cible (transport résolu côté worker : SFTP chantier sur VPS OVH,
+          FTP-TLS prod sur OVH mutualisé).
 
     Le mode local garantit qu'une copie à jour existe toujours, même si le
-    worker est indisponible ou si la publication FTP échoue. Si PUBLISH_PATH
-    n'est pas configuré, seul le mode FTP worker est utilisé."""
+    worker est indisponible ou si la publication échoue. Si PUBLISH_PATH
+    n'est pas configuré, seule la publication via le worker est utilisée.
+    Corps JSON optionnel : {"target": "chantier"}."""
     # 1. Écriture locale (sécurité) — ne bloque pas la suite si elle échoue
     local_ok, local_detail = _ge_ecrire_grille_json_local()
     if not local_ok:
         print(f"[Grille éditoriale] Écriture locale ignorée : {local_detail}")
 
-    # 2. Insertion de la tâche worker FTP
-    dashboard_url = os.getenv('DASHBOARD_LAN_URL', f'http://127.0.0.1:{PORT}')
-    ftp_config = _ge_ftp_config()
+    # 2. Insertion de la tâche worker (cible = chantier par défaut)
+    body = request.get_json(silent=True) or {}
+    target = body.get('target', GRILLE_PUBLISH_TARGET)
+    if target not in CIBLES_PUBLICATION_GRILLE:
+        return jsonify({
+            "status": "error",
+            "message": f"Cible de publication inconnue : '{target}' "
+                       f"(cibles disponibles : {', '.join(CIBLES_PUBLICATION_GRILLE)})"
+        }), 400
+
+    # Garde-fou : sans DASHBOARD_LAN_URL, le worker irait tirer la grille sur
+    # 127.0.0.1 (lui-même) et échouerait. On bloque avant d'insérer la tâche.
+    dashboard_url = os.getenv('DASHBOARD_LAN_URL', '').strip()
+    if not dashboard_url:
+        msg = ("DASHBOARD_LAN_URL absente du .env du dashboard : impossible "
+               "d'indiquer au worker où tirer grille.json "
+               "(ex: http://192.168.1.39:5000)")
+        if local_ok:
+            msg += f" — copie locale quand même à jour : {local_detail}"
+        return jsonify({"status": "error", "message": msg}), 500
+
     try:
-        tache_id = _ge_inserer_tache_sync_grille(ftp_config, dashboard_url)
-        message = f"Tâche SYNC_GRILLE_WEB insérée (id={tache_id}). Le worker Ubuntu va la traiter."
+        tache_id = _ge_inserer_tache_sync_grille(dashboard_url, target)
+        message = (f"Tâche SYNC_GRILLE_WEB insérée (id={tache_id}, "
+                   f"cible : {target}). Le worker Ubuntu va la traiter.")
         if local_ok:
             message += f" Copie locale mise à jour : {local_detail}"
         return jsonify({
             "status": "ok",
             "message": message,
             "tache_id": tache_id,
+            "target": target,
             "local_copy": local_ok,
             "local_path": local_detail if local_ok else None
         })
