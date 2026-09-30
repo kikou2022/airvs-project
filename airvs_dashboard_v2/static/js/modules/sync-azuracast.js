@@ -721,18 +721,30 @@ function getDossierCible(selectId, inputId) {
 function loadActionPlaylists() {
     if (window.actionPlaylistsLoaded) return;
     let sid = getActionStationId();
-    fetch('/api/azuracast/playlists?station_id=' + sid)
+    console.log('[loadActionPlaylists] Fetching playlists for station_id=' + sid);
+    fetch('/api/azuracast/playlists?t=' + Date.now() + '&station_id=' + sid)
         .then(function(r) { return r.json(); })
         .then(function(playlists) {
             if (!Array.isArray(playlists)) return;
+            console.log('[loadActionPlaylists] Got ' + playlists.length + ' playlists for station ' + sid);
             var html = '<option value="">-- Sélectionner --</option>';
             playlists.forEach(function(pl) {
                 html += '<option value="' + pl.id + '" title="' + pl.name + '">' + pl.name + ' (' + pl.nb_tracks + ' titres)</option>';
             });
             _actionPlaylistOptionsHtml = html;
             window.actionPlaylistsLoaded = true;
+            // Mettre à jour TOUS les <select> existants (pas seulement le template)
+            var existingSelects = document.querySelectorAll('#action_playlist_container .action-playlist-select');
+            console.log('[loadActionPlaylists] Updating ' + existingSelects.length + ' existing <select> elements');
+            existingSelects.forEach(function(sel) {
+                var prev = sel.value;
+                sel.innerHTML = _actionPlaylistOptionsHtml;
+                // Ne pas restaurer la sélection précédente : on change de station,
+                // les IDs de playlists sont différents entre stations
+            });
             // Ajouter une première ligne si vide
-            if (document.getElementById('action_playlist_container').children.length === 0) {
+            var container = document.getElementById('action_playlist_container');
+            if (container && container.children.length === 0) {
                 addActionPlaylistRow();
             }
         });
@@ -1044,6 +1056,7 @@ function reloadPlaylistsAndFoldersForStation() {
 // Recharge UNIQUEMENT la partie "Action AzuraCast" (explorateur) quand l'utilisateur
 // change la station dans ce panneau. Le Pont RadioDJ reste sur sa propre station.
 function reloadActionPanelForStation() {
+    console.log('[reloadActionPanelForStation] Station changed to ' + getActionStationId());
     window.actionPlaylistsLoaded = false;
     loadActionFolders();
     loadActionPlaylists();
@@ -1052,6 +1065,7 @@ function reloadActionPanelForStation() {
 // Recharge UNIQUEMENT la partie "Pont RadioDJ → AzuraCast" quand l'utilisateur
 // change la station dans le Pont. L'Action AzuraCast reste sur sa propre station.
 function reloadPushPanelForStation() {
+    console.log('[reloadPushPanelForStation] Station changed to ' + getPushStationId());
     window.pushPlaylistsLoaded = false;
     loadPushFolders();
     loadPushPlaylists();
@@ -1064,6 +1078,7 @@ function reloadPushPanelForStation() {
     let sel = document.getElementById('push_station_cible');
     if (!sel) return;
     sel.addEventListener('change', function() {
+        console.log('[push_station_cible] Change event fired, new value=' + this.value);
         reloadPushPanelForStation();
     });
 })();
@@ -1074,6 +1089,7 @@ function reloadPushPanelForStation() {
     let sel = document.getElementById('action_station_cible');
     if (!sel) return;
     sel.addEventListener('change', function() {
+        console.log('[action_station_cible] Change event fired, new value=' + this.value);
         reloadActionPanelForStation();
     });
 })();
@@ -1250,6 +1266,7 @@ var _actionPlaylistCounter = 0;
 
 function loadPushPlaylists() {
     let sid = getPushStationId();
+    console.log('[loadPushPlaylists] Fetching playlists for station_id=' + sid);
     fetch('/api/azuracast/playlists?t=' + Date.now() + '&station_id=' + sid)
         .then(function(r) { return r.json(); })
         .then(function(playlists) {
@@ -1261,21 +1278,31 @@ function loadPushPlaylists() {
                 });
             }
             _pushPlaylistOptionsHtml = html;
-            _actionPlaylistOptionsHtml = html;
             window.pushPlaylistsLoaded = true;
-            
+            console.log('[loadPushPlaylists] Got ' + (Array.isArray(playlists) ? playlists.length : 0) + ' playlists for station ' + sid);
+            // Mettre à jour TOUS les <select> existants (pas seulement le template)
+            var existingSelects = document.querySelectorAll('#push_playlist_container .push-playlist-select');
+            console.log('[loadPushPlaylists] Updating ' + existingSelects.length + ' existing <select> elements');
+            existingSelects.forEach(function(sel) {
+                sel.innerHTML = _pushPlaylistOptionsHtml;
+                // Ne pas restaurer la sélection : changement de station = IDs différents
+            });
             // Ajouter une première ligne vide
-            if (document.getElementById('push_playlist_container').children.length === 0) {
+            var container = document.getElementById('push_playlist_container');
+            if (container && container.children.length === 0) {
                 addPushPlaylistRow();
             }
-            // Peupler aussi les sélecteurs d'action si visibles
-            if (document.getElementById('action_playlist_container').children.length === 0) {
-                addActionPlaylistRow();
-            }
+            // NOTE : on ne modifie PAS _actionPlaylistOptionsHtml ici —
+            // l'Action panel a son propre sélecteur de station (action_station_cible)
+            // et sa propre fonction loadActionPlaylists() qui gère ses options.
         })
         .catch(function() {
             _pushPlaylistOptionsHtml = '<option value="">-- Erreur de chargement --</option>';
-            _actionPlaylistOptionsHtml = _pushPlaylistOptionsHtml;
+            // Mettre à jour les <select> existants même en cas d'erreur
+            document.querySelectorAll('#push_playlist_container .push-playlist-select').forEach(function(sel) {
+                sel.innerHTML = _pushPlaylistOptionsHtml;
+            });
+            // NOTE : on ne modifie PAS _actionPlaylistOptionsHtml ici (voir commentaire plus haut)
             if (document.getElementById('push_playlist_container').children.length === 0) {
                 addPushPlaylistRow();
             }
@@ -2797,5 +2824,5 @@ function surveillerFinPlaylist() {
         chargerPlaylistsCache();
     };
 
-    console.log('[sync-azuracast.js] Module chargé.');
+    console.log('[sync-azuracast.js] Module chargé — v3 (fix playlists station change).');
 })();
