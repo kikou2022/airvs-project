@@ -39,6 +39,14 @@
       "base_path": "/mnt/projet_radio3/Musique/MUSIC_BAG",
       "sous_dossier_semaine": false,
       "periode": "all"
+    },
+    {
+      "id": "selection_paps",
+      "label": "Selection PAPS",
+      "sous_categorie": "Selection_PAPS",
+      "base_path": "/mnt/projet_radio2/Musique/SELECTION_PAPS",
+      "sous_dossier_semaine": false,
+      "periode": "all"
     }
   ]
 }

@@ -1,3 +1,6 @@
+// ██████ AIRVS PATCH PROGRAMMATION v2.1 — 2026-10-08 — ZONE DOWNLOAD AI ██████
+// Correctif : modal correction Manquants pré-remplie (artiste/titre du manquant) — cache-buster ?v=8
+// Vérif déploiement : cette ligne doit être la 1re ligne du fichier sur .39
 // [P3-S3] Phase 3 Étape 3 — Extraction JS shazam-animateurs + pont-player
 /**
  * AIRVS Dashboard — shazam-animateurs
@@ -146,7 +149,7 @@ function getStatutBadge(statut, rowId, prefix, statutVps) {
     if (s === 'matche' || s === 'matché')
         return '<span class="badge" style="background:#10b981;color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;" title="Matché dans RadioDJ">✓ Match</span>';
     if (s === 'pousse_azura' || s === 'poussé_azura' || s === 'pousse' || s === 'poussé')
-        return '<span class="badge" style="background:#6366f1;color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;" title="Poussé dans Azuracast">☁ Poussé</span>';
+        return '<span class="badge" style="background:#6366f1;color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;" title="Diffusé (poussé vers AzuraCast)">📡 Diffusé</span>';
     if (s === 'rejete' || s === 'rejeté' || s === 'rejete_corrigé' || s === 'rejete_corrige')
         return '<span class="badge" style="background:#ef4444;color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;" title="Rejeté" data-row-id="' + rowId + '" data-table="' + tbl + '">✗ Rejeté</span>';
     // nouveau ou vide
@@ -565,11 +568,18 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
     tbody.innerHTML = filtered.map(function(r) {
         let key = (r.artiste || '').toLowerCase().trim() + '||' +
                   (r.titre || '').toLowerCase().trim();
-        let songId = matchedSet[key];
+        // P1 — Colonne Match persistante : dérivée de la DB (match_song_id /
+        // match_passe='non_trouve') et fusionnée avec le matching courant.
+        // Avant : uniquement matchedSet (vide au rechargement → tout passait à '?').
+        let songId = matchedSet[key] || r.match_song_id || null;
+        let notFoundNow = matchedSet && Object.keys(matchedSet).length > 0 && !matchedSet[key];
+        let notFoundDb = !songId && r.match_passe === 'non_trouve';
+        // v2 — tracer l'origine d'un ✓ établi par import (Maintenance)
+        let viaImport = r.match_passe === 'trouve_import';
         let matchCell = songId
-            ? '<span class="text-success fw-bold" title="ID ' + songId + '">✓</span>'
-            : (matchedSet && Object.keys(matchedSet).length > 0)
-            ? '<span class="text-danger fw-bold" title="Non trouvé dans RadioDJ">✗</span>'
+            ? '<span class="text-success fw-bold" title="ID ' + songId + (viaImport ? ' — correspondance établie via import Maintenance' : '') + '">✓</span>'
+            : (notFoundNow || notFoundDb)
+            ? '<span class="text-danger fw-bold" title="Non trouvé dans RadioDJ (dernier matching)">✗</span>'
             : '<span class="text-muted" title="Pas encore matché">?</span>';
 
         let animBadge = '<td class="text-center">' + getAnimateurBadge(r.animateur, r.id, prefix) + '</td>';
@@ -1049,7 +1059,33 @@ function updateShazamListWithMatch(found, notFound, prefix = 'shazam') {
         matchedSet[key] = t.ID;
     });
 
-    renderShazamListTable(allShazamRowsData[prefix] || [], matchedSet, prefix);
+    // P1 — Fusion des résultats dans les données locales : les badges Statut,
+    // le filtre Statut et « Masquer gérées » réagissent immédiatement.
+    // Avant : r.statut restait 'nouveau' en mémoire après un matching → badges
+    // figés, filtre Statut vide, Masquer gérées sans effet.
+    var data = allShazamRowsData[prefix] || [];
+    (found || []).forEach(function(t) {
+        var sid = t._shazam_id;  // id de la ligne source (fourni par le backend)
+        if (sid === undefined || sid === null) return;
+        data.forEach(function(r) {
+            if (r.id == sid) {
+                r.statut = 'matche';
+                r.match_song_id = t.ID;
+                if (t._match_methode) r.match_passe = t._match_methode;
+            }
+        });
+    });
+    (notFound || []).forEach(function(nf) {
+        var nid = nf.id;  // id ligne source (fourni par le backend, P1)
+        if (nid === undefined || nid === null) return;
+        data.forEach(function(r) {
+            if (r.id == nid && (r.statut || 'nouveau') === 'nouveau') {
+                r.match_passe = 'non_trouve';
+            }
+        });
+    });
+
+    renderShazamListTable(data, matchedSet, prefix);
 }
 // ── Sync VPS : forcer la synchronisation OVH immediat ──
 function syncVpsNow(prefix) {
@@ -1229,15 +1265,19 @@ function _doRejeter(rowId, table) {
 }
 
 // ── Corriger un manquant (rejete_corrigé + nouvelle forme) ──
-function corrigerManquant(rowId, table) {
+function corrigerManquant(rowId, table, prefill) {
     _closeCorrectionModal();
     table = table || 'shazam';
-    // Trouver la ligne dans les données locales pour pré-remplir
+    // Trouver la ligne dans les données locales pour pré-remplir.
+    // v2.1 — si l'onglet source n'a jamais été chargé dans la session
+    // (ex. correction lancée depuis l'onglet Manquants), allShazamRowsData
+    // est vide : on utilise alors le pré-remplissage fourni (valeurs du
+    // manquant, identiques à la ligne source par matching LOWER/TRIM).
     var prefix = (table === 'animateurs') ? 'animateurs' : 'shazam';
     var data = allShazamRowsData[prefix] || [];
     var row = data.find(function(r) { return r.id == rowId; });
-    var currentArtiste = row ? (row.artiste || '') : '';
-    var currentTitre = row ? (row.titre || '') : '';
+    var currentArtiste = row ? (row.artiste || '') : ((prefill && prefill.artiste) || '');
+    var currentTitre = row ? (row.titre || '') : ((prefill && prefill.titre) || '');
 
     var modalHtml = '<div id="_correction_modal" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);">' +
         '<div style="background:#fff;border-radius:8px;padding:20px;min-width:400px;max-width:560px;box-shadow:0 4px 24px rgba(0,0,0,0.3);">' +
