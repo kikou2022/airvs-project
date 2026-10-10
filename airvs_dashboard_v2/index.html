@@ -1,3 +1,6 @@
+<!-- ██████ AIRVS PATCH PROGRAMMATION v2.2 — 2026-10-08 — ZONE DOWNLOAD AI ██████ -->
+<!-- Corrélation auto multi-passes après import (suspects + pipeline, ciblée titres importés) -->
+<!-- + suivi temps réel de la corrélation dans le terminal Import & Validation -->
 <!-- ============================================================================== -->
 <!-- FICHIER DE DEPLOIEMENT - AIRVS Dashboard v2                                     -->
 <!-- Date     : 2026-09-29 14:20 UTC                                                -->
@@ -2564,7 +2567,7 @@
                                                     <option value="nouveau">Nouveau</option>
                                                     <option value="matche">Matché</option>
                                                     <option value="rejete">Rejeté</option>
-                                                    <option value="pousse">Poussé Azura</option>
+                                                    <option value="pousse">Diffusé</option>
                                                 </select>
                                                 <div class="form-check form-switch mb-0">
                                                     <input class="form-check-input" type="checkbox" id="shazam_hide_managed" onchange="window._shazamClick.call(this,'toggleHideManaged','shazam')">
@@ -2676,7 +2679,7 @@
                                                     <option value="nouveau">Nouveau</option>
                                                     <option value="matche">Matché</option>
                                                     <option value="rejete">Rejeté</option>
-                                                    <option value="pousse">Poussé Azura</option>
+                                                    <option value="pousse">Diffusé</option>
                                                 </select>
                                                 <div class="form-check form-switch mb-0">
                                                     <input class="form-check-input" type="checkbox" id="animateurs_hide_managed" onchange="window._shazamClick.call(this,'toggleHideManaged','animateurs')">
@@ -2736,16 +2739,17 @@
                                     <div class="card-header bg-warning text-dark py-2 d-flex justify-content-between align-items-center">
                                         <small><b>🚫 Titres manquants</b> — titres détectés par les 4 flux éditoriaux mais absents de la base</small>
                                         <div>
+                                            <button class="btn btn-sm btn-outline-info me-1" onclick="_correlerManquants()" title="Chercher les manquants désormais présents dans RadioDJ → statut Importé">🔗 Corréler</button>
                                             <button class="btn btn-sm btn-outline-warning me-1" onclick="_loadManquants()" title="Rafraîchir">🔄</button>
                                         </div>
                                     </div>
                                     <div class="card-body">
                                         <!-- Stats bar -->
                                         <div class="d-flex flex-wrap gap-2 mb-3" id="manquants-stats-bar">
-                                            <span class="badge bg-secondary" id="mq-stat-total">Total: ?</span>
-                                            <span class="badge bg-warning text-dark" id="mq-stat-attente">En attente: ?</span>
-                                            <span class="badge bg-success" id="mq-stat-importes">Importés 7j: ?</span>
-                                            <span class="badge bg-info" id="mq-stat-resolus">Résolus: ?</span>
+                                            <span class="badge bg-secondary" id="mq-stat-total" style="cursor:pointer" onclick="_mqStatutFilter('')" title="Afficher tous les statuts">Total: ?</span>
+                                            <span class="badge bg-warning text-dark" id="mq-stat-attente" style="cursor:pointer" onclick="_mqStatutFilter('en_attente')" title="Filtrer : En attente">En attente: ?</span>
+                                            <span class="badge bg-success" id="mq-stat-importes" style="cursor:pointer" onclick="_mqStatutFilter('importe')" title="Filtrer : Importés">Importés 7j: ?</span>
+                                            <span class="badge bg-info" id="mq-stat-resolus" style="cursor:pointer" onclick="_mqStatutFilter('resolu')" title="Filtrer : Résolus">Résolus: ?</span>
                                         </div>
                                         <!-- Filters -->
                                         <div class="row g-2 mb-3">
@@ -2763,6 +2767,7 @@
                                                     <option value="en_attente">En attente</option>
                                                     <option value="importe">Importé</option>
                                                     <option value="resolu">Résolu</option>
+                                                    <option value="rejete">Rejeté</option>
                                                 </select>
                                             </div>
                                             <div class="col">
@@ -2773,7 +2778,7 @@
                                             </div>
                                         </div>
                                         <!-- Table -->
-                                        <div style="overflow-x:auto; max-height:55vh; overflow-y:auto;">
+                                        <div style="overflow-x:auto; max-height:75vh; overflow-y:auto;">
                                             <table class="table table-sm table-hover table-bordered" id="manquants-table">
                                                 <thead class="table-dark sticky-top">
                                                     <tr>
@@ -4987,7 +4992,7 @@
 
 
 <!-- ══════════════════════════════════════════════════ -->
-<script src="/static/js/modules/shazam-animateurs.js?v=4"></script>
+<script src="/static/js/modules/shazam-animateurs.js?v=8"></script>
 <!-- PHASE 3 - Étape 2/5 : shazam-animateurs (appel direct window._onShazamMatchResult / window._onAnimateursMatchResult) -->
 <!-- ══════════════════════════════════════════════════ -->
 <script src="/static/js/modules/pont-player.js?v=1"></script>
@@ -5796,6 +5801,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     var cls = data.statut === 'termine' ? 'text-success' : 'text-danger';
                     var label = data.statut === 'termine' ? 'Termin\u00e9' : 'Erreur';
                     statusDiv.innerHTML = '<span class="' + cls + ' fw-bold">' + label + ' (t\u00e2che #' + tacheId + ')</span>';
+                    // v2.2 — suivre la corrélation post-import dans CE terminal
+                    var corrS = data.correlation_suivi || null;
+                    if (data.statut === 'termine' && corrS && corrS.cle) {
+                        termDiv.textContent += '\n── Suivi corrélation Manquants ↔ RadioDJ ──\n';
+                        termDiv.scrollTop = termDiv.scrollHeight;
+                        _suivreCorrelation(corrS.cle, null, termDiv);
+                    }
                 }
             })
             .catch(function() { /* silent — on reessaie au prochain tick */ });
@@ -6074,6 +6086,17 @@ document.addEventListener('DOMContentLoaded', function() {
             _logSuspect('  -> ' + (data.destination || '?'));
             _logSuspect('  mp3gain : ' + (mp3.ok ? mp3.message : 'echec'));
             _logSuspect('  RadioDJ sync : ' + (sync.ok ? sync.message : 'echec'));
+            var corr = data.correlation || {};
+            var corrS = data.correlation_suivi || null;
+            if (corr.trouve) {
+                var _nbSrc = (corr.sources_matchees ? (corr.sources_matchees[0] + corr.sources_matchees[1]) : 0);
+                _logSuspect('  Manquants : \u2713 corrélation immédiate — manquant(s) clôturé(s) : ' + (corr.manquants_clotures || 0) + ', ligne(s) source passée(s) Matché : ' + _nbSrc);
+            } else if (corrS && corrS.cle) {
+                _logSuspect('  Manquants : corrélation en arrière-plan (' + corrS.passes + ' passes / ' + corrS.intervalle_s + 's — scan FolderSync asynchrone)...');
+                _suivreCorrelation(corrS.cle, _logSuspect, null);
+            } else if (sync.ok) {
+                _logSuspect('  Manquants : corrélation non déclenchée (tags illisibles ?) — bouton 🔗 disponible');
+            }
             if (row) row.remove();
             _updateSuspectBadge(-1);
             _updatePlayersVisibility();
@@ -6155,6 +6178,42 @@ document.addEventListener('DOMContentLoaded', function() {
         term.scrollTop = term.scrollHeight;
     }
 
+    // v2.2 — Suit la corrélation multi-passes côté serveur (clé de suivi) et
+    // rejette chaque nouvelle ligne dans le journal suspects (_logSuspect) et/ou
+    // dans le terminal pipeline. S'arrête sur termine=true (=== CORRELATION
+    // TERMINEE ===) — même philosophie que la surveillance chaînée des
+    // playlists AzuraCast : le polling ne meurt pas au premier état terminal.
+    var _corrFollowUps = {};
+    function _suivreCorrelation(cle, loggerFn, termDiv) {
+        if (!cle || _corrFollowUps[cle]) return;
+        var shown = 0, ticks = 0;
+        var timer = setInterval(function() {
+            ticks++;
+            if (ticks > 150) { clearInterval(timer); delete _corrFollowUps[cle]; return; }
+            fetch('/api/manquants/correlation-suivi?cle=' + encodeURIComponent(cle))
+                .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+                .then(function(d) {
+                    var lines = d.lines || [];
+                    for (; shown < lines.length; shown++) {
+                        if (loggerFn) loggerFn(lines[shown]);
+                        if (termDiv) {
+                            termDiv.textContent += lines[shown] + '\n';
+                            termDiv.scrollTop = termDiv.scrollHeight;
+                        }
+                    }
+                    if (d.termine) {
+                        clearInterval(timer);
+                        delete _corrFollowUps[cle];
+                        // Rafraîchir la liste Manquants si elle est chargée
+                        var tb = document.getElementById('manquants-tbody');
+                        if (tb && typeof _loadManquants === 'function') _loadManquants();
+                    }
+                })
+                .catch(function() { /* retry au prochain tick */ });
+        }, 3000);
+        _corrFollowUps[cle] = timer;
+    }
+
     // Stocke le contexte de la modale edition + donnees completes des suspects
     var _editSuspectCtx = { idx: null, filename: null };
     var _suspectsData = [];  // peuple par _loadSuspects
@@ -6230,6 +6289,17 @@ document.addEventListener('DOMContentLoaded', function() {
             _logSuspect('  -> ' + (data.destination || '?'));
             _logSuspect('  mp3gain : ' + (mp3.ok ? mp3.message : 'echec'));
             _logSuspect('  RadioDJ sync : ' + (sync.ok ? sync.message : 'echec'));
+            var corrE = data.correlation || {};
+            var corrSE = data.correlation_suivi || null;
+            if (corrE.trouve) {
+                var _nbSrcE = (corrE.sources_matchees ? (corrE.sources_matchees[0] + corrE.sources_matchees[1]) : 0);
+                _logSuspect('  Manquants : \u2713 corrélation immédiate — manquant(s) clôturé(s) : ' + (corrE.manquants_clotures || 0) + ', ligne(s) source passée(s) Matché : ' + _nbSrcE);
+            } else if (corrSE && corrSE.cle) {
+                _logSuspect('  Manquants : corrélation en arrière-plan (' + corrSE.passes + ' passes / ' + corrSE.intervalle_s + 's — scan FolderSync asynchrone)...');
+                _suivreCorrelation(corrSE.cle, _logSuspect, null);
+            } else if (sync.ok) {
+                _logSuspect('  Manquants : corrélation non déclenchée (tags illisibles ?) — bouton 🔗 disponible');
+            }
             if (row) row.remove();
             _updateSuspectBadge(-1);
             _updatePlayersVisibility();
@@ -6273,6 +6343,14 @@ document.addEventListener('DOMContentLoaded', function() {
 
                     // Verifier les suspects a la fin du pipeline
                     _checkSuspectsAfterImport();
+
+                    // v2.2 — suivre la corrélation post-import dans CE terminal
+                    var corrS = data.correlation_suivi || null;
+                    if (data.statut === 'termine' && corrS && corrS.cle) {
+                        termDiv.textContent += '\n── Suivi corrélation Manquants ↔ RadioDJ ──\n';
+                        termDiv.scrollTop = termDiv.scrollHeight;
+                        _suivreCorrelation(corrS.cle, null, termDiv);
+                    }
                 }
             })
             .catch(function() {});
@@ -6795,6 +6873,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // MANQUANTS — Titres manquants (4 flux éditoriaux)
     // ══════════════════════════════════════════════════════
     var _mqOffset = 0, _mqLimit = 100;
+    var _mqLastRows = [];  // P3 : dernier lot affiché (pour ✎ Corriger depuis Manquants)
 
     function _updateManquantsBadges(stats) {
         var n = stats.en_attente || 0;
@@ -6842,13 +6921,14 @@ document.addEventListener('DOMContentLoaded', function() {
         }).then(function(data) {
             _fetchManquantsStats();  // Always refresh badge from stats endpoint
             var rows = data.items || [];
+            _mqLastRows = rows;  // P3
             var html = '';
             if (rows.length === 0) {
                 html = '<tr><td colspan="8" class="text-center text-muted py-3">Aucun manquant</td></tr>';
             } else {
-                var srcLabels = {prefill_sheets: '📋 Sheets', shazam: '🎵 Shazam', animateurs: '📝 Animateurs'};
-                var statutBadges = {en_attente: 'bg-warning text-dark', importe: 'bg-success', resolu: 'bg-info'};
-                var statutLabels = {en_attente: 'En attente', importe: 'Importé', resolu: 'Résolu'};
+            var srcLabels = {prefill_sheets: '📋 Sheets', shazam: '🎵 Shazam', animateurs: '📝 Animateurs'};
+                var statutBadges = {en_attente: 'bg-warning text-dark', importe: 'bg-success', resolu: 'bg-info', rejete: 'bg-danger', 'rejete_corrigé': 'bg-danger'};
+                var statutLabels = {en_attente: 'En attente', importe: 'Importé', resolu: 'Résolu', rejete: 'Rejeté', 'rejete_corrigé': 'Rejeté (corrigé)'};
                 for (var i = 0; i < rows.length; i++) {
                     var r = rows[i];
                     var srcLabel = srcLabels[r.source] || r.source;
@@ -6856,15 +6936,21 @@ document.addEventListener('DOMContentLoaded', function() {
                     var sl = statutLabels[r.statut] || r.statut;
                     var age = r.age_jours !== undefined ? r.age_jours + 'j' : '';
                     var dateStr = r.date_creation ? r.date_creation.substring(0, 16) : '';
+                    // v2 — matérialiser le lien : sous le titre, le titre RadioDJ correspondant
+                    var rdjLink = '';
+                    if (r.statut === 'importe' && r.import_title) {
+                        rdjLink = '<small class="d-block text-success" style="font-size:0.72em;cursor:help" title="Titre RadioDJ lié (id_import ' + (r.id_import || '?') + (r.import_file ? ' — ' + r.import_file : '') + ')">\u21b3 RadioDJ : ' + (r.import_artist || '?') + ' \u2014 ' + r.import_title + '</small>';
+                    }
                     var actions = '';
                     if (r.statut === 'en_attente') {
                         actions = '<button class="btn btn-sm btn-outline-success me-1" onclick="_resolveManquant(' + r.id + ')" title="Marquer résolu (faux positif)">✓</button>';
-                        actions += '<button class="btn btn-sm btn-outline-danger" onclick="_deleteManquant(' + r.id + ')" title="Supprimer">✕</button>';
+                        actions += '<button class="btn btn-sm btn-outline-warning me-1" onclick="_corrigerDepuisManquants(' + r.id + ')" title="Corriger artiste/titre via la ligne source">✎</button>';
+                        actions += '<button class="btn btn-sm btn-outline-danger" onclick="_deleteManquant(' + r.id + ')" title="Supprimer (ne reviendra plus)">✕</button>';
                     }
                     html += '<tr>' +
                         '<td>' + r.id + '</td>' +
                         '<td>' + (r.artiste || '') + '</td>' +
-                        '<td>' + (r.titre || '') + '</td>' +
+                        '<td>' + (r.titre || '') + rdjLink + '</td>' +
                         '<td><span class="badge ' + sb + '" style="font-size:0.7em">' + sl + '</span><br><small>' + srcLabel + '</small></td>' +
                         '<td>' + (r.animateur || '-') + '</td>' +
                         '<td class="text-center">' + age + '</td>' +
@@ -6889,6 +6975,62 @@ document.addEventListener('DOMContentLoaded', function() {
     function _mqPage(dir) {
         _mqOffset = Math.max(0, _mqOffset + dir * _mqLimit);
         _loadManquants();
+    }
+
+    // P3 : filtre statut via les badges cliquables
+    function _mqStatutFilter(v) {
+        var sel = document.getElementById('mq-filter-statut');
+        if (sel) sel.value = v || '';
+        _mqOffset = 0;
+        _loadManquants();
+    }
+
+    // P2 : corrélation manquants ↔ RadioDJ (bouton 🔗)
+    function _correlerManquants() {
+        var countEl = document.getElementById('manquants-count');
+        if (countEl) countEl.textContent = '🔗 Corrélation RadioDJ en cours...';
+        fetch('/api/manquants/correler', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({limite: 500})
+        }).then(function(r) {
+            if (!r.ok) throw new Error(r.status);
+            return r.json();
+        }).then(function(d) {
+            if (countEl) countEl.textContent = d.message || ('🔗 ' + (d.correles || 0) + ' corrélé(s)');
+            _loadManquants();
+        }).catch(function(err) {
+            if (countEl) countEl.textContent = 'Erreur corrélation: ' + err.message;
+        });
+    }
+
+    // P3 : ✎ Corriger un manquant en retrouvant sa ligne source
+    // (airvs_shazam / airvs_animateurs) puis en ouvrant le modal R15 existant
+    function _corrigerDepuisManquants(id) {
+        var r = null;
+        for (var i = 0; i < _mqLastRows.length; i++) {
+            if (_mqLastRows[i].id === id) { r = _mqLastRows[i]; break; }
+        }
+        if (!r) { alert('Ligne introuvable — rafraîchissez la liste.'); return; }
+        if (r.source !== 'shazam' && r.source !== 'animateurs') {
+            alert('Corriger n\'est disponible que pour les manquants Shazam / Animateurs (source actuelle : ' + (r.source || '?') + ').');
+            return;
+        }
+        fetch('/api/manquants/trouver_source?source=' + encodeURIComponent(r.source) +
+              '&artiste=' + encodeURIComponent(r.artiste || '') +
+              '&titre=' + encodeURIComponent(r.titre || ''))
+            .then(function(res) { if (!res.ok) throw new Error(res.status); return res.json(); })
+            .then(function(d) {
+                if (d.found && window._shazamFns && window._shazamFns.corriger) {
+                    // v2.1 — pré-remplissage avec les valeurs du manquant :
+                    // allShazamRowsData peut être vide (onglet jamais ouvert)
+                    window._shazamFns.corriger(d.row_id, d.table,
+                        {artiste: r.artiste || '', titre: r.titre || ''});
+                } else if (!d.found) {
+                    alert('Aucune ligne source active trouvée pour ce manquant (déjà rejetée ou supprimée ?).');
+                }
+            })
+            .catch(function(err) { alert('Erreur recherche source : ' + err.message); });
     }
 
     function _resolveManquant(id) {
@@ -6934,6 +7076,24 @@ document.addEventListener('DOMContentLoaded', function() {
     window._loadManquants = _loadManquants;
     window._mqPage = _mqPage;
     window._fetchManquantsStats = _fetchManquantsStats;
+    window._correlerManquants = _correlerManquants;
+    window._mqStatutFilter = _mqStatutFilter;
+    window._corrigerDepuisManquants = _corrigerDepuisManquants;
+
+    // P3 : vue par défaut « En attente » — l'onglet ouvre sur le travail restant
+    // (les statuts importé/resolu/rejeté restent accessibles via les badges cliquables)
+    var _mqSelStatut = document.getElementById('mq-filter-statut');
+    if (_mqSelStatut && !_mqSelStatut.value) _mqSelStatut.value = 'en_attente';
+
+    // P3 : après une correction (modal R15), rafraîchir aussi la liste Manquants
+    // (le manquant d'origine passe à 'rejete_corrigé' côté backend)
+    if (window._shazamFns && window._shazamFns._doCorriger) {
+        var _origDoCorriger = window._shazamFns._doCorriger;
+        window._shazamFns._doCorriger = function(rowId, table) {
+            _origDoCorriger(rowId, table);
+            setTimeout(function() { _loadManquants(); _fetchManquantsStats(); }, 1200);
+        };
+    }
 
     // Load manquants when tab is shown
     (function() {

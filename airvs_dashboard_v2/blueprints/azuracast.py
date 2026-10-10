@@ -1,3 +1,18 @@
+# ██████ AIRVS PATCH PROGRAMMATION v2.6 — 2026-10-09 — ZONE DOWNLOAD AI ██████
+# Ajout : diagnostic du flux éditorial INTÉGRÉ au dashboard (fini HeidiSQL) —
+#   GET /api/diagnostic/flux_editorial : JSON (5 blocs de contrôle)
+#   GET /diagnostic-flux               : page HTML autonome (Actualiser +
+#     auto-rafraîchissement 30 s), lecture seule, aucune écriture DB.
+#   Équivalent temps réel du fichier verification_v2.5.sql : contrôle du
+#   cycle Nouveau → Matché → 📡 Diffusé après application v2.5.
+# v2.5 (conservé) : bouclage du cycle côté AzuraCast — les lignes sources
+#   (airvs_animateurs / airvs_shazam) liées à un morceau copié vers AzuraCast
+#   passent statut='pousse_azura' (badge « 📡 Diffusé ») :
+#     - à la fin d'une tâche COPIE_FICHIERS (poll /lire_log_push),
+#     - à l'envoi pour les fichiers déjà présents dans AzuraCast,
+#     - au marquage manuel /api/marquer_in_azuracast.
+#   Complète shazam.py v2.5 (réintégration des matchés dans le Pont).
+# ==============================================================================
 # ==============================================================================
 # FICHIER DE DEPLOIEMENT - AIRVS Dashboard v2
 # Date     : 2026-09-29
@@ -44,6 +59,8 @@ Routes :
   - POST /api/marquer_in_azuracast
   - POST /api/sync_azura_status
   - GET  /api/azuracast/diagnostic
+  - GET  /api/diagnostic/flux_editorial   (v2.6 — contrôle cycle éditorial)
+  - GET  /diagnostic-flux                 (v2.6 — page HTML autonome)
   - GET  /api/azuracast/playlists
   - POST /api/azuracast/sync_cache
   - POST /api/azuracast/creer_playlist
@@ -64,10 +81,11 @@ import urllib.parse
 import ssl
 import subprocess as sp
 import threading
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 
 import pymysql
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
 
 from config import (
     CONFIG_JSON_PATH,
@@ -84,6 +102,77 @@ from blueprints.auth import login_requis
 
 
 azuracast_bp = Blueprint('azuracast', __name__)
+
+
+def _qualifier_sources_pousse_azura(cursor, db, song_ids):
+    """v2.5 — Passe les lignes sources (airvs_animateurs / airvs_shazam)
+    statut='matche' en statut='pousse_azura' quand le morceau lié
+    (match_song_id) a été copié vers AzuraCast (ou y était déjà).
+
+    Boucle le cycle éditorial complet :
+      Nouveau → Matché (corrélation/matching) → Diffusé (pousse_azura).
+    La ligne qualifiée sort du flux Pont (shazam.py v2.5 ne la remonte
+    plus dans le push) et affiche le badge « 📡 Diffusé ».
+
+    Non bloquant : tables/colonnes optionnelles (migrations R1/R2),
+    échec ignoré silencieusement.
+
+    Args:
+        cursor: curseur DB ouvert (DictCursor ou standard)
+        db: connexion DB (pour commit/rollback)
+        song_ids: liste d'IDs de la table songs copiés/confirmés AzuraCast
+
+    Returns:
+        nb total de lignes sources qualifiées
+    """
+    if not song_ids:
+        return 0
+    nb_total = 0
+    _ph = ",".join(["%s"] * len(song_ids))
+    for _tbl in ('airvs_animateurs', 'airvs_shazam'):
+        try:
+            cursor.execute(
+                f"UPDATE {_tbl} SET statut = 'pousse_azura' "
+                f"WHERE statut = 'matche' AND match_song_id IN ({_ph})",
+                tuple(song_ids)
+            )
+            nb_total += cursor.rowcount
+            db.commit()
+        except Exception as _e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            _logger.warning(f"[v2.5] qualification pousse_azura {_tbl} ignorée : {_e}")
+    if nb_total:
+        _logger.info(
+            f"[v2.5] {nb_total} ligne(s) source(s) 'matche' → 'pousse_azura' "
+            f"(morceau(x) {len(song_ids)} confirmé(s) dans AzuraCast)"
+        )
+    return nb_total
+
+
+def _ids_songs_par_chemins(cursor, chemins):
+    """v2.5 — Résout les IDs songs correspondant à des chemins de fichiers.
+    Retourne une liste d'IDs (curseur DictCursor ou standard accepté)."""
+    if not chemins:
+        return []
+    try:
+        _ph = ",".join(["%s"] * len(chemins))
+        cursor.execute(
+            f"SELECT ID FROM songs WHERE `path` IN ({_ph})",
+            tuple(chemins)
+        )
+        _ids = []
+        for r in cursor.fetchall():
+            try:
+                _ids.append(r['ID'])
+            except (TypeError, KeyError, IndexError):
+                _ids.append(r[0])
+        return [i for i in _ids if i is not None]
+    except Exception as _e:
+        _logger.warning(f"[v2.5] résolution IDs songs par chemins ignorée : {_e}")
+        return []
 
 
 # ══════════════════════════════════════════
@@ -744,6 +833,22 @@ def lancer_push_azura():
             db.commit()
             task_id = cursor.lastrowid
 
+        # v2.5 — fichiers DÉJÀ présents dans AzuraCast (poussés uniquement
+        # pour playlist) : qualification immédiate des lignes sources →
+        # badge « 📡 Diffusé » + sortie du flux Pont. Non bloquant.
+        # (HORS du `if fichiers` : un push « playlist seule » sur des
+        # fichiers déjà dans AzuraCast doit aussi qualifier les sources.)
+        try:
+            _paths_deja = [f.get('path', '') if isinstance(f, dict) else str(f)
+                           for f in (fichiers_deja_azura or [])]
+            _paths_deja = [p for p in _paths_deja if p]
+            if _paths_deja:
+                _ids_deja = _ids_songs_par_chemins(cursor, _paths_deja)
+                if _ids_deja:
+                    _qualifier_sources_pousse_azura(cursor, db, _ids_deja)
+        except Exception:
+            pass
+
         # Tâche 2 (optionnelle) : Playlist(s) — avec TOUS les fichiers (copiés + déjà AzuraCast)
         # ICI station_id est critique : la playlist est créée sur UNE station précise.
         playlist_task_ids = []
@@ -875,6 +980,21 @@ def lire_log_push():
                         updated += cursor.rowcount
                 if updated > 0:
                     db.commit()
+                # v2.5 — cycle éditorial complet : les lignes sources liées
+                # aux fichiers de la tâche passent 'pousse_azura' → badge
+                # « 📡 Diffusé » + sortie du flux Pont. (Appliqué sur TOUS
+                # les chemins de la tâche : un fichier exclu « déjà dans
+                # AzuraCast » est de toute façon déjà diffusé.)
+                try:
+                    _paths_tache = [f.get('path', '') if isinstance(f, dict) else str(f)
+                                    for f in fichiers]
+                    _paths_tache = [p for p in _paths_tache if p]
+                    if _paths_tache:
+                        _song_ids_copie = _ids_songs_par_chemins(cursor, _paths_tache)
+                        if _song_ids_copie:
+                            _qualifier_sources_pousse_azura(cursor, db, _song_ids_copie)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -1050,6 +1170,18 @@ def api_marquer_in_azuracast():
             )
             updated += cursor.rowcount
 
+        # v2.5 — qualification des lignes sources (cycle éditorial complet)
+        try:
+            _song_ids_marq = [int(s) for s in (ids or []) if s]
+            _paths_marq = [c for c in (fichiers or []) if c]
+            if _paths_marq:
+                _song_ids_marq.extend(_ids_songs_par_chemins(cursor, _paths_marq))
+            _song_ids_marq = sorted(set(_song_ids_marq))
+            if _song_ids_marq:
+                _qualifier_sources_pousse_azura(cursor, db, _song_ids_marq)
+        except Exception:
+            pass
+
         db.commit()
         cursor.close()
         db.close()
@@ -1176,6 +1308,446 @@ def api_azuracast_diagnostic():
         'default_station_id': _station_par_defaut(),
         'nombre_stations': len(stations)
     })
+
+
+# ══════════════════════════════════════════
+# v2.6 — DIAGNOSTIC FLUX ÉDITORIAL INTÉGRÉ
+# ══════════════════════════════════════════
+# Équivalent temps réel du fichier verification_v2.5.sql (client SQL type
+# HeidiSQL), intégré directement au dashboard : plus besoin d'ouvrir un
+# client SQL pour contrôler le cycle éditorial Nouveau → Matché → Diffusé.
+#   - GET /api/diagnostic/flux_editorial : données JSON (5 blocs de contrôle)
+#   - GET /diagnostic-flux               : page HTML autonome (bouton
+#     Actualiser + auto-rafraîchissement 30 s)
+# Lecture seule : aucune écriture DB dans ces endpoints.
+
+_PAGE_DIAGNOSTIC_FLUX = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIRVS — Diagnostic flux éditorial</title>
+<style>
+:root { --bg:#f1f5f9; --card:#ffffff; --ink:#0f172a; --muted:#64748b;
+        --accent:#1d4ed8; --line:#e2e8f0; }
+* { box-sizing:border-box; }
+body { margin:0; font-family:'Segoe UI',system-ui,Arial,sans-serif;
+       background:var(--bg); color:var(--ink); }
+header { background:#0f172a; color:#e2e8f0; padding:14px 22px;
+         display:flex; flex-wrap:wrap; align-items:center; gap:14px; }
+header h1 { font-size:16px; margin:0; font-weight:600; }
+header .sous { color:#94a3b8; font-size:12px; margin:4px 0 0; }
+.maj { font-size:12px; color:#94a3b8; }
+main { max-width:1150px; margin:20px auto; padding:0 16px 40px; }
+.verdict { border-radius:8px; padding:14px 18px; margin-bottom:18px;
+           font-size:14px; border:1px solid; }
+.verdict.ok { background:#f0fdf4; border-color:#bbf7d0; }
+.verdict.attention { background:#fffbeb; border-color:#fde68a; }
+.verdict.anomalie { background:#fef2f2; border-color:#fecaca; }
+.verdict ul { margin:6px 0 0 18px; padding:0; }
+.verdict li { margin:3px 0; }
+section { background:var(--card); border:1px solid var(--line);
+          border-radius:8px; margin-bottom:18px; overflow:hidden; }
+section h2 { font-size:14px; margin:0; padding:12px 16px;
+             background:#f8fafc; border-bottom:1px solid var(--line); }
+section h2 small { color:var(--muted); font-weight:400; }
+section h3 { font-size:12px; margin:0; padding:10px 16px 4px;
+             color:var(--muted); font-weight:600; text-transform:uppercase;
+             letter-spacing:.04em; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { text-align:left; padding:7px 12px; border-bottom:1px solid var(--line); }
+th { background:#f8fafc; font-weight:600; font-size:12px; color:#334155; }
+tr:last-child td { border-bottom:none; }
+td.n, th.n { text-align:right; font-variant-numeric:tabular-nums; }
+.vide { padding:12px 16px; color:var(--muted); font-size:13px; font-style:italic; }
+.erreur { padding:10px 16px; color:#b91c1c; font-size:12px; }
+.badge { display:inline-block; padding:1px 8px; border-radius:999px;
+         font-size:11px; font-weight:600; background:#e2e8f0; color:#334155; }
+.badge.nouveau { background:#dbeafe; color:#1e40af; }
+.badge.matche { background:#dcfce7; color:#166534; }
+.badge.pousse_azura { background:#fef9c3; color:#854d0e; }
+.badge.rejete, .badge.rejete_corrige, .badge.rejete_definitif
+       { background:#fee2e2; color:#991b1b; }
+button { background:var(--accent); color:#fff; border:none; border-radius:6px;
+         padding:8px 16px; font-size:13px; cursor:pointer; }
+button:hover { filter:brightness(1.12); }
+label.auto { font-size:12px; color:#cbd5e1; display:flex;
+             align-items:center; gap:5px; cursor:pointer; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>📡 Diagnostic du flux éditorial</h1>
+    <p class="sous">Cycle Nouveau → Matché → 📡 Diffusé — équivalent intégré de
+       verification_v2.5.sql (lecture seule, aucune écriture)</p>
+  </div>
+  <div style="margin-left:auto; display:flex; gap:12px; align-items:center;">
+    <label class="auto"><input type="checkbox" id="auto"> Auto 30 s</label>
+    <span class="maj" id="horodatage">—</span>
+    <button onclick="charger()">Actualiser</button>
+  </div>
+</header>
+<main>
+  <div id="verdict" class="verdict ok">Chargement…</div>
+  <section>
+    <h2>1 · Vue du cycle <small>— comptage par statut (bloc 1)</small></h2>
+    <div id="b1"></div>
+  </section>
+  <section>
+    <h2>2 · Les « Matché » qui remontent dans le Pont
+        <small>— statut matche + match_song_id, 50 derniers (bloc 2)</small></h2>
+    <p class="aide" style="margin:0; padding:8px 16px; font-size:12px;
+       color:var(--muted); border-bottom:1px solid var(--line);">Ces lignes
+       doivent réapparaître dans la prévisualisation de push (bouton
+       « Préremplir ») — sauf si leur morceau est déjà IN_AZURACAST.</p>
+    <div id="b2"></div>
+  </section>
+  <section>
+    <h2>3 · Matchés dont le morceau est déjà dans AzuraCast
+        <small>— attendu 0 après le 1er « Préremplir » v2.5 (bloc 3)</small></h2>
+    <div id="b3"></div>
+  </section>
+  <section>
+    <h2>4 · Les « 📡 Diffusé » (pousse_azura)
+        <small>— alimenté depuis la v2.5, 30 derniers (bloc 4)</small></h2>
+    <div id="b4"></div>
+  </section>
+  <section>
+    <h2>5 · Incohérences résiduelles <small>— surveillance (bloc 5)</small></h2>
+    <div id="b5"></div>
+  </section>
+</main>
+<script>
+const E = s => { const d = document.createElement('div');
+                 d.textContent = (s == null ? '' : String(s)); return d.innerHTML; };
+const badge = s => (s == null ? '' :
+  '<span class="badge ' + E(s).replace(/[^a-z_]/g, '') + '">' + E(s) + '</span>');
+function tbl(cols, lignes, vide) {
+  if (!lignes || !lignes.length) return '<div class="vide">' + vide + '</div>';
+  let h = '<table><tr>';
+  cols.forEach(c => h += '<th' + (c.n ? ' class="n"' : '') + '>' + E(c.t) + '</th>');
+  h += '</tr>';
+  lignes.forEach(l => {
+    h += '<tr>';
+    cols.forEach(c => {
+      const v = l[c.k];
+      h += '<td' + (c.n ? ' class="n"' : '') + '>' +
+           (c.f ? c.f(v, l) : E(v)) + '</td>';
+    });
+    h += '</tr>';
+  });
+  return h + '</table>';
+}
+const C_VUE = [{k:'statut', t:'Statut', f:badge}, {k:'nb', t:'Lignes', n:true}];
+const C_POU = [{k:'id', t:'ID', n:true}, {k:'artiste', t:'Artiste'},
+  {k:'titre', t:'Titre'}, {k:'statut', t:'Statut', f:badge},
+  {k:'match_passe', t:'Passé de match'}, {k:'match_song_id', t:'Song ID', n:true},
+  {k:'rdj_artiste', t:'RadioDJ · Artiste'}, {k:'rdj_titre', t:'RadioDJ · Titre'},
+  {k:'badge_azura', t:'Badge Azura'}];
+const C_AZURA = [{k:'id', t:'ID', n:true}, {k:'artiste', t:'Artiste'},
+  {k:'titre', t:'Titre'}, {k:'match_song_id', t:'Song ID', n:true},
+  {k:'badge_azura', t:'Badge Azura'}];
+const C_DIFF = [{k:'id', t:'ID', n:true}, {k:'artiste', t:'Artiste'},
+  {k:'titre', t:'Titre'}, {k:'match_song_id', t:'Song ID', n:true},
+  {k:'match_passe', t:'Passé de match'}];
+function charger() {
+  fetch('/api/diagnostic/flux_editorial').then(r => r.json()).then(j => {
+    if (j.status !== 'ok') {
+      document.getElementById('verdict').className = 'verdict anomalie';
+      document.getElementById('verdict').innerHTML =
+        'Erreur : ' + E(j.message || 'inconnue');
+      return;
+    }
+    document.getElementById('horodatage').textContent =
+      'au ' + (j.genere_le || '—');
+    // Verdict global
+    const v = j.verdict || {};
+    let h = '<strong>État : ' + E(v.etat || '?') + '</strong><ul>';
+    (v.messages || []).forEach(m => h += '<li>' + E(m) + '</li>');
+    h += '</ul>';
+    (j.erreurs || []).forEach(e => h += '<div class="erreur">⚠ ' + E(e) + '</div>');
+    const vd = document.getElementById('verdict');
+    vd.className = 'verdict ' + (v.etat || 'ok');
+    vd.innerHTML = h;
+    // Bloc 1 — deux sous-tables
+    let b1 = '<h3>Animateurs</h3>' +
+      tbl(C_VUE, (j.tables || {}).animateurs, 'Aucune ligne.') +
+      '<h3>Shazam</h3>' +
+      tbl(C_VUE, (j.tables || {}).shazam, 'Aucune ligne.');
+    document.getElementById('b1').innerHTML = b1;
+    // Bloc 2
+    document.getElementById('b2').innerHTML =
+      tbl(C_POU, j.matches_a_pousser,
+          'Aucune ligne « matche » — tout a déjà été poussé ou rien n\u2019est matché.');
+    // Bloc 3
+    document.getElementById('b3').innerHTML =
+      tbl(C_AZURA, j.deja_azura_non_qualifies,
+          'Rien à faire — aucun matché attend un morceau déjà présent dans AzuraCast.');
+    // Bloc 4 — deux sous-tables
+    let b4 = '<h3>Animateurs</h3>' +
+      tbl(C_DIFF, (j.diffuses || {}).animateurs,
+          'Aucune ligne « pousse_azura » — le compteur se remplit au premier push.') +
+      '<h3>Shazam</h3>' +
+      tbl(C_DIFF, (j.diffuses || {}).shazam, 'Aucune ligne « pousse_azura ».');
+    document.getElementById('b4').innerHTML = b4;
+    // Bloc 5 — trois sous-blocs
+    const inc = j.incoherences || {};
+    let b5 = '<h3>5a · Matché sans match_song_id</h3>' +
+      tbl([{k:'id', t:'ID', n:true}, {k:'artiste', t:'Artiste'},
+           {k:'titre', t:'Titre'}, {k:'match_passe', t:'Passé de match'}],
+          inc.matche_sans_song_id,
+          'Rien — cohérent.') +
+      '<h3>5b · Diffusé sans morceau (anomalie vraie)</h3>' +
+      tbl([{k:'id', t:'ID', n:true}, {k:'artiste', t:'Artiste'},
+           {k:'titre', t:'Titre'}],
+          inc.pousse_azura_sans_morceau,
+          'Rien — cohérent.') +
+      '<h3>5c · Diffusé pointant un morceau non IN_AZURACAST</h3>' +
+      tbl(C_AZURA, inc.badge_non_conforme,
+          'Rien — tous les badges RadioDJ confirment le statut.');
+    document.getElementById('b5').innerHTML = b5;
+  }).catch(e => {
+    document.getElementById('verdict').className = 'verdict anomalie';
+    document.getElementById('verdict').innerHTML =
+      'Erreur réseau : ' + E(String(e));
+  });
+}
+let tid = null;
+document.getElementById('auto').addEventListener('change', function () {
+  if (tid) { clearInterval(tid); tid = null; }
+  if (this.checked) tid = setInterval(charger, 30000);
+});
+charger();
+</script>
+</body>
+</html>
+"""
+
+
+def _json_safe(v):
+    """v2.6 — Rend une valeur DB sérialisable en JSON (Decimal, date…)."""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, Decimal):
+        try:
+            return int(v) if v == v.to_integral_value() else float(v)
+        except Exception:
+            return str(v)
+    if isinstance(v, (datetime, date)):
+        return v.isoformat(sep=' ')
+    if isinstance(v, bytes):
+        return v.decode('utf-8', 'replace')
+    return str(v)
+
+
+def _diag_nettoie_lignes(rows):
+    """v2.6 — Convertit les lignes DictCursor en dicts JSON-sûrs."""
+    return [{k: _json_safe(x) for k, x in r.items()} for r in rows]
+
+
+def _diag_verdict(data):
+    """v2.6 — État global + messages d'action à partir des blocs collectés."""
+    messages = []
+    etat = 'ok'
+    inc = data.get('incoherences') or {}
+    n_b3 = len(data.get('deja_azura_non_qualifies') or [])
+    n_5a = len(inc.get('matche_sans_song_id') or [])
+    n_5b = len(inc.get('pousse_azura_sans_morceau') or [])
+    n_5c = len(inc.get('badge_non_conforme') or [])
+    n_diff = (len((data.get('diffuses') or {}).get('animateurs') or []) +
+              len((data.get('diffuses') or {}).get('shazam') or []))
+    if n_b3:
+        etat = 'attention'
+        messages.append(
+            f"{n_b3} ligne(s) « Matché » dont le morceau est déjà dans "
+            f"AzuraCast : lancez un « Préremplir » dans le Pont — la v2.5 "
+            f"les qualifiera automatiquement « 📡 Diffusé ».")
+    if n_5a:
+        if etat == 'ok':
+            etat = 'attention'
+        messages.append(
+            f"{n_5a} ligne(s) « Matché » sans match_song_id : elles seront "
+            f"retentées automatiquement au prochain « Préremplir ».")
+    if n_5b:
+        etat = 'anomalie'
+        messages.append(
+            f"{n_5b} ligne(s) « Diffusé » sans match_song_id : anomalie "
+            f"(la qualification exige un morceau lié). Vérifiez la table "
+            f"airvs_animateurs.")
+    if n_5c:
+        messages.append(
+            f"{n_5c} ligne(s) « Diffusé » pointent un morceau non "
+            f"IN_AZURACAST (marquage manuel antérieur — sans gravité).")
+    if not messages:
+        messages.append(
+            "Cycle éditorial cohérent : nouveau → matché → 📡 Diffusé "
+            "(pousse_azura). Aucune action requise.")
+    if not n_diff and etat == 'ok':
+        messages.append(
+            "Aucune ligne « Diffusé » pour l'instant : le compteur se "
+            "remplit au premier push (COPIE_FICHIERS), ou au « Préremplir » "
+            "v2.5 si des morceaux sont déjà IN_AZURACAST.")
+    return {'etat': etat, 'messages': messages}
+
+
+def _diagnostic_flux_editorial_data():
+    """v2.6 — Rassemble les 5 blocs de contrôle du flux éditorial.
+
+    Équivalent lecture seule du fichier verification_v2.5.sql :
+      bloc 1 : vue du cycle (comptage par statut, airvs_animateurs/airvs_shazam)
+      bloc 2 : les « matché » qui doivent remonter dans le Pont
+      bloc 3 : matchés dont le morceau est déjà IN_AZURACAST
+      bloc 4 : les « pousse_azura » (📡 Diffusé)
+      bloc 5 : incohérences (5a/5b/5c)
+
+    Défensif : chaque bloc est indépendant — une erreur SQL n'interrompt
+    pas les autres (elle alimente la liste 'erreurs').
+
+    Returns:
+        dict JSON-sérialisable, avec 'verdict' {etat, messages}.
+    """
+    data = {
+        'genere_le': datetime.now().isoformat(sep=' ', timespec='seconds'),
+        'tables': {'animateurs': [], 'shazam': []},
+        'matches_a_pousser': [],
+        'deja_azura_non_qualifies': [],
+        'diffuses': {'animateurs': [], 'shazam': []},
+        'incoherences': {
+            'matche_sans_song_id': [],
+            'pousse_azura_sans_morceau': [],
+            'badge_non_conforme': [],
+        },
+        'erreurs': [],
+    }
+    db = get_db_connection()
+    if not db:
+        data['erreurs'].append('Connexion MySQL impossible')
+        data['verdict'] = _diag_verdict(data)
+        return data
+    cursor = db.cursor(pymysql.cursors.DictCursor)
+    try:
+        # ── bloc 1 : vue du cycle ──
+        for cle, tbl in (('animateurs', 'airvs_animateurs'),
+                         ('shazam', 'airvs_shazam')):
+            try:
+                cursor.execute(
+                    f"SELECT statut, COUNT(*) AS nb FROM {tbl} "
+                    f"GROUP BY statut ORDER BY nb DESC"
+                )
+                data['tables'][cle] = _diag_nettoie_lignes(cursor.fetchall())
+            except Exception as e:
+                data['erreurs'].append(f"bloc1 {tbl} : {e}")
+
+        # ── bloc 2 : les matché qui doivent remonter ──
+        try:
+            cursor.execute(
+                "SELECT a.id, a.artiste, a.titre, a.statut, a.match_passe, "
+                "       a.match_song_id, s.artist AS rdj_artiste, "
+                "       s.title AS rdj_titre, s.comments AS badge_azura "
+                "FROM airvs_animateurs a "
+                "LEFT JOIN songs s ON s.ID = a.match_song_id "
+                "WHERE a.statut = 'matche' ORDER BY a.id DESC LIMIT 50"
+            )
+            data['matches_a_pousser'] = _diag_nettoie_lignes(cursor.fetchall())
+        except Exception as e:
+            data['erreurs'].append(f"bloc2 : {e}")
+
+        # ── bloc 3 : matchés dont le morceau est déjà IN_AZURACAST ──
+        try:
+            cursor.execute(
+                "SELECT a.id, a.artiste, a.titre, a.match_song_id, "
+                "       s.comments AS badge_azura, a.statut "
+                "FROM airvs_animateurs a "
+                "JOIN songs s ON s.ID = a.match_song_id "
+                "WHERE a.statut = 'matche' "
+                "  AND s.comments = 'IN_AZURACAST' LIMIT 50"
+            )
+            data['deja_azura_non_qualifies'] = \
+                _diag_nettoie_lignes(cursor.fetchall())
+        except Exception as e:
+            data['erreurs'].append(f"bloc3 : {e}")
+
+        # ── bloc 4 : les nouveaux « Diffusé » (pousse_azura) ──
+        for cle, tbl in (('animateurs', 'airvs_animateurs'),
+                         ('shazam', 'airvs_shazam')):
+            try:
+                cursor.execute(
+                    f"SELECT id, artiste, titre, match_song_id, match_passe "
+                    f"FROM {tbl} WHERE statut = 'pousse_azura' "
+                    f"ORDER BY id DESC LIMIT 30"
+                )
+                data['diffuses'][cle] = _diag_nettoie_lignes(cursor.fetchall())
+            except Exception as e:
+                data['erreurs'].append(f"bloc4 {tbl} : {e}")
+
+        # ── bloc 5 : incohérences résiduelles ──
+        # 5a. matché sans song_id (retentés au prochain Préremplir)
+        try:
+            cursor.execute(
+                "SELECT id, artiste, titre, statut, match_passe "
+                "FROM airvs_animateurs "
+                "WHERE statut = 'matche' AND match_song_id IS NULL LIMIT 20"
+            )
+            data['incoherences']['matche_sans_song_id'] = \
+                _diag_nettoie_lignes(cursor.fetchall())
+        except Exception as e:
+            data['erreurs'].append(f"bloc5a : {e}")
+        # 5b. pousse_azura sans morceau (anomalie vraie)
+        try:
+            cursor.execute(
+                "SELECT id, artiste, titre FROM airvs_animateurs "
+                "WHERE statut = 'pousse_azura' "
+                "AND match_song_id IS NULL LIMIT 20"
+            )
+            data['incoherences']['pousse_azura_sans_morceau'] = \
+                _diag_nettoie_lignes(cursor.fetchall())
+        except Exception as e:
+            data['erreurs'].append(f"bloc5b : {e}")
+        # 5c. badge RadioDJ vs statut source
+        try:
+            cursor.execute(
+                "SELECT a.id, a.artiste, a.titre, a.match_song_id, "
+                "       s.comments AS badge_azura "
+                "FROM airvs_animateurs a "
+                "JOIN songs s ON s.ID = a.match_song_id "
+                "WHERE a.statut = 'pousse_azura' "
+                "  AND (s.comments IS NULL OR s.comments <> 'IN_AZURACAST') "
+                "LIMIT 20"
+            )
+            data['incoherences']['badge_non_conforme'] = \
+                _diag_nettoie_lignes(cursor.fetchall())
+        except Exception as e:
+            data['erreurs'].append(f"bloc5c : {e}")
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        try:
+            db.close()
+        except Exception:
+            pass
+    data['verdict'] = _diag_verdict(data)
+    return data
+
+
+@azuracast_bp.route('/api/diagnostic/flux_editorial')
+@login_requis
+def api_diagnostic_flux_editorial():
+    """v2.6 — Contrôle du flux éditorial (équivalent verification_v2.5.sql).
+    Lecture seule : aucune écriture DB."""
+    try:
+        return jsonify({'status': 'ok', **_diagnostic_flux_editorial_data()})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@azuracast_bp.route('/diagnostic-flux')
+@login_requis
+def page_diagnostic_flux():
+    """v2.6 — Page HTML autonome : contrôle du flux éditorial sans HeidiSQL."""
+    return Response(_PAGE_DIAGNOSTIC_FLUX, mimetype='text/html; charset=utf-8')
 
 
 @azuracast_bp.route('/api/azuracast/playlists')

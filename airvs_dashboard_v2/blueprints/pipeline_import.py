@@ -1,3 +1,6 @@
+# ██████ AIRVS PATCH PROGRAMMATION v2.2 — 2026-10-08 — ZONE DOWNLOAD AI ██████
+# Corrélation auto multi-passes après import (ciblée titres importés) + suivi terminal
+# Vérif déploiement : cette ligne doit être la 1re ligne du fichier sur .39
 # ════════════════════════════════════════════════════════════════════════════════════════
 # ████  ✅✅✅  C'EST CE FICHIER-CI À TÉLÉCHARGER  ✅✅✅  ████
 # ════════════════════════════════════════════════════════════════════════════════════════
@@ -120,7 +123,9 @@ Routes manquants (airvs_manquants) :
 import os
 import re
 import json
+import time
 import shutil
+import threading
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -131,7 +136,8 @@ from urllib.error import URLError, HTTPError
 import pymysql
 from flask import Blueprint, request, jsonify, send_file
 
-from utils import _logger, get_db_connection
+from utils import (_logger, get_db_connection, correler_manquants_radiodj,
+                   correler_import_cible)
 from blueprints.auth import login_requis
 from config import (
     SUSPECTS_DIR, FOLDERSYNC_WINDOWS_BASE, MP3GAIN_PATH,
@@ -334,17 +340,192 @@ def api_pipeline_status(tache_id):
                      f"(type: {tache['type_action']})"
         }), 400
 
+    # v2.2 — à la fin d'un pipeline d'import réussi, corréler UNIQUEMENT
+    # les titres fraîchement importés : extraits du log worker (lignes
+    # « Déplacé : Artiste - Titre -> fichier »), puis passes minutées en
+    # arrière-plan (le scan FolderSync de RadioDJ est asynchrone après le
+    # RunEvent). Fallback passe globale si le log n'est pas exploitable.
+    correlation_suivi = None
+    if tache['statut'] == 'termine' and tache_id not in _pipeline_corr_terminees:
+        _pipeline_corr_terminees.add(tache_id)
+
+        _cibles = []
+        try:
+            for _m in re.finditer(
+                    r'^\s*Déplacé\s*:\s*(.+?)\s+-\s+(.+?)\s+->\s',
+                    tache['log_resultat'] or '', re.MULTILINE):
+                # v2.4 — normalisation \s+ : les tags ID3 de compilations
+                # portent parfois tabulations / retours ligne / insécables
+                # (le \s+-\s+ du motif n'absorbe que les blancs adjacents
+                # au tiret, pas ceux internes au couple).
+                _a = re.sub(r'\s+', ' ', _m.group(1)).strip()
+                _t = re.sub(r'\s+', ' ', _m.group(2)).strip()
+                if _a and _t and {'artiste': _a, 'titre': _t} not in _cibles:
+                    _cibles.append({'artiste': _a, 'titre': _t})
+        except Exception:
+            _cibles = []
+
+        _cle = f'pipeline_{tache_id}'
+        correlation_suivi = {'cle': _cle, 'passes': _CORR_PASSES,
+                             'intervalle_s': _CORR_INTERVALLE_S}
+        if _cibles:
+            threading.Thread(
+                target=_corriger_cibles_en_arriere_plan,
+                args=(_cibles, _cle, f'import de masse #{tache_id}'),
+                daemon=True,
+            ).start()
+        else:
+            # Log sans lignes « Déplacé : » exploitables (dry-run, format
+            # changé...) → passe globale comme en v2, annoncée dans le suivi
+            _logger.warning(f'v2.2 pipeline #{tache_id} : aucune ligne '
+                            f'« Déplacé : » dans le log → corrélation globale')
+
+            def _corr_globale(tid=tache_id, cle=_cle):
+                try:
+                    time.sleep(_CORR_DELAI_1_S)
+                    _nb, _ = correler_manquants_radiodj(limite=200,
+                                                        logger=_logger)
+                    _corr_log(cle, f'[corrélation] passe globale (log sans '
+                                   f'« Déplacé : » exploitable) : '
+                                   f'{_nb} manquant(s) corrélé(s)')
+                except Exception as _e:
+                    _corr_log(cle, f'[corrélation] erreur : {_e}')
+                _corr_log(cle, f'[corrélation] {_CORR_TERMINE}')
+
+            threading.Thread(target=_corr_globale, daemon=True).start()
+
     return jsonify({
         "tache_id": tache['id'],
         "statut": tache['statut'],
         "date_creation": tache['date_creation'].isoformat() if tache['date_creation'] else None,
         "date_fin": tache['date_fin'].isoformat() if tache['date_fin'] else None,
         "log": tache['log_resultat'] or '',
+        "correlation_suivi": correlation_suivi,
+        "correlation_lines": (list(_corr_suivi_logs.get(correlation_suivi['cle'], []))
+                              if correlation_suivi else []),
     })
 
 
 import platform
 import signal
+
+# v2 — tâches IMPORT_MASSE déjà corrélées (anti-doublon, mémoire vive).
+# En cas de redémarrage du dashboard, la corrélation repart mais reste
+# idempotente (UPDATE ... WHERE statut='en_attente' ne réécrit rien).
+_pipeline_corr_terminees = set()
+
+# ════════════════════════════════════════════════════════════════════
+# v2.2 — Corrélation multi-passes en arrière-plan + suivi terminal
+# Le scan FolderSync de RadioDJ est asynchrone après le RunEvent :
+# au lieu d'un unique essai bloquant, on re-tente par passes minutées
+# UNIQUEMENT sur les titres fraîchement importés, en publiant chaque
+# étape dans un buffer de suivi affiché dans le terminal d'import &
+# validation (même philosophie que la surveillance chaînée des
+# playlists AzuraCast : polling qui ne s'arrête qu'au terminateur).
+# ════════════════════════════════════════════════════════════════════
+_CORR_PASSES = 6           # nb max de passes de corrélation
+_CORR_DELAI_1_S = 5        # délai avant la 1re passe (scan FolderSync)
+_CORR_INTERVALLE_S = 10    # délai entre deux passes
+_CORR_TERMINE = '=== CORRELATION TERMINEE ==='
+
+_corr_suivi_logs = {}      # clé de suivi -> [lignes horodatées]
+_corr_suivi_lock = threading.Lock()
+
+
+def _corr_log(cle, ligne):
+    """Ajoute une ligne horodatée au buffer de suivi (30 derniers suivis)."""
+    ts = datetime.now().strftime('%H:%M:%S')
+    with _corr_suivi_lock:
+        _corr_suivi_logs.setdefault(cle, []).append(f'[{ts}] {ligne}')
+        if len(_corr_suivi_logs) > 30:
+            for _k in list(_corr_suivi_logs.keys())[:-30]:
+                _corr_suivi_logs.pop(_k, None)
+
+
+def _corriger_cibles_en_arriere_plan(cibles, cle_suivi, contexte=''):
+    """v2.2 — Corrélation ciblée multi-passes dans un thread daemon.
+
+    cibles : liste [{'artiste', 'titre'}] — UNIQUEMENT les titres venant
+    d'être importés. Passe 1 après _CORR_DELAI_1_S puis toutes les
+    _CORR_INTERVALLE_S, au max _CORR_PASSES passes ; arrêt anticipé dès
+    que toutes les cibles sont résolues (présentes dans RadioDJ).
+
+    Chaque passe publie ses résultats dans le buffer de suivi (lu par
+    /api/manquants/correlation-suivi et affiché dans le terminal
+d'import & validation) et dans le log applicatif.
+    """
+    _c = []
+    for c in (cibles or []):
+        # v2.4 — normalisation \s+ (cohérence avec l'extraction et les
+        # comparaisons normalisées de correler_import_cible).
+        _a = re.sub(r'\s+', ' ', str(c.get('artiste') or '')).strip()
+        _t = re.sub(r'\s+', ' ', str(c.get('titre') or '')).strip()
+        if _a and _t and {'artiste': _a, 'titre': _t} not in _c:
+            _c.append({'artiste': _a, 'titre': _t})
+    if not _c:
+        return
+    _corr_log(cle_suivi, f'[corrélation] démarrage — {len(_c)} titre(s) '
+                         f'importé(s) à corréler ({contexte}) : '
+                         f'{_CORR_PASSES} passes max / {_CORR_INTERVALLE_S}s')
+    restantes = list(_c)
+    nb_trouves = 0
+    for passe in range(1, _CORR_PASSES + 1):
+        time.sleep(_CORR_DELAI_1_S if passe == 1 else _CORR_INTERVALLE_S)
+        encore = []
+        for c in restantes:
+            try:
+                r = correler_import_cible(c['artiste'], c['titre'],
+                                          logger=_logger)
+            except Exception as e:
+                _corr_log(cle_suivi, f'[corrélation] passe {passe} : erreur '
+                                     f'« {c["artiste"]} — {c["titre"]} » : {e}')
+                encore.append(c)
+                continue
+            if not r.get('trouve'):
+                encore.append(c)
+                continue
+            nb_trouves += 1
+            _src = r.get('sources_matchees') or (0, 0)
+            _nb_src = _src[0] + _src[1]
+            _nb_mq = r.get('manquants_clotures', 0) or 0
+            if _nb_mq or _nb_src:
+                _corr_log(cle_suivi, f'[corrélation] passe {passe} : ✓ '
+                                     f'« {c["artiste"]} — {c["titre"]} » '
+                                     f'→ RadioDJ ID {r.get("song_id")} — '
+                                     f'manquant(s) clôturé(s) : {_nb_mq}, '
+                                     f'source(s) Matché : {_nb_src}')
+            else:
+                _corr_log(cle_suivi, f'[corrélation] passe {passe} : ✓ '
+                                     f'« {c["artiste"]} — {c["titre"]} » '
+                                     f'dans RadioDJ (ID {r.get("song_id")}) '
+                                     f'— aucun manquant correspondant')
+            # v2.4 — manquants proches non clôturés (couple différent après
+            # normalisation) : visibles dans le suivi au lieu de disparaître
+            # dans l'ellipse « aucun manquant correspondant ».
+            for _p in (r.get('manquants_proches') or [])[:3]:
+                _corr_log(cle_suivi, f'[corrélation] passe {passe} : ⚠ '
+                                     f'manquant proche non clôturé '
+                                     f'(couple différent après normalisation) '
+                                     f': « {_p[0]} — {_p[1]} »')
+        restantes = encore
+        if restantes and passe < _CORR_PASSES:
+            _corr_log(cle_suivi, f'[corrélation] passe {passe}/{_CORR_PASSES} : '
+                                 f'{len(_c) - len(restantes)}/{len(_c)} '
+                                 f'résolu(s) — nouvelle passe dans '
+                                 f'{_CORR_INTERVALLE_S}s (scan FolderSync '
+                                 f'encore en cours)')
+        if not restantes:
+            break
+    _sans = len(_c) - nb_trouves
+    if _sans:
+        _corr_log(cle_suivi, f'[corrélation] stop après {_CORR_PASSES} passes : '
+                             f'{_sans} titre(s) toujours absent(s) de RadioDJ '
+                             f'(ou scan plus long) — bouton 🔗 disponible')
+    _corr_log(cle_suivi, f'[corrélation] {_CORR_TERMINE} '
+                         f'{nb_trouves}/{len(_c)} titre(s) présent(s) '
+                         f'dans RadioDJ')
+    _logger.info(f'v2.2 {cle_suivi} : corrélation terminée — '
+                 f'{nb_trouves}/{len(_c)} titre(s) trouvé(s)')
 
 # ── Racines dynamiques (Option B) ────────────────────────────────────────
 # Les racines du navigateur de dossiers sont stockées en DB (airvs_browse_roots).
@@ -408,7 +589,9 @@ def _assurer_schema_browse_roots():
 
         # Peuplement par défaut si table vide
         cursor.execute("SELECT COUNT(*) FROM airvs_browse_roots")
-        count = cursor.fetchone()[0]
+        # DictCursor global : jamais fetchone()[0] (KeyError) — accès dict-safe
+        _row_cnt = cursor.fetchone()
+        count = list(_row_cnt.values())[0] if _row_cnt else 0
         if count == 0:
             defaults = [
                 ('U:/', drive_labels['U:/'], 1),
@@ -806,7 +989,8 @@ def api_browse_roots_add():
 
         # Position max + 1
         cursor.execute("SELECT COALESCE(MAX(pos), 0) + 1 FROM airvs_browse_roots")
-        next_pos = cursor.fetchone()[0]
+        _row_pos = cursor.fetchone()
+        next_pos = (list(_row_pos.values())[0] if _row_pos else 1) or 1
 
         if not label:
             # Auto-label
@@ -1701,6 +1885,36 @@ def api_suspect_validate():
     except Exception as e:
         sync_result = {"ok": False, "message": str(e)}
 
+    # v2.2 — Corrélation Manquants ↔ RadioDJ ciblée sur le titre importé :
+    # 1re tentative immédiate (le scan est parfois déjà terminé), puis si
+    # le titre n'est pas encore dans RadioDJ, passes minutées en arrière-
+    # plan (scan FolderSync asynchrone après le RunEvent) avec suivi
+    # affiché dans le journal suspects (correlation_suivi).
+    correlation = {'trouve': False, 'song_id': None,
+                   'manquants_clotures': 0, 'sources_matchees': (0, 0)}
+    correlation_suivi = None
+    if sync_result.get('ok'):
+        try:
+            _tags_val = _lire_tags_suspect(dst) or {}
+            _art_val = str(_tags_val.get('artist') or '').strip()
+            _tit_val = str(_tags_val.get('title') or '').strip()
+            if _art_val and _tit_val:
+                correlation = correler_import_cible(
+                    _art_val, _tit_val, logger=_logger)
+                if not correlation.get('trouve'):
+                    _cle_suivi = f'suspect_{int(time.time())}'
+                    correlation_suivi = {'cle': _cle_suivi,
+                                         'passes': _CORR_PASSES,
+                                         'intervalle_s': _CORR_INTERVALLE_S}
+                    threading.Thread(
+                        target=_corriger_cibles_en_arriere_plan,
+                        args=([{'artiste': _art_val, 'titre': _tit_val}],
+                              _cle_suivi, f'suspect {filename}'),
+                        daemon=True,
+                    ).start()
+        except Exception as _e:
+            _logger.warning(f"v2 corrélation suspect : ignorée : {_e}")
+
     # Enregistrer la decision dans suspects_validated
     _enregistrer_decision_suspect(filename, 'valide', sidecar=sidecar_val)
 
@@ -1712,6 +1926,8 @@ def api_suspect_validate():
         "destination": str(sync_dir),
         "mp3gain": mp3gain_result,
         "sync_radiodj": sync_result,
+        "correlation": correlation,
+        "correlation_suivi": correlation_suivi,
     })
 
 
@@ -1851,6 +2067,33 @@ def api_suspect_edit_validate():
     except Exception as e:
         sync_result = {"ok": False, "message": str(e)}
 
+    # v2.2 — Corrélation ciblée sur le titre importé (tags corrigés =
+    # la référence de recherche) : tentative immédiate + passes en
+    # arrière-plan si le scan FolderSync n'est pas encore passé.
+    correlation = {'trouve': False, 'song_id': None,
+                   'manquants_clotures': 0, 'sources_matchees': (0, 0)}
+    correlation_suivi = None
+    if sync_result.get('ok'):
+        try:
+            _art_ev = str(tag_values.get('artist') or '').strip()
+            _tit_ev = str(tag_values.get('title') or '').strip()
+            if _art_ev and _tit_ev:
+                correlation = correler_import_cible(
+                    _art_ev, _tit_ev, logger=_logger)
+                if not correlation.get('trouve'):
+                    _cle_suivi = f'suspect_{int(time.time())}'
+                    correlation_suivi = {'cle': _cle_suivi,
+                                         'passes': _CORR_PASSES,
+                                         'intervalle_s': _CORR_INTERVALLE_S}
+                    threading.Thread(
+                        target=_corriger_cibles_en_arriere_plan,
+                        args=([{'artiste': _art_ev, 'titre': _tit_ev}],
+                              _cle_suivi, f'suspect {filename} (tags corrigés)'),
+                        daemon=True,
+                    ).start()
+        except Exception as _e:
+            _logger.warning(f"v2 corrélation edit-validate : ignorée : {_e}")
+
     # Enregistrer la decision dans suspects_validated
     # Pour edit-validate, les tags ont pu etre modifies -> utiliser les nouveaux tags
     _enregistrer_decision_suspect(
@@ -1867,6 +2110,8 @@ def api_suspect_edit_validate():
         "destination": str(sync_dir),
         "mp3gain": mp3gain_result,
         "sync_radiodj": sync_result,
+        "correlation": correlation,
+        "correlation_suivi": correlation_suivi,
     })
 
 
@@ -2002,7 +2247,7 @@ def api_manquants_liste():
         if source and source in ('prefill_sheets', 'shazam', 'animateurs'):
             where_clauses.append("source = %s")
             params.append(source)
-        if statut and statut in ('en_attente', 'importe', 'resolu'):
+        if statut and statut in ('en_attente', 'importe', 'resolu', 'rejete', 'rejete_corrigé'):
             where_clauses.append("statut = %s")
             params.append(statut)
         if q:
@@ -2026,6 +2271,25 @@ def api_manquants_liste():
         )
         rows = cursor.fetchall()
 
+        # v2 — matérialiser le lien : pour les manquants importés,
+        # attacher les infos du titre RadioDJ correspondant (via id_import
+        # → radiodb.songs). Affiché sous le titre dans l'onglet Manquants.
+        _ids_import = [r['id_import'] for r in rows
+                       if r.get('statut') == 'importe' and r.get('id_import')]
+        _rdj = {}
+        if _ids_import:
+            try:
+                cursor.execute(
+                    "SELECT ID, artist, title, path FROM radiodb.songs "
+                    "WHERE ID IN (" + ",".join(["%s"] * len(_ids_import)) + ")",
+                    _ids_import
+                )
+                for _s in cursor.fetchall():
+                    _rdj[_s['ID']] = _s
+            except Exception as _e:
+                _logger.warning(
+                    f"v2 enrichissement manquants RadioDJ ignorée : {_e}")
+
         # Serializer les datetime
         items = []
         for r in rows:
@@ -2035,6 +2299,12 @@ def api_manquants_liste():
                     item[k] = v.isoformat()
                 elif hasattr(v, 'strftime'):
                     item[k] = v.strftime('%Y-%m-%d %H:%M:%S')
+            if item.get('statut') == 'importe' \
+                    and item.get('id_import') and item['id_import'] in _rdj:
+                _s = _rdj[item['id_import']]
+                item['import_artist'] = _s.get('artist')
+                item['import_title'] = _s.get('title')
+                item['import_file'] = os.path.basename(str(_s.get('path') or ''))
             items.append(item)
 
         cursor.close()
@@ -2221,10 +2491,43 @@ def api_manquants_corriger():
 
         # 3. Marquer l'originale comme rejetée-corigée
         if has_statut:
-            cursor.execute(
-                f"UPDATE {table_sql} SET statut = 'rejete_corrige' WHERE id = %s",
-                (row_id,)
-            )
+            try:
+                cursor.execute(
+                    f"UPDATE {table_sql} SET statut = 'rejete_corrige' WHERE id = %s",
+                    (row_id,)
+                )
+            except Exception as _e_enum:
+                # v2.1 — auto-réparation : si l'ENUM ne contient pas
+                # 'rejete_corrige' (migration R1-bis non appliquée — ex.
+                # DictCursor KeyError), on tente l'ALTER inline puis on
+                # retente ; en dernier recours on retombe sur 'rejete'
+                # (toujours présent) : la correction ne doit JAMAIS échouer
+                # pour ce simple marquage.
+                try:
+                    db.rollback()
+                    cursor.execute(
+                        "ALTER TABLE %s MODIFY COLUMN statut "
+                        "ENUM('nouveau','matche','pousse_azura','rejete','rejete_corrige') DEFAULT 'nouveau'"
+                        % table_sql
+                    )
+                    db.commit()
+                    cursor.execute(
+                        f"UPDATE {table_sql} SET statut = 'rejete_corrige' WHERE id = %s",
+                        (row_id,)
+                    )
+                    _logger.info(f"[manquants/corriger] ENUM statut auto-enrichi avec 'rejete_corrige' sur {table_sql}")
+                except Exception as _e2:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    _logger.warning(
+                        f"[manquants/corriger] statut 'rejete_corrige' indisponible "
+                        f"({_e2}) → fallback 'rejete' pour la ligne {row_id}")
+                    cursor.execute(
+                        f"UPDATE {table_sql} SET statut = 'rejete' WHERE id = %s",
+                        (row_id,)
+                    )
         # Ajouter le motif au commentaire si la colonne commentaire existe
         cursor.execute(
             "SELECT column_name FROM information_schema.columns "
@@ -2269,6 +2572,23 @@ def api_manquants_corriger():
             tuple(insert_vals)
         )
         new_id = cursor.lastrowid
+
+        # 6. P3 : marquer le manquant d'origine comme rejete_corrigé pour qu'il
+        # quitte la vue « En attente » de l'onglet Manquants (et ne revienne pas).
+        # R16 : colonnes correction_artiste/titre/source/id prévues pour ça.
+        try:
+            cursor.execute(
+                "UPDATE airvs_manquants SET statut = 'rejete_corrigé', "
+                "correction_artiste = %s, correction_titre = %s, "
+                "correction_source = %s, id_correction = %s, "
+                "motif_rejet = %s "
+                "WHERE LOWER(artiste) = LOWER(%s) AND LOWER(titre) = LOWER(%s) "
+                "AND source = %s AND statut = 'en_attente'",
+                (new_artiste, new_titre, table, new_id,
+                 motif or 'corrigé', original.get('artiste'), original.get('titre'), table)
+            )
+        except Exception as e:
+            _logger.warning(f"[manquants/corriger] marquage manquant d'origine ignoré : {e}")
 
         db.commit()
         return jsonify({
@@ -2387,9 +2707,18 @@ def api_manquants_rejeter():
 @pipeline_import_bp.route('/api/manquants/delete', methods=['DELETE'])
 @login_requis
 def api_manquants_delete():
-    """Supprime un manquant (faux positif definitif).
+    """Supprime (soft-delete) un manquant — P3.
 
     Body JSON : { id: int }
+
+    Avant : DELETE physique. Problème : la ligne source (airvs_shazam/
+    airvs_animateurs) reste statut='nouveau', retombe en not_found au
+    prochain matching et _persister_manquants réinsérait le titre —
+    la suppression manuelle était annulée à chaque synchro.
+
+    Désormais : statut='rejete' + motif_rejet='supprimé manuellement'.
+    Le dédoublonnage R9/R14 (statut IN rejete/rejete_corrigé) empêche
+    définitivement son retour. Retrouvable via le filtre « Rejeté ».
     """
     data = request.json or {}
     manq_id = data.get('id')
@@ -2403,14 +2732,19 @@ def api_manquants_delete():
 
     try:
         cursor = db.cursor()
-        cursor.execute("DELETE FROM airvs_manquants WHERE id = %s", (manq_id,))
+        cursor.execute(
+            "UPDATE airvs_manquants SET statut = 'rejete', "
+            "motif_rejet = 'supprimé manuellement', resolu_le = NOW() "
+            "WHERE id = %s AND statut = 'en_attente'",
+            (manq_id,)
+        )
         deleted = cursor.rowcount
         db.commit()
         cursor.close()
         db.close()
 
         if deleted == 0:
-            return jsonify({"error": "Aucun manquant avec cet ID"}), 404
+            return jsonify({"error": "Aucun manquant en_attente avec cet ID"}), 404
 
     except Exception as e:
         try:
@@ -2420,5 +2754,106 @@ def api_manquants_delete():
             pass
         return jsonify({"error": str(e)}), 500
 
-    return jsonify({"ok": True, "id": manq_id})
+    return jsonify({"ok": True, "id": manq_id, "statut": "rejete", "soft_delete": True})
+
+
+@pipeline_import_bp.route('/api/manquants/correler', methods=['POST'])
+@login_requis
+def api_manquants_correler():
+    """P2 — Corrèle les manquants en_attente avec la bibliothèque RadioDJ.
+
+    Pour chaque manquant en_attente, cherche le couple (artiste, titre) dans
+    la table songs (passe stricte du moteur de matching — zéro faux positif).
+    Trouvé → statut='importe' + id_import. La vue « En attente » s'allège
+    automatiquement des titres importés entre-temps (pipeline, suspects
+    validés, ajout manuel RadioDJ...).
+
+    Body JSON optionnel : { limite: int (défaut 500, max 2000) }
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        limite = min(max(int(data.get('limite', 500)), 1), 2000)
+    except (ValueError, TypeError):
+        limite = 500
+
+    nb_corr, nb_test = correler_manquants_radiodj(limite=limite, logger=_logger)
+    return jsonify({
+        "ok": True,
+        "correles": nb_corr,
+        "tests": nb_test,
+        "message": f"{nb_corr} manquant(s) corrélé(s) sur {nb_test} testé(s)"
+    })
+
+
+@pipeline_import_bp.route('/api/manquants/correlation-suivi')
+@login_requis
+def api_manquants_correlation_suivi():
+    """v2.2 — Suivi de corrélation en arrière-plan (terminal Import & Validation).
+
+    Le front interroge cette route toutes les ~3 s tant que la corrélation
+    multi-passes tourne côté serveur et affiche les lignes dans le terminal
+    (journal suspects ou terminal pipeline). S'arrête sur termine=True.
+
+    Query : cle=<clé de suivi> (pipeline_<id_tache> | suspect_<timestamp>)
+    Retour : {cle, lines: [...], termine: bool}
+    """
+    cle = (request.args.get('cle') or '').strip()
+    if not cle or len(cle) > 100:
+        return jsonify({"error": "cle requise"}), 400
+    with _corr_suivi_lock:
+        lines = list(_corr_suivi_logs.get(cle, []))
+    termine = any(_CORR_TERMINE in l for l in lines)
+    return jsonify({"cle": cle, "lines": lines, "termine": termine})
+
+
+@pipeline_import_bp.route('/api/manquants/trouver_source')
+@login_requis
+def api_manquants_trouver_source():
+    """P3 — Retrouve la ligne source (airvs_shazam / airvs_animateurs)
+    correspondant à un manquant, pour ouvrir le modal ✎ Corriger (R15)
+    directement depuis l'onglet Manquants.
+
+    Query : source=('shazam'|'animateurs'), artiste, titre
+    Retour : {found: bool, table: str, row_id: int} ou {found: False}
+    """
+    source = (request.args.get('source') or '').strip()
+    artiste = (request.args.get('artiste') or '').strip()
+    titre = (request.args.get('titre') or '').strip()
+
+    if source not in ('shazam', 'animateurs'):
+        return jsonify({"error": "source doit être 'shazam' ou 'animateurs'"}), 400
+    if not artiste or not titre:
+        return jsonify({"error": "artiste et titre sont obligatoires"}), 400
+
+    table_sql = 'airvs_shazam' if source == 'shazam' else 'airvs_animateurs'
+    db = get_db_connection()
+    if not db:
+        return jsonify({"error": "Erreur DB"}), 500
+
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            f"SELECT id FROM {table_sql} "
+            "WHERE LOWER(TRIM(artiste)) = LOWER(TRIM(%s)) "
+            "AND LOWER(TRIM(titre)) = LOWER(TRIM(%s)) "
+            "AND (statut IS NULL OR statut NOT IN ('rejete', 'rejete_corrige')) "
+            "ORDER BY id DESC LIMIT 1",
+            (artiste, titre)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        db.close()
+    except Exception as e:
+        try:
+            if cursor:
+                cursor.close()
+            db.close()
+        except Exception:
+            pass
+        return jsonify({"error": str(e)}), 500
+
+    if row:
+        return jsonify({"found": True, "table": source, "row_id": row['id']})
+    return jsonify({"found": False})
 

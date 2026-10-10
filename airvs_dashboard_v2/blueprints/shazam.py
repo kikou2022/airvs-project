@@ -1,3 +1,15 @@
+# ██████ AIRVS PATCH PROGRAMMATION v2.5 — 2026-10-09 — ZONE DOWNLOAD AI ██████
+# Correctif : réintégration des lignes déjà « Matché » dans le flux éditorial
+#   Pont → AzuraCast (prefill + pipeline) : défaut de filtre statut
+#   'nouveau,matche', résolution directe par match_song_id (sans repasser
+#   dans le moteur), qualification auto 'pousse_azura' des morceaux déjà
+#   IN_AZURACAST. Cause de la régression : le filtre R5 défaut='nouveau'
+#   était écrit quand la colonne statut n'était jamais alimentée (bug
+#   TINYINT v2.3) — une fois l'écriture réparée, les matchés sortaient
+#   du Pont et n'étaient plus poussés vers AzuraCast.
+# Base : v2.4 (persister normalisé + bandeau). utils.py/pipeline_import.py
+#   v2.4 inchangés — seuls shazam.py et azuracast.py évoluent en v2.5.
+# Vérif déploiement : cette ligne doit être la 1re ligne du fichier sur .39
 """blueprints/shazam.py -- Shazam + VPS sync AIRVS.
 
 Routes extraites de app.py pour le blueprint shazam_bp.
@@ -24,7 +36,9 @@ from datetime import datetime
 import pymysql
 from flask import Blueprint, request, jsonify
 
-from utils import get_db_connection, _logger, _assurer_schema_airvs_avance, _charger_config_json
+from utils import (get_db_connection, _logger, _assurer_schema_airvs_avance,
+                   _charger_config_json, correler_manquants_radiodj,
+                   assurer_type_match_passe)
 from blueprints.auth import login_requis
 
 
@@ -88,7 +102,9 @@ def _assurer_schema_shazam():
                 "SELECT COUNT(*) FROM information_schema.tables "
                 "WHERE table_schema = DATABASE() AND table_name = 'airvs_animateurs'"
             )
-            if cursor.fetchone()[0]:
+            # DictCursor global : jamais fetchone()[0] (KeyError) — accès dict-safe
+            _row_t = cursor.fetchone()
+            if _row_t and list(_row_t.values())[0]:
                 # Ajouter match_song_id si absent (créé par le worker VPS ou migration)
                 try:
                     cursor.execute("SHOW COLUMNS FROM airvs_animateurs LIKE 'match_song_id'")
@@ -115,6 +131,43 @@ def _assurer_schema_shazam():
                     _logger.info("Migration : colonne statut ajoutée à airvs_animateurs")
         except Exception as e:
             _logger.debug(f"Migration statut animateurs (ignorée si déjà faite) : {e}")
+
+        # ── R2-c (v2.3) : type de match_passe sur airvs_animateurs ──
+        # La table est créée par le worker VPS avec match_passe TINYINT alors
+        # que le dashboard écrit des chaînes ('trouve_import', méthodes du
+        # moteur…) : erreur 1366 « Incorrect integer value » avalée par les
+        # try/except → sources jamais « Matché », « source(s) Matché : 0 ».
+        # Conversion idempotente VARCHAR(50) + rattrapage one-shot (utils.py).
+        try:
+            assurer_type_match_passe(logger=_logger)
+        except Exception:
+            pass
+
+        # ── R1-bis : enrichir l'ENUM statut des tables sources avec 'rejete_corrige' ──
+        # Nécessaire à /api/manquants/corriger (R16) : sans cette valeur dans l'ENUM,
+        # l'UPDATE statut='rejete_corrige' échoue en mode SQL strict
+        # (Data truncated → exception → HTTP 500 sur le bouton ✎ Corriger).
+        for _tbl_enum in ('airvs_shazam', 'airvs_animateurs'):
+            try:
+                cursor.execute(
+                    "SELECT COLUMN_TYPE FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() AND table_name = %s "
+                    "AND column_name = 'statut'",
+                    (_tbl_enum,)
+                )
+                row_e = cursor.fetchone()
+                # DictCursor global : accès par nom de colonne (jamais [0])
+                _col_type = str(list(row_e.values())[0]) if row_e else ''
+                if _col_type and 'rejete_corrige' not in _col_type.lower():
+                    cursor.execute(
+                        "ALTER TABLE %s MODIFY COLUMN statut "
+                        "ENUM('nouveau','matche','pousse_azura','rejete','rejete_corrige') DEFAULT 'nouveau'"
+                        % _tbl_enum
+                    )
+                    db.commit()
+                    _logger.info(f"Migration : ENUM statut enrichi avec 'rejete_corrige' sur {_tbl_enum}")
+            except Exception as e:
+                _logger.warning(f"Migration ENUM statut {_tbl_enum} échouée : {e}")
 
         db.commit()
         cursor.close()
@@ -144,8 +197,13 @@ def _persister_manquants_shazam(not_found, source_type):
         cur_m = db_m.cursor()
         nb = 0
         for item in not_found:
-            art = str(item.get('artist') or '')[:500]
-            tit = str(item.get('title') or '')[:500]
+            # v2.4 — normalisation \s+ à la création : tabulations /
+            # retours ligne / espaces insécables des saisies (collages,
+            # tags de compilation) ne doivent pas s'incruster en DB,
+            # sinon les corrélations (égalité/TRIM + LIKE) ratent le
+            # manquant à vie (cas « Maxime Le Forestier\t »).
+            art = re.sub(r'\s+', ' ', str(item.get('artist') or '')).strip()[:500]
+            tit = re.sub(r'\s+', ' ', str(item.get('title') or '')).strip()[:500]
             if not art and not tit:
                 continue
             anim = str(item.get('animateur') or '').strip() or None
@@ -305,6 +363,73 @@ def _extraire_nu(texte):
     texte = re.sub(r'\s*\([^)]*\)\s*', ' ', texte).strip()
     texte = re.split(r'\s+(?:feat\.?|ft\.?|featuring)\s+', texte, flags=re.IGNORECASE)[0].strip()
     return texte
+
+
+def _resoudre_song_par_id(cursor, song_id):
+    """v2.5 — Résout un morceau RadioDJ par son ID, avec EXACTEMENT les
+    mêmes colonnes que le moteur de matching (le frontend du Pont lit
+    path/comments/bpm/duration/year/album pour le tableau de push).
+
+    Sert à réintégrer les demandes déjà statut='matche' dans le flux
+    Pont → AzuraCast SANS refaire tourner les 5 passes (leur song_id est
+    déjà connu et persisté)."""
+    try:
+        cursor.execute(
+            "SELECT s.ID, s.artist, s.title, s.year, s.duration, s.`path`, "
+            "s.comments, s.album, s.bpm, s.id_genre, g.name AS genre_name "
+            "FROM songs s LEFT JOIN genre g ON s.id_genre = g.id "
+            "WHERE s.ID = %s AND s.song_type = 0 LIMIT 1",
+            (int(song_id),)
+        )
+        return cursor.fetchone()
+    except Exception:
+        return None
+
+
+def _qualifier_pousse_azura(db, source_ids, table_src):
+    """v2.5 — Passe les lignes source indiquées de statut='matche' à
+    statut='pousse_azura' (badge « 📡 Diffusé » côté Animateurs/Shazam).
+
+    Deux usages :
+      - prefill/pipeline : le morceau lié est déjà IN_AZURACAST (poussé
+        avant la v2.5) → qualification immédiate, la ligne quitte le
+        flux Pont (elle ne doit plus être re-poussée) ;
+      - azuracast.py (homologue `_qualifier_sources_pousse_azura`) :
+        après une copie COPIE_FICHIERS terminée.
+
+    Non bloquant : la colonne statut est créée par la migration R1/R2 ;
+    si absente ou déjà convertie, on ignore silencieusement.
+    """
+    if not source_ids:
+        return 0
+    try:
+        cur = db.cursor()
+        _ph = ",".join(["%s"] * len(source_ids))
+        cur.execute(
+            "UPDATE %s SET statut = 'pousse_azura' "
+            "WHERE id IN (%s) AND statut = 'matche'" % (table_src, _ph),
+            tuple(source_ids)
+        )
+        nb = cur.rowcount
+        db.commit()
+        cur.close()
+        if nb:
+            _logger.info(
+                f"[v2.5] {_tbl_label(table_src)} : {nb} ligne(s) "
+                f"'matche' → 'pousse_azura' (morceau déjà IN_AZURACAST)"
+            )
+        return nb
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _logger.warning(f"[v2.5] qualification pousse_azura ignorée : {e}")
+        return 0
+
+
+def _tbl_label(table_src):
+    return 'airvs_shazam' if 'shazam' in (table_src or '') else 'airvs_animateurs'
 
 
 def _match_shazam_songs(cursor, artiste, titre):
@@ -1202,13 +1327,29 @@ def api_shazam_prefill():
         # Phase 2 : mode=web lit airvs_animateurs (soumissions VPS),
         # les autres modes continuent de lire airvs_shazam (reconnaissances MacroDroid).
         _src_table = 'airvs_animateurs' if mode == 'web' else 'airvs_shazam'
+        # v2.5 — présence de la colonne statut vérifiée UNE fois ici :
+        # sert à la fois au filtre R5 ci-dessous ET à la lecture des
+        # colonnes statut/match_song_id/match_passe dans le SELECT
+        # (partition nouveau / déjà-matché).
+        _has_statut = True
+        try:
+            chk_s0 = db.cursor()
+            chk_s0.execute("SHOW COLUMNS FROM %s LIKE 'statut'" % _src_table)
+            _has_statut = bool(chk_s0.fetchone())
+            chk_s0.close()
+        except Exception:
+            _has_statut = False
+        _cols_statut = ", statut, match_song_id, match_passe" if _has_statut else ""
         if mode == 'web':
             base_query = ("SELECT id, artiste, titre, "
                           "date_soumission AS date_reconnaissance, "
-                          "source, animateur FROM airvs_animateurs")
+                          "source, animateur" + _cols_statut +
+                          " FROM airvs_animateurs")
             params = ()
         else:
-            base_query = "SELECT id, artiste, titre, date_reconnaissance, source, animateur FROM airvs_shazam"
+            base_query = ("SELECT id, artiste, titre, date_reconnaissance, "
+                          "source, animateur" + _cols_statut +
+                          " FROM airvs_shazam")
             params = ()
             if mode == 'shazam':
                 base_query += " WHERE source NOT IN ('Shazam', 'Recommandation', 'Saisie manuelle', 'Autre', 'formulaire_programmeur') AND (source NOT LIKE '%%externe%%' OR source IS NULL)"
@@ -1217,28 +1358,23 @@ def api_shazam_prefill():
             elif mode == 'shazam_ext':
                 base_query += " WHERE source LIKE '%%externe%%'"
 
-        # ── R5 : Filtre statut — n'inclure que les entrées "nouveau" par défaut ──
-        # Le paramètre ?statut= permet de re-matcher (ex: statut=nouveau,matche)
-        statut_filter = (request.args.get('statut') or 'nouveau').strip()
+        # ── R5 : Filtre statut ──
+        # v2.5 — défaut 'nouveau,matche' (était 'nouveau') : le Pont doit
+        # AUSSI voir les lignes déjà « Matché » — sinon elles ne remontent
+        # plus dans la prévisualisation de push et ne sont jamais poussées
+        # vers AzuraCast (régression apparue avec la v2.3 : une fois
+        # l'écriture des statuts réparée, les matchés sortaient du filtre).
+        # Le paramètre ?statut= reste prioritaire (ex: statut=nouveau).
+        statut_filter = (request.args.get('statut') or 'nouveau,matche').strip()
         if statut_filter != 'tous':
             _statuts_valides = [s.strip() for s in statut_filter.split(',') if s.strip()]
-            if _statuts_valides:
-                # Vérifier si la table a la colonne statut (migration R1/R2)
-                _has_statut = True
-                try:
-                    chk_s = db.cursor()
-                    chk_s.execute("SHOW COLUMNS FROM %s LIKE 'statut'" % _src_table)
-                    _has_statut = bool(chk_s.fetchone())
-                    chk_s.close()
-                except Exception:
-                    _has_statut = False
-                if _has_statut:
-                    _statut_clause = ",".join(["%s"] * len(_statuts_valides))
-                    if 'WHERE' in base_query:
-                        base_query += f" AND statut IN ({_statut_clause})"
-                    else:
-                        base_query += f" WHERE statut IN ({_statut_clause})"
-                    params = params + tuple(_statuts_valides)
+            if _statuts_valides and _has_statut:
+                _statut_clause = ",".join(["%s"] * len(_statuts_valides))
+                if 'WHERE' in base_query:
+                    base_query += f" AND statut IN ({_statut_clause})"
+                else:
+                    base_query += f" WHERE statut IN ({_statut_clause})"
+                params = params + tuple(_statuts_valides)
 
         # Filtre optionnel par animateur
         if animateur_filter:
@@ -1263,8 +1399,73 @@ def api_shazam_prefill():
         found = []
         not_found = []
         matched_ids = []  # R3 : IDs à mettre à jour après matching
+        not_found_ids = []  # P1 : IDs des non-trouvés (marquage match_passe='non_trouve')
 
-        for idx, sr in enumerate(shazam_rows):
+        # ── v2.5 — partition nouveau / déjà-matché ──────────────────
+        # Les lignes déjà 'matche' avec un match_song_id ne repassent PAS
+        # dans le moteur : leur morceau est résolu directement par ID
+        # (rapide, zéro risque de changer un match existant). Celles dont
+        # le morceau est déjà IN_AZURACAST sont qualifiées 'pousse_azura'
+        # (cycle éditorial terminé) et écartées du tableau de push.
+        rows_engine = []
+        rows_deja = []
+        for sr in shazam_rows:
+            if _has_statut and (sr.get('statut') == 'matche') and sr.get('match_song_id'):
+                rows_deja.append(sr)
+            else:
+                rows_engine.append(sr)
+
+        _nb_deja_reintegres = 0
+        _ids_pousse_azura_prefill = []
+        if rows_deja:
+            cursor_d = db.cursor(pymysql.cursors.DictCursor)
+            for sr in rows_deja:
+                _art = str(sr.get('artiste') or '').strip()
+                _tit = str(sr.get('titre') or '').strip()
+                # R9 : couple rejeté en manquants → hors flux (même règle
+                # que le moteur ci-dessous)
+                try:
+                    chk_rd = db.cursor()
+                    chk_rd.execute(
+                        "SELECT id FROM airvs_manquants "
+                        "WHERE LOWER(artiste) = LOWER(%s) AND LOWER(titre) = LOWER(%s) "
+                        "AND statut IN ('rejete','rejete_corrigé') LIMIT 1",
+                        (_art, _tit)
+                    )
+                    _rejected = bool(chk_rd.fetchone())
+                    chk_rd.close()
+                    if _rejected:
+                        continue
+                except Exception:
+                    pass
+                _song = _resoudre_song_par_id(cursor_d, sr.get('match_song_id'))
+                if not _song:
+                    # morceau disparu de RadioDJ : retente le moteur
+                    # (une nouvelle version a pu être importée entre-temps)
+                    rows_engine.append(sr)
+                    continue
+                if str(_song.get('comments') or '') == 'IN_AZURACAST':
+                    # déjà poussé vers AzuraCast par le passé : on qualifie
+                    # la ligne source 'pousse_azura' et on la retire du flux
+                    # (elle ne doit plus remonter dans le push)
+                    _ids_pousse_azura_prefill.append(sr['id'])
+                    continue
+                _song['in_shazam'] = True
+                _song['_shazam_id'] = sr['id']
+                _song['_shazam_date'] = sr.get('date_reconnaissance')
+                _song['_shazam_source'] = sr.get('source', 'macrodroid')
+                _song['_shazam_animateur'] = sr.get('animateur')
+                _song['_match_methode'] = str(sr.get('match_passe') or 'deja_matche')
+                _song['_original_artiste'] = sr['artiste']
+                _song['_original_titre'] = sr['titre']
+                _song['_deja_matche'] = True
+                found.append(_song)
+                _nb_deja_reintegres += 1
+            cursor_d.close()
+            if _ids_pousse_azura_prefill and _has_statut:
+                _qualifier_pousse_azura(db, _ids_pousse_azura_prefill, _src_table)
+
+        for idx, sr in enumerate(rows_engine):
             # ── Vérification d'annulation toutes les ~10 itérations ──
             if idx > 0 and idx % 10 == 0:
                 try:
@@ -1334,7 +1535,9 @@ def api_shazam_prefill():
                 # R3 : mémoriser pour persister après la boucle
                 matched_ids.append((sr['id'], match['ID'], methode))
             else:
+                not_found_ids.append(sr['id'])  # P1
                 not_found.append({
+                    'id': sr['id'],  # P1 : id ligne source — permet au JS de mettre à jour les statuts en mémoire
                     'artist': sr['artiste'],
                     'title': sr['titre'],
                     'source': sr.get('source', 'macrodroid'),
@@ -1359,7 +1562,25 @@ def api_shazam_prefill():
                 db.commit()
                 cur_up.close()
             except Exception as e:
-                _logger.debug(f"R3 : persister matchs ignoré (colonne statut absente ?) : {e}")
+                _logger.warning(f"R3 : persister matchs ÉCHOUÉ (les badges Statut resteront 'Nouveau') : {e}")
+
+        # ── P1 : Marquer les non-trouvés (match_passe='non_trouve') pour que
+        # la colonne Match (✗) et les filtres Statut survivent au rechargement ──
+        _nb_notfound = 0
+        if not_found_ids:
+            try:
+                cur_nf = db.cursor()
+                for _nid in not_found_ids:
+                    cur_nf.execute(
+                        "UPDATE %s SET match_passe = 'non_trouve' "
+                        "WHERE id = %%s AND statut = 'nouveau'" % _src_table,
+                        (_nid,)
+                    )
+                    _nb_notfound += cur_nf.rowcount
+                db.commit()
+                cur_nf.close()
+            except Exception as e:
+                _logger.warning(f"P1 : persister non-trouvés ignoré : {e}")
 
         db.close()
 
@@ -1367,11 +1588,32 @@ def api_shazam_prefill():
         _src_type = 'animateurs' if mode == 'web' else 'shazam'
         _nb_manq = _persister_manquants_shazam(not_found, _src_type)
 
+        # ── P2 : Corrélation manquants ↔ RadioDJ (non bloquante) ──
+        # Les couples not_found courants viennent d'échouer au même moteur :
+        # on les exclut pour ne pas re-tester du déjà-testé.
+        _exclure = set()
+        for _nf in not_found:
+            try:
+                _exclure.add((str(_nf.get('artist') or '').strip().lower(),
+                              str(_nf.get('title') or '').strip().lower()))
+            except Exception:
+                pass
+        _nb_corr, _ = correler_manquants_radiodj(
+            exclure_cles=_exclure, limite=200, logger=_logger
+        )
+
         result = {
             'found': found,
             'not_found': not_found,
             'total_shazam': len(shazam_rows)
         }
+        # v2.5 — transparence sur la réintégration des déjà-matchés
+        if _nb_deja_reintegres:
+            result['deja_matches_reintegres'] = _nb_deja_reintegres
+        if _ids_pousse_azura_prefill:
+            result['qualifies_pousse_azura'] = len(_ids_pousse_azura_prefill)
+        if _nb_corr:
+            result['manquants_correles'] = _nb_corr
         if sync_logs:
             result['sync_logs'] = sync_logs
         if _nb_manq:
@@ -1465,16 +1707,32 @@ def api_shazam_pipeline_trigger():
         # Filtrage par mode (si fourni dans le POST body)
         pipeline_mode = (request.get_json(silent=True) or {}).get('mode', '')
         pipeline_animateur = (request.get_json(silent=True) or {}).get('animateur', '')
-        pipeline_statut = (request.get_json(silent=True) or {}).get('statut', 'nouveau')
+        # v2.5 — défaut 'nouveau,matche' (était 'nouveau') : le pipeline
+        # alimente aussi le push preview du Pont via _onAnimateursMatchResult
+        # → les lignes déjà « Matché » doivent remonter elles aussi.
+        pipeline_statut = (request.get_json(silent=True) or {}).get('statut', 'nouveau,matche')
         # Phase 2 : mode=web lit airvs_animateurs (soumissions VPS)
         _pipe_src_table = 'airvs_animateurs' if pipeline_mode == 'web' else 'airvs_shazam'
+        # v2.5 — présence de la colonne statut vérifiée UNE fois (filtre + SELECT)
+        _has_statut_pipe = True
+        try:
+            chk_sp0 = db.cursor()
+            chk_sp0.execute("SHOW COLUMNS FROM %s LIKE 'statut'" % _pipe_src_table)
+            _has_statut_pipe = bool(chk_sp0.fetchone())
+            chk_sp0.close()
+        except Exception:
+            _has_statut_pipe = False
+        _cols_statut_pipe = ", statut, match_song_id, match_passe" if _has_statut_pipe else ""
         if pipeline_mode == 'web':
             base_query = ("SELECT id, artiste, titre, "
                           "date_soumission AS date_reconnaissance, "
-                          "source, animateur FROM airvs_animateurs")
+                          "source, animateur" + _cols_statut_pipe +
+                          " FROM airvs_animateurs")
             params = ()
         else:
-            base_query = "SELECT id, artiste, titre, date_reconnaissance, source, animateur FROM airvs_shazam"
+            base_query = ("SELECT id, artiste, titre, date_reconnaissance, "
+                          "source, animateur" + _cols_statut_pipe +
+                          " FROM airvs_shazam")
             params = ()
 
         if pipeline_mode == 'shazam':
@@ -1487,22 +1745,13 @@ def api_shazam_pipeline_trigger():
         # ── R5 : Filtre statut dans pipeline ──
         if pipeline_statut and pipeline_statut != 'tous':
             _statuts_p = [s.strip() for s in pipeline_statut.split(',') if s.strip()]
-            if _statuts_p:
-                _has_statut_p = True
-                try:
-                    chk_sp = db.cursor()
-                    chk_sp.execute("SHOW COLUMNS FROM %s LIKE 'statut'" % _pipe_src_table)
-                    _has_statut_p = bool(chk_sp.fetchone())
-                    chk_sp.close()
-                except Exception:
-                    _has_statut_p = False
-                if _has_statut_p:
-                    _sc = ",".join(["%s"] * len(_statuts_p))
-                    if 'WHERE' in base_query:
-                        base_query += f" AND statut IN ({_sc})"
-                    else:
-                        base_query += f" WHERE statut IN ({_sc})"
-                    params = params + tuple(_statuts_p)
+            if _statuts_p and _has_statut_pipe:
+                _sc = ",".join(["%s"] * len(_statuts_p))
+                if 'WHERE' in base_query:
+                    base_query += f" AND statut IN ({_sc})"
+                else:
+                    base_query += f" WHERE statut IN ({_sc})"
+                params = params + tuple(_statuts_p)
 
         if pipeline_animateur:
             if 'WHERE' in base_query:
@@ -1533,8 +1782,67 @@ def api_shazam_pipeline_trigger():
         found = []
         not_found = []
         matched_ids = []  # R3 : IDs à mettre à jour après matching
+        not_found_ids = []  # P1 : IDs des non-trouvés (marquage match_passe='non_trouve')
 
-        for idx, sr in enumerate(shazam_rows):
+        # ── v2.5 — partition nouveau / déjà-matché (identique au prefill) ──
+        rows_engine = []
+        rows_deja = []
+        for sr in shazam_rows:
+            if _has_statut_pipe and (sr.get('statut') == 'matche') and sr.get('match_song_id'):
+                rows_deja.append(sr)
+            else:
+                rows_engine.append(sr)
+
+        _nb_deja_reintegres_pipe = 0
+        _ids_pousse_azura_pipe = []
+        if rows_deja:
+            cursor_d = db.cursor(pymysql.cursors.DictCursor)
+            for sr in rows_deja:
+                _art = str(sr.get('artiste') or '').strip()
+                _tit = str(sr.get('titre') or '').strip()
+                try:
+                    chk_rd = db.cursor()
+                    chk_rd.execute(
+                        "SELECT id FROM airvs_manquants "
+                        "WHERE LOWER(artiste) = LOWER(%s) AND LOWER(titre) = LOWER(%s) "
+                        "AND statut IN ('rejete','rejete_corrigé') LIMIT 1",
+                        (_art, _tit)
+                    )
+                    _rejected = bool(chk_rd.fetchone())
+                    chk_rd.close()
+                    if _rejected:
+                        continue
+                except Exception:
+                    pass
+                _song = _resoudre_song_par_id(cursor_d, sr.get('match_song_id'))
+                if not _song:
+                    rows_engine.append(sr)
+                    continue
+                if str(_song.get('comments') or '') == 'IN_AZURACAST':
+                    _ids_pousse_azura_pipe.append(sr['id'])
+                    continue
+                _song['in_shazam'] = True
+                _song['_shazam_id'] = sr['id']
+                _song['_shazam_date'] = sr.get('date_reconnaissance')
+                _song['_shazam_source'] = sr.get('source', 'macrodroid')
+                _song['_shazam_animateur'] = sr.get('animateur')
+                _song['_match_methode'] = str(sr.get('match_passe') or 'deja_matche')
+                _song['_original_artiste'] = sr['artiste']
+                _song['_original_titre'] = sr['titre']
+                _song['_deja_matche'] = True
+                found.append(_song)
+                _nb_deja_reintegres_pipe += 1
+            cursor_d.close()
+            if _ids_pousse_azura_pipe and _has_statut_pipe:
+                _nb_q = _qualifier_pousse_azura(db, _ids_pousse_azura_pipe, _pipe_src_table)
+                if _nb_q:
+                    logs.append(f'  → {_nb_q} ligne(s) déjà diffusée(s) qualifiée(s) « Diffusé » (pousse_azura)')
+        if rows_deja:
+            logs.append(f'  → {len(rows_deja)} déjà matché(s) pris en compte, '
+                        f'{_nb_deja_reintegres_pipe} réintégré(s) au push, '
+                        f'{len(_ids_pousse_azura_pipe)} déjà dans AzuraCast (hors push)')
+
+        for idx, sr in enumerate(rows_engine):
             # ── Vérification d'annulation toutes les ~10 itérations ──
             if idx > 0 and idx % 10 == 0:
                 try:
@@ -1604,7 +1912,9 @@ def api_shazam_pipeline_trigger():
                 # R3 : mémoriser pour persister après la boucle
                 matched_ids.append((sr['id'], match['ID'], methode))
             else:
+                not_found_ids.append(sr['id'])  # P1
                 not_found.append({
+                    'id': sr['id'],  # P1 : id ligne source — permet au JS de mettre à jour les statuts en mémoire
                     'artist': sr['artiste'],
                     'title': sr['titre'],
                     'source': sr.get('source', 'macrodroid'),
@@ -1629,7 +1939,24 @@ def api_shazam_pipeline_trigger():
                 db.commit()
                 cur_up.close()
             except Exception as e:
-                _logger.debug(f"R3 pipeline : persister matchs ignoré : {e}")
+                _logger.warning(f"R3 pipeline : persister matchs ÉCHOUÉ (les badges Statut resteront 'Nouveau') : {e}")
+
+        # ── P1 pipeline : marquer les non-trouvés ──
+        _nb_notfound_pipe = 0
+        if not_found_ids:
+            try:
+                cur_nf = db.cursor()
+                for _nid in not_found_ids:
+                    cur_nf.execute(
+                        "UPDATE %s SET match_passe = 'non_trouve' "
+                        "WHERE id = %%s AND statut = 'nouveau'" % _pipe_src_table,
+                        (_nid,)
+                    )
+                    _nb_notfound_pipe += cur_nf.rowcount
+                db.commit()
+                cur_nf.close()
+            except Exception as e:
+                _logger.warning(f"P1 pipeline : persister non-trouvés ignoré : {e}")
 
         if _nb_persisted_pipe:
             logs.append(f'  → {_nb_persisted_pipe} match(s) persisté(s) sur {_pipe_src_table}')
@@ -1645,6 +1972,23 @@ def api_shazam_pipeline_trigger():
         _nb_manq_pipe = _persister_manquants_shazam(not_found, _pipe_src)
         if _nb_manq_pipe:
             logs.append(f'  → {_nb_manq_pipe} manquant(s) persisté(s) dans airvs_manquants')
+
+        # ── P2 : Corrélation manquants ↔ RadioDJ (non bloquante) ──
+        _exclure_pipe = set()
+        for _nf in not_found:
+            try:
+                _exclure_pipe.add((str(_nf.get('artist') or '').strip().lower(),
+                                   str(_nf.get('title') or '').strip().lower()))
+            except Exception:
+                pass
+        try:
+            _nb_corr_pipe, _ = correler_manquants_radiodj(
+                exclure_cles=_exclure_pipe, limite=200, logger=_logger
+            )
+            if _nb_corr_pipe:
+                logs.append(f'  → {_nb_corr_pipe} manquant(s) corrélé(s) à RadioDJ (statut « importe »)')
+        except Exception as _e:
+            _logger.warning(f"P2 pipeline : corrélation ignorée : {_e}")
 
         # ── Lancer la sync Sheet via le worker (tâche asynchrone) ──
         # NOTE : On ne fait JAMAIS de fallback sur le premier Sheet.

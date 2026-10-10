@@ -649,3 +649,506 @@ def _assurer_schema_airvs_avance():
         except Exception:
             pass
         return False
+
+
+# ════════════════════════════════════════════════════════════════════
+# v2.3 — Type de la colonne match_passe (airvs_animateurs)
+# La table airvs_animateurs est créée par le WORKER (sync VPS) avec
+# match_passe TINYINT, tandis que le dashboard écrit des chaînes
+# ('trouve_import', 'strict', 'normalisé…', 'non_trouve'). Sur une base
+# en mode SQL strict, chaque UPDATE dashboard échoue en erreur 1366
+# « Incorrect integer value » — silencieusement avalée par les
+# try/except : les sources ne passent jamais « Matché » et le terminal
+# d'import affiche « source(s) Matché : 0 » à chaque corrélation.
+# On convertit donc la colonne en VARCHAR(50) une fois pour toutes
+# (les valeurs numériques du worker 1..8 deviennent '1'..'8', sans
+# perte), puis on rattrape les demandes dont la corrélation d'import
+# a été avalée pendant la période TINYINT.
+# ════════════════════════════════════════════════════════════════════
+_match_passe_type_ok = False          # cache process : 1 seule vérification
+_match_passe_rattrapage_lance = False  # rattrapage one-shot par process
+
+
+def _norm_ws(v):
+    """v2.4 — Normalise une saisie : tabulations / retours ligne / espaces
+    insécables (NBSP) / espaces multiples → espace simple, extrémités
+    nettoyées. Rend les comparaisons de couples (artiste, titre)
+    insensibles aux caractères invisibles collés aux tags ID3 ou aux
+    saisies animateurs (MySQL TRIM ne retire que l'espace ASCII 0x20 :
+    une simple tabulation en fin de valeur suffit à faire échouer une
+    égalité exacte — cas « Maxime Le Forestier\t » de l'import #28800).
+    """
+    return re.sub(r'\s+', ' ', str(v or '')).strip()
+
+
+def _rattrapage_matche_animateurs(logger=None):
+    """v2.3 — Rattrapage one-shot (thread daemon) : repasse en
+    statut='matche' les demandes animateurs encore 'nouveau' dont le
+    couple (artiste, titre) existe DÉJÀ dans RadioDJ (passe stricte
+    uniquement — artiste LIKE ET titre LIKE, zéro faux positif, même
+    logique que la corrélation des manquants).
+
+    Répare les corrélations d'import avalées tant que match_passe
+    était resté TINYINT (ex. : titre importé, manquant clôturé
+    « importé », mais « source(s) Matché : 0 » et demande restée
+    'nouveau'). Remplace au passage les song_id écrits à la soumission
+    par le worker (matches lâches type mots-clés passe 5) par le match
+    strict réel quand il existe désormais.
+    """
+    def _travail():
+        db = get_db_connection()
+        if not db:
+            return
+        nb = 0
+        try:
+            cur = db.cursor()
+            cur.execute(
+                "SELECT id, artiste, titre FROM airvs_animateurs "
+                "WHERE (statut = 'nouveau' OR statut IS NULL) "
+                "ORDER BY id ASC LIMIT 500"
+            )
+            rows = cur.fetchall()
+            for r in rows:
+                art = _norm_ws(r['artiste'])
+                tit = _norm_ws(r['titre'])
+                if not art or not tit:
+                    continue
+                cur.execute(
+                    "SELECT s.ID FROM songs s "
+                    "WHERE s.song_type = 0 "
+                    "AND s.artist LIKE %s AND s.title LIKE %s "
+                    "ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1",
+                    (f"%{art}%", f"%{tit}%")
+                )
+                hit = cur.fetchone()
+                if not hit:
+                    continue
+                cur.execute(
+                    "UPDATE airvs_animateurs "
+                    "SET statut = 'matche', match_song_id = %s, "
+                    "match_passe = 'rattrapage_v23' "
+                    "WHERE id = %s AND (statut = 'nouveau' OR statut IS NULL)",
+                    (hit['ID'], r['id'])
+                )
+                if cur.rowcount and cur.rowcount > 0:
+                    nb += 1
+            db.commit()
+            cur.close()
+            if nb and logger:
+                logger.info(
+                    f"[v2.3] rattrapage animateurs : {nb} demande(s) "
+                    f"passée(s) en 'matche' (corrélation précédemment "
+                    f"avalée par le type TINYINT de match_passe)"
+                )
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            if logger:
+                logger.warning(f"[v2.3] rattrapage animateurs (non bloquant) : {e}")
+        else:
+            try:
+                db.close()
+            except Exception:
+                pass
+            return
+        try:
+            db.close()
+        except Exception:
+            pass
+    try:
+        threading.Thread(target=_travail, daemon=True).start()
+    except Exception:
+        pass
+
+
+def assurer_type_match_passe(logger=None):
+    """v2.3 — Convertit airvs_animateurs.match_passe en VARCHAR(50) si la
+    colonne est encore numérique (TINYINT/INT… créée par le worker VPS).
+
+    Idempotent + mis en cache : après le premier appel réussi du
+    process, plus aucune requête (return immédiat). Si une conversion
+    a lieu, lance le rattrapage one-shot des demandes animateurs.
+
+    Retourne True si la colonne est (désormais) de type texte.
+    """
+    global _match_passe_type_ok
+    if _match_passe_type_ok:
+        return True
+    db = get_db_connection()
+    if not db:
+        return False
+    converted = False
+    try:
+        cur = db.cursor()
+        cur.execute(
+            "SELECT DATA_TYPE FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() "
+            "AND table_name = 'airvs_animateurs' "
+            "AND column_name = 'match_passe'"
+        )
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            # Table/colonne absente : la migration standard la créera en VARCHAR
+            _match_passe_type_ok = True
+            return True
+        # DictCursor global : accès dict-safe (jamais fetchone()[0])
+        dtype = str(list(row.values())[0] or '').lower()
+        if dtype in ('varchar', 'char', 'text', 'tinytext',
+                     'mediumtext', 'longtext', 'enum'):
+            _match_passe_type_ok = True
+            return True
+        cur = db.cursor()
+        cur.execute(
+            "ALTER TABLE airvs_animateurs "
+            "MODIFY match_passe VARCHAR(50) DEFAULT NULL"
+        )
+        db.commit()
+        cur.close()
+        converted = True
+        _match_passe_type_ok = True
+        if logger:
+            logger.warning(
+                f"[v2.3] airvs_animateurs.match_passe converti {dtype} → "
+                f"VARCHAR(50) — cause racine des « source(s) Matché : 0 » : "
+                f"le dashboard écrivait des chaînes ('trouve_import', "
+                f"méthodes du moteur) dans une colonne numérique créée "
+                f"par le worker VPS → erreur 1366 avalée silencieusement"
+            )
+        return True
+    except Exception as e:
+        if logger:
+            logger.warning(
+                f"[v2.3] conversion match_passe impossible (non bloquant, "
+                f"nouvelle tentative à la prochaine corrélation) : {e}")
+        return False
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+        if converted:
+            _rattrapage_matche_animateurs(logger=logger)
+
+
+def correler_manquants_radiodj(exclure_cles=None, limite=500, logger=None,
+                               maj_sources=True):
+    """Corrélation airvs_manquants ↔ bibliothèque RadioDJ (P2).
+
+    v2 — maj_sources=True : quand un manquant est corrélé, la/les ligne(s)
+    source (airvs_shazam / airvs_animateurs) qui ont créé ce manquant
+    passent en statut='matche' + match_song_id + match_passe='trouve_import'
+    (badge « Matché » + ✓ immédiats, sans refaire une passe de matching).
+
+    Pour chaque manquant en_attente, cherche le couple (artiste, titre)
+    dans la table songs de RadioDJ avec la passe stricte du moteur de
+    matching (LIKE %artiste% AND LIKE %titre%, song_type=0 — la passe 1
+    de _match_shazam_songs, zéro faux positif par rapport au matching
+    standard).
+
+    Si trouvé : statut='importe', id_import=songs.ID, resolu_le=NOW().
+    Le manquant quitte automatiquement la vue « En attente » : la liste
+    s'allège au fil des imports, sans action manuelle.
+
+    Args:
+        exclure_cles: set de tuples (artiste_lower, titre_lower) à ignorer
+                      — ex. les not_found du matching courant, qui viennent
+                      d'échouer au même moteur et ne peuvent pas être trouvés
+        limite: nb max de manquants en_attente traités par appel
+                (anti-lourdeur, les plus anciens d'abord)
+        logger: logger optionnel (warnings non bloquants)
+
+    Returns:
+        (nb_correles, nb_tests)
+    """
+    nb_corr = 0
+    nb_test = 0
+    nb_src = (0, 0)
+    # v2.3 — garantit un match_passe textuel avant toute écriture sources
+    assurer_type_match_passe(logger=logger)
+    db = get_db_connection()
+    if not db:
+        if logger:
+            logger.warning("[correler_manquants] DB indisponible")
+        return 0, 0
+    try:
+        cur = db.cursor(pymysql.cursors.DictCursor)
+        cur.execute(
+            "SELECT id, artiste, titre FROM airvs_manquants "
+            "WHERE statut = 'en_attente' "
+            "ORDER BY date_creation ASC LIMIT %s",
+            (int(limite),)
+        )
+        rows = cur.fetchall()
+        for r in rows:
+            # v2.4 — _norm_ws : un manquant porteur d'une tabulation ou
+            # d'un NBSP interne ne doit plus casser son propre LIKE de
+            # recherche (le motif %…% héritait du caractère sale).
+            art = _norm_ws(r['artiste'])
+            tit = _norm_ws(r['titre'])
+            # Strict : les deux champs requis (un champ vide donnerait
+            # LIKE '%%' et donc un faux positif garanti)
+            if not art or not tit:
+                continue
+            key = (art.lower(), tit.lower())
+            if exclure_cles and key in exclure_cles:
+                continue
+            nb_test += 1
+            cur.execute(
+                "SELECT s.ID FROM songs s "
+                "WHERE s.song_type = 0 "
+                "AND s.artist LIKE %s AND s.title LIKE %s "
+                "ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1",
+                (f"%{art}%", f"%{tit}%")
+            )
+            hit = cur.fetchone()
+            if hit:
+                cur.execute(
+                    "UPDATE airvs_manquants SET statut = 'importe', "
+                    "id_import = %s, resolu_le = NOW() "
+                    "WHERE id = %s AND statut = 'en_attente'",
+                    (hit['ID'], r['id'])
+                )
+                nb_corr += 1
+                # v2 — matérialiser le lien côté lignes sources
+                if maj_sources:
+                    _s = _maj_sources_trouve_import(cur, art, tit, hit['ID'])
+                    nb_src = (nb_src[0] + _s[0], nb_src[1] + _s[1])
+        db.commit()
+        cur.close()
+        db.close()
+        if logger and (nb_src[0] or nb_src[1]):
+            logger.info(
+                f"[correler_manquants] {nb_corr} manquant(s) corrélé(s) — "
+                f"lignes sources passées en Matché : "
+                f"{nb_src[0]} shazam, {nb_src[1]} animateurs"
+            )
+    except Exception as e:
+        if logger:
+            logger.warning(f"[correler_manquants] erreur (non bloquante) : {e}")
+        try:
+            db.close()
+        except Exception:
+            pass
+        return nb_corr, nb_test
+    return nb_corr, nb_test
+
+
+def _maj_sources_trouve_import(cur, artiste, titre, song_id):
+    """v2 — Passe les lignes sources d'un couple (artiste, titre) désormais
+    présent dans RadioDJ en statut='matche' + match_song_id.
+
+    Appelée par la corrélation quand un titre importé (Maintenance →
+    Import & Validation) correspond à un manquant : la demande d'origine
+    (airvs_shazam / airvs_animateurs) passe « Matché » (✓) immédiatement,
+    sans devoir refaire une passe de matching. match_passe='trouve_import'
+    trace l'origine de la correspondance (import manuel ≠ matching auto).
+
+    Sécurité : seules les lignes encore 'nouveau' (ou sans statut) sont
+    touchées — jamais les rejets ni les lignes déjà matchées.
+
+    v2.4 : égalité normalisée via _norm_ws (tabulations / NBSP / espaces
+    multiples des saisies tolérés — l'égalité SQL TRIM exacte ratait ces
+    lignes, TRIM ne retirant que l'espace ASCII 0x20).
+
+    Args:
+        cur: curseur DB (commit par l'appelant)
+        artiste, titre: couple exact (TRIM/LOWER appliqué en SQL)
+        song_id: ID du titre correspondant dans radiodb.songs
+
+    Returns:
+        (nb_shazam, nb_animateurs) lignes mises à jour
+    """
+    nb = [0, 0]
+    # v2.4 — entrées normalisées + garde-fou champs vides (un couple vide
+    # aurait matché les lignes à artiste/titre vides).
+    _art = _norm_ws(artiste)
+    _tit = _norm_ws(titre)
+    if not _art or not _tit:
+        return 0, 0
+    _pat_art, _pat_tit = f"%{_art}%", f"%{_tit}%"
+    for i, table in enumerate(('airvs_shazam', 'airvs_animateurs')):
+        # v2.4 — sélection des candidates par LIKE puis égalité Python
+        # normalisée (_norm_ws) : insensible aux tabulations / NBSP /
+        # espaces multiples collés aux saisies (l'égalité SQL exacte
+        # TRIM ratait ces lignes). Les id retenus sont mis à jour
+        # individuellement — plus sûr et traçable qu'un UPDATE d'égalité.
+        _ids = []
+        try:
+            cur.execute(
+                f"SELECT id, artiste, titre FROM {table} "
+                "WHERE (statut = 'nouveau' OR statut IS NULL) "
+                "AND artiste LIKE %s AND titre LIKE %s "
+                "LIMIT 200",
+                (_pat_art, _pat_tit)
+            )
+            for _r in cur.fetchall():
+                if (_norm_ws(_r['artiste']).lower() == _art.lower()
+                        and _norm_ws(_r['titre']).lower() == _tit.lower()):
+                    _ids.append(_r['id'])
+        except Exception:
+            _ids = []
+        if not _ids:
+            continue
+        # v2.3 — UPDATE 1 : statut + match_song_id d'abord (colonnes sûres).
+        # Même si la trace match_passe échoue ensuite, le ✓ « Matché » et
+        # le lien vers le morceau RadioDJ sont matérialisés — plus jamais
+        # de « source(s) Matché : 0 » silencieux à cause d'un type de
+        # colonne inadapté.
+        try:
+            cur.execute(
+                f"UPDATE {table} "
+                "SET statut = 'matche', match_song_id = %s "
+                "WHERE id IN (" + ",".join(['%s'] * len(_ids)) + ") "
+                "AND (statut = 'nouveau' OR statut IS NULL)",
+                [song_id] + _ids
+            )
+            nb[i] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        except Exception:
+            # Non bloquant : la corrélation du manquant reste valable
+            pass
+        # v2.3 — UPDATE 2 : trace 'trouve_import' (la colonne peut rester
+        # TINYINT côté base worker → peut échouer sans annuler le ✓).
+        try:
+            cur.execute(
+                f"UPDATE {table} "
+                "SET match_passe = 'trouve_import' "
+                "WHERE id IN (" + ",".join(['%s'] * len(_ids)) + ") "
+                "AND statut = 'matche' "
+                "AND (match_passe IS NULL OR match_passe = '')",
+                _ids
+            )
+        except Exception:
+            # Non bloquant : le ✓ est déjà posé par l'UPDATE 1
+            pass
+    return nb[0], nb[1]
+
+
+def correler_import_cible(artiste, titre, logger=None):
+    """v2 — Corrélation ciblée d'un titre venant d'être importé.
+
+    Appelée immédiatement après une validation de suspect réussie
+    (Maintenance → Import & Validation) : cherche le couple
+    (artiste, titre) dans radiodb.songs avec la passe stricte du moteur
+    (LIKE %artiste% AND LIKE %titre%, song_type=0 — zéro faux positif)
+    et si trouvé :
+      1. clôture le(s) manquant(s) en_attente correspondant(s)
+         (statut='importe' + id_import + resolu_le) ;
+      2. passe la/les ligne(s) source en 'matche' + match_song_id
+         + match_passe='trouve_import' (via _maj_sources_trouve_import).
+
+    Si le titre n'est pas encore dans songs (scan FolderSync asynchrone
+    de RadioDJ après le RunEvent), trouve=False : l'appelant peut
+    re-tenter quelques secondes plus tard. Rien n'est marqué à moitié
+    (rollback complet en cas d'erreur).
+
+    Returns:
+        dict {'trouve': bool, 'song_id': int|None,
+              'manquants_clotures': int,
+              'sources_matchees': (nb_shazam, nb_animateurs),
+              'manquants_proches': [(artiste, titre), …] (v2.4 — manquants
+                  en_attente proches mais couple différent après
+                  normalisation, remontés dans le suivi terminal)}
+    """
+    result = {'trouve': False, 'song_id': None,
+              'manquants_clotures': 0, 'sources_matchees': (0, 0),
+              'manquants_proches': []}
+    # v2.4 — _norm_ws : le couple peut porter des tabulations / NBSP /
+    # espaces multiples (tags ID3 de compilations mal étiquetées) qui
+    # faisaient échouer toute égalité SQL exacte (TRIM ne retire que
+    # l'espace ASCII 0x20).
+    art = _norm_ws(artiste)
+    tit = _norm_ws(titre)
+    if not art or not tit:
+        return result
+    # v2.3 — garantit un match_passe textuel avant toute écriture sources
+    assurer_type_match_passe(logger=logger)
+    db = get_db_connection()
+    if not db:
+        if logger:
+            logger.warning("[correler_import_cible] DB indisponible")
+        return result
+    cur = None
+    try:
+        cur = db.cursor(pymysql.cursors.DictCursor)
+        cur.execute(
+            "SELECT s.ID FROM songs s "
+            "WHERE s.song_type = 0 "
+            "AND s.artist LIKE %s AND s.title LIKE %s "
+            "ORDER BY CHAR_LENGTH(s.title) ASC LIMIT 1",
+            (f"%{art}%", f"%{tit}%")
+        )
+        hit = cur.fetchone()
+        if not hit:
+            db.commit()
+            return result
+        result['trouve'] = True
+        result['song_id'] = hit['ID']
+        # 1. Manquants en_attente du couple (toutes sources confondues).
+        # v2.4 — sélection LIKE puis égalité Python normalisée (_norm_ws) :
+        # les manquants porteurs de caractères invisibles sont désormais
+        # clôturés ; les proches refusés (couple réellement différent)
+        # sont remontés dans result['manquants_proches'] pour le suivi.
+        _ids_mq = []
+        _proches = []
+        cur.execute(
+            "SELECT id, artiste, titre FROM airvs_manquants "
+            "WHERE statut = 'en_attente' "
+            "AND artiste LIKE %s AND titre LIKE %s "
+            "LIMIT 200",
+            (f"%{art}%", f"%{tit}%")
+        )
+        for _r in cur.fetchall():
+            if (_norm_ws(_r['artiste']).lower() == art.lower()
+                    and _norm_ws(_r['titre']).lower() == tit.lower()):
+                _ids_mq.append(_r['id'])
+            elif len(_proches) < 3:
+                _proches.append(
+                    (str(_r['artiste'] or '').strip(),
+                     str(_r['titre'] or '').strip())
+                )
+        if _ids_mq:
+            cur.execute(
+                "UPDATE airvs_manquants SET statut = 'importe', "
+                "id_import = %s, resolu_le = NOW() "
+                "WHERE id IN (" + ",".join(['%s'] * len(_ids_mq)) + ") "
+                "AND statut = 'en_attente'",
+                [hit['ID']] + _ids_mq
+            )
+            result['manquants_clotures'] = (
+                cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            )
+        result['manquants_proches'] = _proches
+        # 2. Lignes sources → Matché + ✓ immédiat
+        result['sources_matchees'] = _maj_sources_trouve_import(
+            cur, art, tit, hit['ID']
+        )
+        db.commit()
+        if logger and (result['manquants_clotures']
+                       or result['sources_matchees'][0]
+                       or result['sources_matchees'][1]):
+            logger.info(
+                f"[correler_import_cible] {art} - {tit} : "
+                f"{result['manquants_clotures']} manquant(s) clôturé(s), "
+                f"sources matchées {result['sources_matchees']} "
+                f"(song #{hit['ID']})"
+            )
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        if logger:
+            logger.warning(f"[correler_import_cible] erreur (non bloquante) : {e}")
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            db.close()
+        except Exception:
+            pass
+    return result
