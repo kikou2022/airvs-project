@@ -1663,6 +1663,31 @@
                                         ➕ Ajouter une playlist
                                     </button>
                                 </div>
+                                <!-- Ou nouvelle playlist (création directe, v2.7) -->
+                                <div class="row g-2 align-items-end mt-1">
+                                    <div class="col-md-4">
+                                        <label class="form-label small fw-bold">Ou nouvelle playlist :</label>
+                                        <input type="text" class="form-control form-control-sm"
+                                               id="action_new_playlist_name" placeholder="(optionnel)">
+                                    </div>
+                                    <div class="col-md-3" id="action_new_playlist_type_col" style="display:none">
+                                        <label class="form-label small fw-bold">Type :</label>
+                                        <select class="form-select form-select-sm" id="action_playlist_type">
+                                            <option value="default">Standard</option>
+                                            <option value="once_per_x_songs">1/X titres</option>
+                                            <option value="once_per_x_minutes">1/X min</option>
+                                            <option value="once_per_hour">1/heure</option>
+                                            <option value="custom">Avancée</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3" id="action_new_playlist_order_col" style="display:none">
+                                        <label class="form-label small fw-bold">Lecture :</label>
+                                        <select class="form-select form-select-sm" id="action_playlist_order">
+                                            <option value="shuffle">Aléatoire</option>
+                                            <option value="sequential">Séquentiel</option>
+                                        </select>
+                                    </div>
+                                </div>
                                 <div class="row g-2 align-items-end mt-2">
                                     <div class="col-md-3">
                                         <label class="form-label small fw-bold">Dossier cible AzuraCast :</label>
@@ -4999,7 +5024,7 @@
 <!-- PHASE 3 - Étape 3/5 : pont-player (player, archives, flux, spectrum, lecteur) -->
 <script src="/static/js/modules/stats-audience.js?v=1"></script>
 <!-- PHASE 3 - Étape 4/5 : stats-audience (onglet Audience, stats agrégées) -->
-<script src="/static/js/modules/sync-azuracast.js?v=3"></script>
+<script src="/static/js/modules/sync-azuracast.js?v=5"></script>
 <!-- PHASE 3 - Étape 4c : sync-azuracast (sync, action panel, push, bulk schedule) -->
 <script src="/static/js/modules/couleur.js?v=1"></script>
 <!-- PHASE 3 - Étape 4c : couleur (programmation couleur, grille, dry-run, historique, stats) -->

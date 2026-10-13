@@ -785,7 +785,9 @@ document.getElementById('btn_action_copier').addEventListener('click', function(
 document.getElementById('btn_action_ajouter_playlist').addEventListener('click', function() {
     if (!actionTrack) return;
     let playlistIds = getActionPlaylistIds();
-    let newPlaylistName = document.getElementById('action_new_playlist_name').value.trim();
+    // Lecture null-safe (l'élément a été supprimé puis réintroduit en v2.7)
+    let npEl = document.getElementById('action_new_playlist_name');
+    let newPlaylistName = npEl ? npEl.value.trim() : '';
     let dossier = getDossierCible('action_playlist_dossier', 'action_playlist_new_folder_name') || 'imports_push';
 
     if (playlistIds.length === 0 && !newPlaylistName) {
@@ -808,8 +810,8 @@ document.getElementById('btn_action_ajouter_playlist').addEventListener('click',
             dossier_cible: dossier,
             creer_playlist: true,
             nom_playlist: newPlaylistName,
-            playlist_type: 'default',
-            playlist_order: 'shuffle',
+            playlist_type: getActionNewPlaylistType(),
+            playlist_order: getActionNewPlaylistOrder(),
             fichiers: [],
             fichiers_deja_azura: fichiers_deja_azura,
             station_id: getActionStationId()
@@ -833,8 +835,8 @@ document.getElementById('btn_action_ajouter_playlist').addEventListener('click',
             creer_playlist: true,
             playlist_ids: playlistIds,
             nom_playlist: newPlaylistName || '',
-            playlist_type: 'default',
-            playlist_order: 'shuffle',
+            playlist_type: getActionNewPlaylistType(),
+            playlist_order: getActionNewPlaylistOrder(),
             fichiers: [],
             fichiers_deja_azura: fichiers_deja_azura,
             station_id: getActionStationId()
@@ -858,7 +860,9 @@ document.getElementById('btn_action_ajouter_playlist').addEventListener('click',
 document.getElementById('btn_action_copier_et_playlist').addEventListener('click', function() {
     if (!actionTrack) return;
     let playlistIds = getActionPlaylistIds();
-    let newPlaylistName = document.getElementById('action_new_playlist_name').value.trim();
+    // Lecture null-safe (l'élément a été supprimé puis réintroduit en v2.7)
+    let npEl = document.getElementById('action_new_playlist_name');
+    let newPlaylistName = npEl ? npEl.value.trim() : '';
     let dossier = getDossierCible('action_playlist_dossier', 'action_playlist_new_folder_name') || 'imports_push';
 
     if (playlistIds.length === 0 && !newPlaylistName) {
@@ -871,8 +875,8 @@ document.getElementById('btn_action_copier_et_playlist').addEventListener('click
         creer_playlist: true,
         playlist_ids: playlistIds,
         nom_playlist: newPlaylistName || '',
-        playlist_type: 'default',
-        playlist_order: 'shuffle',
+        playlist_type: getActionNewPlaylistType(),
+        playlist_order: getActionNewPlaylistOrder(),
         station_id: getActionStationId()
     };
 
@@ -928,6 +932,11 @@ function surveillerActionLog(taskId, playlistTaskIds) {
             .then(function(data) {
                 document.getElementById('terminal_action_output').textContent = data.log || '...';
                 if (data.statut === 'termine' || data.statut === 'erreur') {
+                    // v2.7 — marquage IN_AZURACAST renvoyé par /lire_log_push (radiodb.songs)
+                    if (data.marquage && data.marquage.updated > 0) {
+                        data.log = (data.log || '') + '\n🏷️ ' + data.marquage.updated + ' titre(s) marqué(s) IN_AZURACAST dans RadioDJ.';
+                        document.dispatchEvent(new CustomEvent('azura:marked', { detail: { paths: data.marquage.paths || [] } }));
+                    }
                     if (data.statut === 'termine' && actionTrack) {
                         // Ne marquer IN_AZURACAST que si la copie a réussi (au moins 1 copié, 0 erreur)
                         let logText = data.log || '';
@@ -1410,9 +1419,31 @@ function getActionPlaylistIds() {
     return ids;
 }
 
+// Type / ordre de lecture pour la création d'une nouvelle playlist (panneau Action)
+function getActionNewPlaylistType() {
+    var sel = document.getElementById('action_playlist_type');
+    return (sel && sel.value) ? sel.value : 'default';
+}
+function getActionNewPlaylistOrder() {
+    var sel = document.getElementById('action_playlist_order');
+    return (sel && sel.value) ? sel.value : 'shuffle';
+}
+
 // Boutons "Ajouter une playlist"
 document.getElementById('btn_add_push_playlist').addEventListener('click', addPushPlaylistRow);
 document.getElementById('btn_add_action_playlist').addEventListener('click', addActionPlaylistRow);
+
+// Champ "Ou nouvelle playlist" (panneau Action) → affiche Type/Lecture (miroir du Push)
+var actionNewPlNameEl = document.getElementById('action_new_playlist_name');
+if (actionNewPlNameEl) {
+    actionNewPlNameEl.addEventListener('input', function() {
+        var typeCol = document.getElementById('action_new_playlist_type_col');
+        var orderCol = document.getElementById('action_new_playlist_order_col');
+        var show = this.value.trim() !== '';
+        if (typeCol) typeCol.style.display = show ? '' : 'none';
+        if (orderCol) orderCol.style.display = show ? '' : 'none';
+    });
+}
 
 // Quand on choisit "Créer nouvelle playlist" (géré par le champ texte)
 document.getElementById('push_new_playlist_name').addEventListener('input', function() {
@@ -2208,6 +2239,11 @@ function fetchLogPush() {
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data && data.log) {
+                // v2.7 — marquage IN_AZURACAST renvoyé par /lire_log_push (radiodb.songs)
+                if (data.marquage && data.marquage.updated > 0) {
+                    data.log += '\n✅ ' + data.marquage.updated + ' titre(s) marqué(s) IN_AZURACAST dans RadioDJ.';
+                    document.dispatchEvent(new CustomEvent('azura:marked', { detail: { paths: data.marquage.paths || [] } }));
+                }
                 terminalPush.textContent = data.log;
                 terminalPush.scrollTop = terminalPush.scrollHeight;
                 var ab = getActiveBuffer();

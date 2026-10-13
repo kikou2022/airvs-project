@@ -843,6 +843,20 @@ def lancer_push_azura():
                            for f in (fichiers_deja_azura or [])]
             _paths_deja = [p for p in _paths_deja if p]
             if _paths_deja:
+                # v2.7 — les fichiers DÉJÀ dans AzuraCast sont marqués
+                # immédiatement dans RadioDJ (radiodb.songs.comments) :
+                # aucune copie n'ayant lieu, aucun poll ne viendra le faire.
+                _upd_deja = 0
+                for _p in _paths_deja:
+                    cursor.execute(
+                        "UPDATE radiodb.songs SET comments = 'IN_AZURACAST' "
+                        "WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments != 'IN_AZURACAST')",
+                        (_p, _p.replace('/', '\\'))
+                    )
+                    _upd_deja += cursor.rowcount
+                if _upd_deja:
+                    db.commit()
+                    _logger.info(f"[v2.7] {_upd_deja} fichier(s) déjà AzuraCast marqué(s) IN_AZURACAST (radiodb.songs)")
                 _ids_deja = _ids_songs_par_chemins(cursor, _paths_deja)
                 if _ids_deja:
                     _qualifier_sources_pousse_azura(cursor, db, _ids_deja)
@@ -965,21 +979,48 @@ def lire_log_push():
         tache = cursor.fetchone()
 
         # Si la tâche est terminée et de type COPIE_FICHIERS, marquer les fichiers comme IN_AZURACAST
+        # v2.7 — (1) cible explicite radiodb.songs (base RadioDJ) ;
+        #        (2) marquage conditionné au résultat RÉEL de la copie (log worker) ;
+        #        (3) plus de silence : résultat renvoyé au front (champ marquage).
+        marquage = None
         if tache and tache.get('statut') == 'termine' and tache.get('type_action') == 'COPIE_FICHIERS':
             try:
                 params = json.loads(tache.get('parametres', '{}')) if tache.get('parametres') else {}
                 fichiers = params.get('fichiers', [])
+                log_tache = tache.get('log_resultat') or ''
+                _t_annule = ('=== ANNULÉ' in log_tache)
+                _m_c = re.search(r'(\d+)\s+copié\(s\)', log_tache)
+                _m_e = re.search(r'(\d+)\s+erreur\(s\)', log_tache)
+                _nb_copies = int(_m_c.group(1)) if _m_c else 0
+                _nb_erreurs = int(_m_e.group(1)) if _m_e else 0
+                # basenames réellement copiés (lignes [OK SFTP] du worker)
+                _ok_basenames = set()
+                for _m in re.finditer(r'\[OK SFTP\][^\n]*?->\s*(.+?)\s*$', log_tache, re.MULTILINE):
+                    _ok_basenames.add(_m.group(1).strip().lower())
                 updated = 0
+                paths_marques = []
                 for f in fichiers:
                     fpath = f.get('path', '') if isinstance(f, dict) else str(f)
-                    if fpath:
-                        cursor.execute(
-                            "UPDATE songs SET comments = 'IN_AZURACAST' WHERE `path` = %s AND (comments IS NULL OR comments != 'IN_AZURACAST')",
-                            (fpath,)
-                        )
+                    if not fpath or _t_annule:
+                        continue
+                    _base = fpath.replace('\\', '/').rsplit('/', 1)[-1].strip().lower()
+                    # éligibilité : log absent (fallback legacy) OU copie globale
+                    # sans erreur OU fichier vu dans une ligne [OK SFTP]
+                    _eligible = (not log_tache) or (_nb_erreurs == 0 and _nb_copies > 0) or (_base in _ok_basenames)
+                    if not _eligible:
+                        continue
+                    cursor.execute(
+                        "UPDATE radiodb.songs SET comments = 'IN_AZURACAST' WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments != 'IN_AZURACAST')",
+                        (fpath, fpath.replace('/', '\\'))
+                    )
+                    if cursor.rowcount > 0:
                         updated += cursor.rowcount
+                        paths_marques.append(fpath)
                 if updated > 0:
                     db.commit()
+                marquage = {'status': 'ok', 'updated': updated, 'paths': paths_marques}
+                if updated:
+                    _logger.info(f"[v2.7] {updated} titre(s) marqué(s) IN_AZURACAST dans radiodb.songs (COPIE_FICHIERS)")
                 # v2.5 — cycle éditorial complet : les lignes sources liées
                 # aux fichiers de la tâche passent 'pousse_azura' → badge
                 # « 📡 Diffusé » + sortie du flux Pont. (Appliqué sur TOUS
@@ -995,8 +1036,9 @@ def lire_log_push():
                             _qualifier_sources_pousse_azura(cursor, db, _song_ids_copie)
                 except Exception:
                     pass
-            except Exception:
-                pass
+            except Exception as _e_mark:
+                marquage = {'status': 'erreur', 'message': str(_e_mark), 'updated': 0, 'paths': []}
+                _logger.warning(f"[v2.7] marquage IN_AZURACAST ignoré : {_e_mark}")
 
         cursor.close()
         db.close()
@@ -1022,7 +1064,7 @@ def lire_log_push():
             else:
                 log = "(Aucun log disponible pour cette tâche.)"
         return jsonify({"log": log, "statut": vrai_statut,
-                         "type_action": type_action})
+                         "type_action": type_action, "marquage": marquage})
     except Exception as e:
         return jsonify({"log": f"Erreur : {e}", "statut": "erreur"})        
 
@@ -1157,7 +1199,7 @@ def api_marquer_in_azuracast():
         # Marquer par chemin de fichier
         for chemin in fichiers:
             cursor.execute(
-                "UPDATE songs SET comments = 'IN_AZURACAST' WHERE `path` = %s AND (comments IS NULL OR comments = '' OR comments != 'IN_AZURACAST')",
+                "UPDATE radiodb.songs SET comments = 'IN_AZURACAST' WHERE `path` = %s AND (comments IS NULL OR comments = '' OR comments != 'IN_AZURACAST')",
                 (chemin,)
             )
             updated += cursor.rowcount
@@ -1165,7 +1207,7 @@ def api_marquer_in_azuracast():
         # Marquer par ID
         for sid in ids:
             cursor.execute(
-                "UPDATE songs SET comments = 'IN_AZURACAST' WHERE ID = %s AND (comments IS NULL OR comments = '' OR comments != 'IN_AZURACAST')",
+                "UPDATE radiodb.songs SET comments = 'IN_AZURACAST' WHERE ID = %s AND (comments IS NULL OR comments = '' OR comments != 'IN_AZURACAST')",
                 (sid,)
             )
             updated += cursor.rowcount
