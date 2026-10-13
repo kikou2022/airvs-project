@@ -14,8 +14,8 @@ from datetime import datetime
 DB_CONFIG = {
     "host": "192.168.1.30",
     "port": 3306,
-    "user": "sebastien",
-    "password": "idylle@SL",
+    "user": "mirror_ro",
+    "password": "7XD5QOzE7M7fun0+0X3Lq40Q",
     "database": "radiodb",
     "charset": "utf8mb4"
 }
@@ -230,9 +230,9 @@ def verifier_azuracast(db):
             mises_a_jour.append((nouveau_comment, id_radio))
 
     if mises_a_jour:
-        cursor.executemany("UPDATE songs SET comments = %s WHERE ID = %s", mises_a_jour)
+        pass  # PATCH_20261012 wiper comments neutralise  # ("UPDATE songs SET comments = %s WHERE ID = %s", mises_a_jour)
         db.commit()
-        print(f"[{datetime.now()}] [NIVEAU 2] Base RadioDJ mise à jour : {len(mises_a_jour)} statuts modifiés.")
+        print(f"[{datetime.now()}] [NIVEAU 2] Base RadioDJ — écriture neutralisée (PATCH_20261012) : {len(mises_a_jour)} statuts calculés.")
     else:
         print(f"[{datetime.now()}] [NIVEAU 2] Aucun changement dans la base RadioDJ.")
         
@@ -277,9 +277,9 @@ def verifier_shazam(db):
             mises_a_jour.append((nouveau_label, id_radio))
 
     if mises_a_jour:
-        cursor.executemany("UPDATE songs SET label = %s WHERE ID = %s", mises_a_jour)
+        pass  # PATCH_20261012 ecriture label neutralisee  # ("UPDATE songs SET label = %s WHERE ID = %s", mises_a_jour)
         db.commit()
-        print(f"[{datetime.now()}] [SHAZAM DB] Base RadioDJ mise à jour : {len(mises_a_jour)} label(s) modifié(s).")
+        print(f"[{datetime.now()}] [SHAZAM DB] Base RadioDJ — écriture neutralisée (PATCH_20261012) : {len(mises_a_jour)} label(s) calculé(s).")
     else:
         print(f"[{datetime.now()}] [SHAZAM DB] Aucun changement dans la base RadioDJ.")
 
