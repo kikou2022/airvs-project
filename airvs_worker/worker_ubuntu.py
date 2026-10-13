@@ -1924,6 +1924,40 @@ def executer_suspect_reject(tache_id, parametres):
         raise
 
 
+def _marquer_in_azuracast_radiodb(tache_id, chemins):
+    """v2.7 — Marque comments='IN_AZURACAST' dans radiodb.songs (RadioDJ)
+    pour chaque chemin réellement copié vers AzuraCast.
+
+    But : garantir le tag même si le dashboard ne poll pas /lire_log_push
+    (onglet fermé, flux sans surveillance). Chemins au format Windows tel
+    que stocké dans songs (variantes / et \\ testées). Non bloquant :
+    échec loggé, la copie reste valide."""
+    chemins = [c for c in (chemins or []) if c]
+    if not chemins:
+        return
+    try:
+        db_m = pymysql.connect(**DB_CONFIG)
+        cur_m = db_m.cursor()
+        n = 0
+        for c in chemins:
+            cur_m.execute(
+                "UPDATE radiodb.songs SET comments = 'IN_AZURACAST' "
+                "WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments != 'IN_AZURACAST')",
+                (c, c.replace('/', '\\'))
+            )
+            n += cur_m.rowcount
+        db_m.commit()
+        cur_m.close()
+        db_m.close()
+        if n:
+            logger(tache_id, f"[TAG] {n} titre(s) marqué(s) IN_AZURACAST dans RadioDJ (radiodb.songs)")
+    except Exception as e:
+        try:
+            logger(tache_id, f"[TAG] marquage IN_AZURACAST ignoré : {e}")
+        except Exception:
+            pass
+
+
 def executer_copie(tache_id, parametres):
     destination = parametres.get('destination')
     fichiers = parametres.get('fichiers', [])
@@ -1959,6 +1993,7 @@ def executer_copie(tache_id, parametres):
         return
 
     copies, erreurs, exclus = 0, 0, 0
+    paths_copies = []  # v2.7 : chemins (params tâche) réellement copiés vers AzuraCast
 
     if destination.startswith(AZURA_SSHFS_ROOT):
         logger(tache_id, f"Interrogation API AzuraCast (station {station_id}) pour vérifier les doublons globaux...")
@@ -1975,6 +2010,7 @@ def executer_copie(tache_id, parametres):
             # ── Vérification d'annulation push ──
             if check_push_cancel(tache_id):
                 logger(tache_id, f"=== ANNULÉ === {copies} copié(s), {exclus} exclu(s), {erreurs} erreur(s) ===")
+                _marquer_in_azuracast_radiodb(tache_id, paths_copies)
                 return
             chemin_windows = fich.get('path', '').replace("/", "\\")
             artiste, titre = fich.get('artist', '?'), fich.get('title', '?')
@@ -1998,8 +2034,11 @@ def executer_copie(tache_id, parametres):
             succes, message = copier_vers_azuracast_sftp(src_path, dst_path_str)
             if succes:
                 logger(tache_id, f"[OK SFTP] {details} -> {src_path.name}"); copies += 1
+                paths_copies.append(fich.get('path', ''))
             else:
                 logger(tache_id, f"[ÉCHEC SFTP] {details} -> {message}"); erreurs += 1
+        # v2.7 — marquage IN_AZURACAST dans RadioDJ pour tout ce qui a été copié
+        _marquer_in_azuracast_radiodb(tache_id, paths_copies)
     else:
         try:
             os.makedirs(destination_finale, exist_ok=True)
@@ -4688,7 +4727,7 @@ def executer_sync_azura_status(tache_id, parametres):
     try:
         db = pymysql.connect(**DB_CONFIG)
         cursor = db.cursor(pymysql.cursors.DictCursor)
-        cursor.execute("SELECT ID, `path`, artist, title FROM songs WHERE song_type = 0")
+        cursor.execute("SELECT ID, `path`, artist, title FROM radiodb.songs WHERE song_type = 0")
         all_songs = cursor.fetchall()
 
         ids_a_marquer = []
@@ -4721,7 +4760,7 @@ def executer_sync_azura_status(tache_id, parametres):
                 batch = ids_a_marquer[i:i+100]
                 placeholders = ','.join(['%s'] * len(batch))
                 cursor.execute(
-                    f"UPDATE songs SET comments = 'IN_AZURACAST' WHERE ID IN ({placeholders}) AND (comments IS NULL OR comments != 'IN_AZURACAST')",
+                    f"UPDATE radiodb.songs SET comments = 'IN_AZURACAST' WHERE ID IN ({placeholders}) AND (comments IS NULL OR comments != 'IN_AZURACAST')",
                     batch
                 )
                 updated += cursor.rowcount
