@@ -156,6 +156,7 @@ CIBLES_GRILLE_WEB = {
 MOUNT_MAP = {
     "D:\\": "/mnt/projet_radio2",
     "E:\\": "/mnt/projet_radio3",
+    "K\\": "/mnt/projet_radio3",  # K53SC
     "M:\\": "/mnt/musique_172_go",
     "L:\\": "/mnt/musique_47_go",
     "N:\\": "/media/sebastien/musique_debian",

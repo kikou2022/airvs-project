@@ -179,7 +179,7 @@ PUSH_LIMIT_HARDCAP = 500
 
 INBOX_FOLDERS = {
     "inbox_1": {
-        "path": r"E:\projet_radio\Musique\en_cours",
+        "path": r"K:\projet_radio\Musique\en_cours",
         "id_subcat": 244,
         "id_genre": 452
     },
@@ -241,9 +241,9 @@ SUSPECTS_DIR = os.getenv('SUSPECTS_DIR', r'U:\Musique\import\suspects')
 # Chemin Windows reel (physique sur disque).
 # Le worker Ubuntu voit le meme dossier via SSHFS en /mnt/projet_radio3/Musique
 # car DOSSIERS_A_IGNORER={"projet_radio"} dans windows_vers_linux() absorbe
-# la difference entre E:\projet_radio\Musique et E:\Musique.
+# la difference entre K:\projet_radio\Musique et E:\Musique.
 # RadioDJ surveille ce dossier pour importer les nouveaux fichiers.
-FOLDERSYNC_WINDOWS_BASE = os.getenv('FOLDERSYNC_WINDOWS_BASE', r'E:\projet_radio\Musique')
+FOLDERSYNC_WINDOWS_BASE = os.getenv('FOLDERSYNC_WINDOWS_BASE', r'K:\projet_radio\Musique')
 
 # Chemin vers mp3gain.exe sur le dashboard Windows.
 # Si 'mp3gain' (defaut), il sera cherche dans le PATH systeme.
