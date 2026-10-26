@@ -580,6 +580,7 @@ def _assurer_schema_browse_roots():
             'M:/': 'Musique 172 Go (Debian Master)',
             'L:/': 'Musique 47 Go (Debian Master)',
             'D:/': 'Projet Radio 2 (Windows)',
+            'K:/': 'Projet Radio 3 (K53SC)',
             'E:/': 'Projet Radio 3 (Windows)',
             'N:/': 'Musique Debian (SSHFS)',
             'Z:/': 'Disque Externe (Debian SSHFS)',
