@@ -533,7 +533,7 @@ d'import & validation) et dans le log applicatif.
 # Le fallback hardcodé n'est utilisé que si la DB est inaccessible.
 
 if platform.system() == 'Windows':
-    _BROWSE_ROOTS_FALLBACK = ['U:/', 'M:/', 'L:/', 'D:/', 'E:/', 'N:/', 'Z:/', 'W:/', 'Y:/']
+    _BROWSE_ROOTS_FALLBACK = ['U:/', 'M:/', 'L:/', 'D:/', 'K:/', 'E:/', 'N:/', 'Z:/', 'W:/', 'Y:/']
     _BROWSE_DEFAULT_FALLBACK = 'U:/'
 else:
     _BROWSE_ROOTS_FALLBACK = ['/mnt', '/mnt/stockage_1to', '/home', '/media']
@@ -657,7 +657,7 @@ def _load_browse_roots():
             return _BROWSE_ROOTS_FALLBACK
         cursor = db.cursor()
         cursor.execute("SELECT root FROM airvs_browse_roots WHERE actif=1 ORDER BY pos")
-        roots = [r[0] for r in cursor.fetchall()]
+        roots = [list(r.values())[0] for r in cursor.fetchall()]
         cursor.close()
         db.close()
         return roots if roots else _BROWSE_ROOTS_FALLBACK
