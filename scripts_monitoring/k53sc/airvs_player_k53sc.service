@@ -1,0 +1,18 @@
+[Unit]
+Description=AIRVS Player — K53SC (stream6) — adaptation du airvs-radio.service du DELL
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/airvs_player
+ExecStart=/usr/bin/python3 /opt/airvs_player/airvs_player.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/airvs/airvs_player_k53sc.stdout.log
+StandardError=append:/var/log/airvs/airvs_player_k53sc.stderr.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+{
+  "flux_actif": "stream6",
+  "flux_disponibles": [
+    {
+      "id": "stream6",
+      "nom": "AIRVS Station 6",
+      "url": "https://icecast-vps-ovh.airvs.fr/stream6",
+      "codec": "MP3",
+      "bitrate": 128,
+      "detail": "MP3 / 44100Hz / Stéréo / TTS v4 / produit par liquidsoap-station6 (Docker, VPS OVH 1)"
+    }
+  ]
+}
