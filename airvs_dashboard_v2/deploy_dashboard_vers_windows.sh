@@ -376,7 +376,7 @@ MD5_FAIL=0
 declare -a MD5_FILES=(
     "${CODE_PY_FILES[@]}"
     "${BLUEPRINT_FILES[@]}"
-    "templates/index.html"
+    "index.html:templates/index.html"
     "templates/login.html"
 )
 
@@ -394,8 +394,14 @@ MD5_FILES+=("static/css/style.css")
 MD5_FILES+=("static/js/bootstrap.bundle.min.js")
 
 for f in "${MD5_FILES[@]}"; do
-    SRC_FILE="${SOURCE_DIR}${f}"
-    DST_FILE="${DEST_DIR}${f}"
+    # Support notation src:dst (ex. "index.html:templates/index.html" pour
+    # les fichiers dont le chemin source differe du chemin destination).
+    # Sans ":", src = dst = f (compatibilite ascendante).
+    SRC_REL="${f%%:*}"
+    DST_REL="${f#*:}"
+    [ "$SRC_REL" = "$f" ] && DST_REL="$f"
+    SRC_FILE="${SOURCE_DIR}${SRC_REL}"
+    DST_FILE="${DEST_DIR}${DST_REL}"
     if [ ! -f "$DST_FILE" ]; then
         fail "$f (absent côté Windows)"
         ALL_OK=false
