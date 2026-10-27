@@ -86,7 +86,7 @@ _SUBPROCESS_CREATIONFLAGS = (
 # Flux radio
 # ═══════════════════════════════════════════════════════════════════════
 
-FLUX_BRIDGE_PATH = "/home/sebastien/radio_bridge"  # Chemin sur Debian 3 (acces via SSH)
+FLUX_BRIDGE_PATH = "/home/sebastien/radio_bridge/monitoring/stream12"  # Chemin sur Debian 3 (acces via SSH)
 
 
 # ═══════════════════════════════════════════════════════════════════════
