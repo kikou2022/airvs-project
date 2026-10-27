@@ -14,7 +14,7 @@ from datetime import date
 load_dotenv()
 
 # ─── Configuration Sortie pour RadioDJ ─────────────────────────────────
-DOSSIER_RESEAU = "/home/sebastien/radio_bridge"
+DOSSIER_RESEAU = "/home/sebastien/radio_bridge/monitoring/stream12"
 PLAYLIST_ACTIVE_PATH = os.path.join(DOSSIER_RESEAU, "playlist_live_azuracast.m3u")
 NB_TITRES_FLUX_ACTIF = 10
 
