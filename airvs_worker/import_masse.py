@@ -208,19 +208,27 @@ def _format_taille(octets):
 # ─── Tags ID3 ────────────────────────────────────────────────────
 
 def _lire_tags(fichier):
-    """Retourne (artist, title) depuis les tags (MP3 ID3 ou FLAC Vorbis)."""
+    """Retourne (artist, title, album) depuis les tags (MP3 ID3 ou FLAC Vorbis).
+
+    Bug fix (2026-10-28) : l'album est maintenant retourné pour permettre à
+    _verifier_en_base de différencier les vrais doublons (même album) des
+    versions différentes (album différent — ex: LIVE vs studio, Best of vs
+    Original). Sans cette distinction, les imports de versions live d'un
+    titre déjà présent en studio étaient marqués à tort comme SUSPECT.
+    """
     if not MUTAGEN_OK:
-        return "", ""
+        return "", "", ""
     try:
         # Utiliser MutagenFile (easy=True) qui supporte MP3, FLAC, OGG, etc.
         audio = MutagenFile(str(fichier), easy=True)
         if audio is None:
-            return "", ""
+            return "", "", ""
         artist = str(audio.get('artist', [''])[0]).strip()
         title = str(audio.get('title', [''])[0]).strip()
-        return artist, title
+        album = str(audio.get('album', [''])[0]).strip()
+        return artist, title, album
     except Exception:
-        return "", ""
+        return "", "", ""
 
 
 def _lire_meta(fichier):
@@ -397,7 +405,10 @@ def _verifier_en_base(cursor, fichier):
     nom_lower = nom.lower()
 
     # Lire les tags ID3 une seule fois (réutilisé par les passes 2/2b/2c)
-    artist, title = _lire_tags(fichier)
+    # Bug fix (2026-10-28) : lire aussi l'album pour différencier les vrais
+    # doublons (même album) des versions différentes (album différent).
+    artist, title, album_source = _lire_tags(fichier)
+    album_source_norm = (album_source or '').strip().lower()
 
     # ── Passe 1 : recherche par nom de fichier (match exact en fin de path) ──
     try:
@@ -420,18 +431,29 @@ def _verifier_en_base(cursor, fichier):
     if artist and title:
         try:
             cursor.execute(
-                "SELECT id, artist, title, path, duration FROM songs "
+                "SELECT id, artist, title, path, duration, album FROM songs "
                 "WHERE artist = %s AND title = %s LIMIT 10",
                 (artist, title)
             )
             rows = cursor.fetchall()
             if rows:
                 r = rows[0]
-                detail = (
-                    f"ID:{r['id']} {r['artist']} - {r['title']} "
-                    f"[tags exact: {artist} / {title}]"
-                )
-                return True, "tags", detail, r['id'], r
+                # Bug fix (2026-10-28) : si l'album source est renseigné et
+                # différent de l'album BDD, ce n'est PAS un doublon — c'est
+                # une version différente (ex: LIVE vs studio, Best of vs
+                # Original). On continue vers les passes suivantes pour
+                # vérifier si une autre entrée BDD a le même album. Si
+                # aucune passe ne trouve un match avec même album, le
+                # fichier sera marqué NOUVEAU.
+                album_bdd = (r.get('album') or '').strip().lower()
+                if album_source_norm and album_bdd and album_bdd != album_source_norm:
+                    pass  # albums diffèrent → ne pas return True, continuer
+                else:
+                    detail = (
+                        f"ID:{r['id']} {r['artist']} - {r['title']} "
+                        f"[tags exact: {artist} / {title}]"
+                    )
+                    return True, "tags", detail, r['id'], r
         except Exception:
             pass
 
@@ -447,13 +469,18 @@ def _verifier_en_base(cursor, fichier):
         if art_principal:
             try:
                 cursor.execute(
-                    "SELECT id, artist, title, path, duration FROM songs "
+                    "SELECT id, artist, title, path, duration, album FROM songs "
                     "WHERE title = %s AND artist LIKE %s LIMIT 50",
                     (title, f"%{art_principal}%")
                 )
                 for r in cursor.fetchall():
                     db_art_p = _extraire_artiste_principal(r['artist'])
                     if db_art_p.lower() == art_principal.lower():
+                        # Bug fix (2026-10-28) : check album diffère
+                        # (voir commentaire passe 2 pour le détail)
+                        album_bdd = (r.get('album') or '').strip().lower()
+                        if album_source_norm and album_bdd and album_bdd != album_source_norm:
+                            continue  # albums diffèrent → skip ce row
                         detail = (
                             f"ID:{r['id']} {r['artist']} - {r['title']} "
                             f"[tags_principal: '{artist}' ↔ '{r['artist']}' → '{art_principal}']"
@@ -474,7 +501,7 @@ def _verifier_en_base(cursor, fichier):
                     tit_nu.lower() != title.lower()):
                 try:
                     cursor.execute(
-                        "SELECT id, artist, title, path, duration FROM songs "
+                        "SELECT id, artist, title, path, duration, album FROM songs "
                         "WHERE title = %s AND artist LIKE %s LIMIT 50",
                         (tit_nu, f"%{art_nu}%")
                     )
@@ -483,6 +510,11 @@ def _verifier_en_base(cursor, fichier):
                         db_tit_nu = _extraire_nu(r['title'])
                         if (db_art_nu.lower() == art_nu.lower() and
                                 db_tit_nu.lower() == tit_nu.lower()):
+                            # Bug fix (2026-10-28) : check album diffère
+                            # (voir commentaire passe 2 pour le détail)
+                            album_bdd = (r.get('album') or '').strip().lower()
+                            if album_source_norm and album_bdd and album_bdd != album_source_norm:
+                                continue  # albums diffèrent → skip ce row
                             detail = (
                                 f"ID:{r['id']} {r['artist']} - {r['title']} "
                                 f"[tags_nu: '{artist}'/'{title}' → "

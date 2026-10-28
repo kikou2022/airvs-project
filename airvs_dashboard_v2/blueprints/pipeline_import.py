@@ -1514,6 +1514,34 @@ def _dossier_foldersync_courant():
     return dossier
 
 
+def _dossier_foldersync_pour_import(sync_folder):
+    """Retourne le dossier FolderSync a utiliser pour valider un suspect.
+
+    Bug fix (2026-10-28) : si l import d origine a fourni un sync_folder
+    explicite (ex: K:\\projet_radio\\Musique\\LIVES\\MARY_MERCREDI), on
+    l utilise. Le suspect valide sera copie dans le meme dossier que les
+    fichiers NOUVEAU de l import d origine. RadioDJ lui assignera ainsi
+    automatiquement la bonne categorie (basee sur le chemin).
+
+    Si sync_folder est vide ou invalide -> fallback sur le comportement
+    par defaut (_dossier_foldersync_courant = NOUVELLES_ENTREES/SEMAINE_XX).
+    Cela preserve la compatibilite ascendante (si le frontend n envoie
+    pas encore le champ sync_folder, on retombe sur l ancien comportement).
+    """
+    if not sync_folder:
+        return _dossier_foldersync_courant()
+    try:
+        dossier = Path(sync_folder)
+        dossier.mkdir(parents=True, exist_ok=True)
+        return dossier
+    except Exception as e:
+        _logger.warning(
+            "sync_folder invalide '%s' -> fallback sur _dossier_foldersync_courant(). Erreur : %s",
+            sync_folder, e
+        )
+        return _dossier_foldersync_courant()
+
+
 def _chercher_match_db(artist, title):
     """Cherche une entrée correspondante dans radiodb.songs.
 
@@ -1816,9 +1844,12 @@ def api_suspect_validate():
     if not os.path.exists(src):
         return jsonify({"error": f"Fichier suspect introuvable : {filename}"}), 404
 
-    # Determiner le dossier FolderSync de la semaine
+    # Bug fix (2026-10-28) : utiliser le sync_folder de l import d origine
+    # si le frontend le fournit. Sinon, fallback sur _dossier_foldersync_courant
+    # (NOUVELLES_ENTREES/SEMAINE_XX) pour compatibilite ascendante.
+    sync_folder_param = (data.get('sync_folder') or '').strip()
     try:
-        sync_dir = _dossier_foldersync_courant()
+        sync_dir = _dossier_foldersync_pour_import(sync_folder_param)
     except Exception as e:
         return jsonify({"error": f"Erreur FolderSync : {e}"}), 500
 
@@ -2002,8 +2033,12 @@ def api_suspect_edit_validate():
         return jsonify({"error": f"Erreur ecriture tags ID3 : {e}"}), 500
 
     # 2. Copier vers FolderSync (meme logique que api_suspect_validate)
+    # Bug fix (2026-10-28) : utiliser le sync_folder de l import d origine
+    # si le frontend le fournit. Sinon, fallback sur _dossier_foldersync_courant
+    # (NOUVELLES_ENTREES/SEMAINE_XX) pour compatibilite ascendante.
+    sync_folder_param = (data.get('sync_folder') or '').strip()
     try:
-        sync_dir = _dossier_foldersync_courant()
+        sync_dir = _dossier_foldersync_pour_import(sync_folder_param)
     except Exception as e:
         return jsonify({"error": f"Erreur FolderSync : {e}"}), 500
 

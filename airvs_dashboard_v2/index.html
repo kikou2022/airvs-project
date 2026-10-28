@@ -5707,6 +5707,16 @@ document.addEventListener('DOMContentLoaded', function() {
     // les appels de polling parasites venus de vieux setInterval non nettoyés.
     window._currentTacheId = null;
 
+    // Bug fix (2026-10-28) : mémoriser les paramètres (sync_folder,
+    // category_id) du DERNIER import lancé, pour les transmettre aux
+    // routes /api/suspects/validate et /api/suspects/edit-validate.
+    // Sans ça, les suspects validés finissent dans NOUVELLES_ENTREES/SEMAINE_XX
+    // au lieu du dossier ciblé par l'import d'origine.
+    // Limite connue : si l'utilisateur lance un 2e import avec d'autres
+    // params puis valide un suspect de la 1re import, les params de la 2e
+    // seront utilisés (workaround : valider AVANT de relancer un import).
+    window._lastImportParams = null;
+
     // Charger le dropdown des destinations RadioDJ
     (function() {
         var select = document.getElementById('pipeline_destination');
@@ -6104,10 +6114,17 @@ document.addEventListener('DOMContentLoaded', function() {
             row.style.pointerEvents = 'none';
         }
 
+        // Bug fix (2026-10-28) : transmettre sync_folder de l import d origine
+        // pour que le suspect soit copie dans le bon dossier (ex: LIVES\MARY_MERCREDI)
+        // au lieu de NOUVELLES_ENTREES/SEMAINE_XX.
+        var _validatePayload = {filename: filename};
+        if (window._lastImportParams && window._lastImportParams.sync_folder) {
+            _validatePayload.sync_folder = window._lastImportParams.sync_folder;
+        }
         fetch('/api/suspects/validate', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({filename: filename})
+            body: JSON.stringify(_validatePayload)
         })
         .then(function(r) {
             if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Erreur ' + r.status); });
@@ -6294,21 +6311,28 @@ document.addEventListener('DOMContentLoaded', function() {
             row.style.pointerEvents = 'none';
         }
 
+        // Bug fix (2026-10-28) : transmettre sync_folder de l import d origine
+        // pour que le suspect edit-validate soit copie dans le bon dossier
+        // (ex: LIVES\MARY_MERCREDI) au lieu de NOUVELLES_ENTREES/SEMAINE_XX.
+        var _editValidatePayload = {
+            filename: filename,
+            artist: artist,
+            title: title,
+            album: document.getElementById('edit-suspect-album').value.trim(),
+            year: document.getElementById('edit-suspect-year').value.trim(),
+            genre: document.getElementById('edit-suspect-genre').value.trim(),
+            album_artist: document.getElementById('edit-suspect-album-artist').value.trim(),
+            composer: document.getElementById('edit-suspect-composer').value.trim(),
+            publisher: document.getElementById('edit-suspect-publisher').value.trim(),
+            track: document.getElementById('edit-suspect-track').value.trim()
+        };
+        if (window._lastImportParams && window._lastImportParams.sync_folder) {
+            _editValidatePayload.sync_folder = window._lastImportParams.sync_folder;
+        }
         fetch('/api/suspects/edit-validate', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                filename: filename,
-                artist: artist,
-                title: title,
-                album: document.getElementById('edit-suspect-album').value.trim(),
-                year: document.getElementById('edit-suspect-year').value.trim(),
-                genre: document.getElementById('edit-suspect-genre').value.trim(),
-                album_artist: document.getElementById('edit-suspect-album-artist').value.trim(),
-                composer: document.getElementById('edit-suspect-composer').value.trim(),
-                publisher: document.getElementById('edit-suspect-publisher').value.trim(),
-                track: document.getElementById('edit-suspect-track').value.trim()
-            })
+            body: JSON.stringify(_editValidatePayload)
         })
         .then(function(r) {
             if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Erreur ' + r.status); });
@@ -6520,6 +6544,12 @@ document.addEventListener('DOMContentLoaded', function() {
                     // le nouveau setInterval, pour que _patchedPollPipelineStatus
                     // puisse ignorer les appels parasites de vieux timers.
                     window._currentTacheId = data.tache_id;
+                    // Bug fix (2026-10-28) : mémoriser les params de cet import
+                    // pour les transmettre aux routes de validation des suspects.
+                    window._lastImportParams = {
+                        sync_folder: payload.sync_folder || '',
+                        category_id: payload.category_id || ''
+                    };
                     window._pipelinePollTimer = setInterval(function() { _patchedPollPipelineStatus(data.tache_id); }, 2000);
                 })
                 .catch(function(err) {
