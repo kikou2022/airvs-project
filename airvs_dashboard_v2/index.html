@@ -5703,6 +5703,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // ════════════════════════════════════
     var _pipelinePollTimer = null;
     var _pipelineLastLen = 0;
+    // Bug fix (2026-10-27) : tracker la tâche courante pour ignorer
+    // les appels de polling parasites venus de vieux setInterval non nettoyés.
+    window._currentTacheId = null;
 
     // Charger le dropdown des destinations RadioDJ
     (function() {
@@ -6347,6 +6350,14 @@ document.addEventListener('DOMContentLoaded', function() {
     var _originalPollPipelineStatus = (typeof _pollPipelineStatus === 'function') ? _pollPipelineStatus : null;
     // Surcharge : a la fin du pipeline, verifier s'il y a des suspects
     var _patchedPollPipelineStatus = function(tacheId) {
+        // Bug fix (2026-10-27) : si le tacheId ne correspond pas à la tâche
+        // courante, c'est un vieux setInterval parasite (1re import dont le
+        // polling n'a jamais vu le statut 'termine' à cause d'une erreur
+        // réseau silencieuse). On ignore l'appel sans rien faire — le vieux
+        // timer finira par être clearé quand la 2e import terminera.
+        if (window._currentTacheId && tacheId !== window._currentTacheId) {
+            return;
+        }
         var termDiv = document.getElementById('pipeline_log_terminal');
         var statusDiv = document.getElementById('pipeline_launch_status');
         var btn = document.getElementById('btn_pipeline_launch');
@@ -6364,8 +6375,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
 
                 if (data.statut === 'termine' || data.statut === 'erreur') {
-                    clearInterval(_pipelinePollTimer);
-                    _pipelinePollTimer = null;
+                    // Bug fix (2026-10-27) : utiliser window._pipelinePollTimer explicitement
+                    // pour éviter de clearer un timer qui aurait été remplacé entre-temps
+                    // par un nouveau setInterval (cas d'une 2e import lancée pendant que la
+                    // 1re n'était pas terminée proprement).
+                    clearInterval(window._pipelinePollTimer);
+                    window._pipelinePollTimer = null;
+                    if (window._currentTacheId === tacheId) {
+                        window._currentTacheId = null;
+                    }
                     btn.disabled = false;
                     btn.textContent = '\u25b6 Lancer le pipeline';
                     var cls = data.statut === 'termine' ? 'text-success' : 'text-danger';
@@ -6442,6 +6460,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 termDiv.textContent = '';
                 window._pipelineLastLen = 0;
 
+                // Bug fix (2026-10-27) : arrêter l'ancien timer avant d'en
+                // démarrer un nouveau, au cas où la 1re import n'aurait pas été
+                // terminée proprement (fetch de polling en erreur silencieuse).
+                if (window._pipelinePollTimer) {
+                    clearInterval(window._pipelinePollTimer);
+                    window._pipelinePollTimer = null;
+                }
+                window._currentTacheId = null;  // sera set après fetch launch
+
                 fetch('/api/pipeline/launch', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -6455,6 +6482,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     var mode = data.mode || 'dry-run';
                     statusDiv.innerHTML = '<span class="text-success">T\u00e2che #' + data.tache_id + ' en file (' + mode + ')</span>';
                     termDiv.textContent = 'T\u00e2che #' + data.tache_id + ' en attente du worker...\n';
+                    // Bug fix (2026-10-27) : set _currentTacheId AVANT de démarrer
+                    // le nouveau setInterval, pour que _patchedPollPipelineStatus
+                    // puisse ignorer les appels parasites de vieux timers.
+                    window._currentTacheId = data.tache_id;
                     window._pipelinePollTimer = setInterval(function() { _patchedPollPipelineStatus(data.tache_id); }, 2000);
                 })
                 .catch(function(err) {
