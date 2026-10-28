@@ -6390,6 +6390,34 @@ document.addEventListener('DOMContentLoaded', function() {
                     var label = data.statut === 'termine' ? 'Termine' : 'Erreur';
                     statusDiv.innerHTML = '<span class="' + cls + ' fw-bold">' + label + ' (t\u00e2che #' + tacheId + ')</span>';
 
+                    // Bug fix v2 (2026-10-28) : re-fetch de sécurité si data.log est
+                    // vide/partiel alors qu'on vient de voir statut=termine. Pour les
+                    // tâches très courtes (~9s), il existe une fenêtre de quelques ms
+                    // où le worker vient de mettre statut='termine' mais le logger()
+                    // final n'a pas encore commité le log_resultat complet. Sans ce
+                    // re-fetch, le log principal n'est jamais récupéré et l'utilisateur
+                    // ne voit que "Tâche #X en attente du worker..." + la corrélation.
+                    if (data.statut === 'termine' && (!data.log || data.log.length < 100)) {
+                        console.warn('[pipeline_poll] Tâche #' + tacheId + ' termine mais log vide/partiel (' + (data.log ? data.log.length : 0) + ' chars) — re-fetch dans 500ms');
+                        setTimeout(function() {
+                            fetch('/api/pipeline/status/' + tacheId + '?t=' + Date.now())
+                                .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+                                .then(function(d) {
+                                    if (d.log && d.log.length > 0) {
+                                        console.info('[pipeline_poll] Re-fetch OK — log récupéré (' + d.log.length + ' chars) pour tâche #' + tacheId);
+                                        termDiv.textContent = d.log;
+                                        window._pipelineLastLen = d.log.length;
+                                        termDiv.scrollTop = termDiv.scrollHeight;
+                                    } else {
+                                        console.warn('[pipeline_poll] Re-fetch: log toujours vide pour tâche #' + tacheId + ' — vérifier log_resultat en BDD');
+                                    }
+                                })
+                                .catch(function(err) {
+                                    console.error('[pipeline_poll] Re-fetch échoué pour tâche #' + tacheId + ':', err);
+                                });
+                        }, 500);
+                    }
+
                     // Verifier les suspects a la fin du pipeline
                     _checkSuspectsAfterImport();
 
@@ -6402,7 +6430,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                 }
             })
-            .catch(function() {});
+            .catch(function(err) {
+                // Bug fix v2 (2026-10-28) : logger les erreurs de fetch pour le debug.
+                // Avant, le catch vide avalait silencieusement toutes les erreurs réseau
+                // (timeout, 500, etc.) sans aucun feedback — ce qui rendait impossible
+                // le diagnostic des cas où le polling ne marche pas.
+                console.warn('[pipeline_poll] fetch error for tache ' + tacheId + ':', err);
+            });
     };
 
     function _checkSuspectsAfterImport() {
