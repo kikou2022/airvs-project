@@ -384,6 +384,20 @@ function setSourceFilter(value, prefix) {
     renderShazamListTable(allShazamRowsData[prefix] || [], {}, prefix);
 }
 
+// Sources officielles proposées par le formulaire VPS (programmes.airvs.fr).
+// Bug fix (2026-10-29) : hardcoder ces sources pour qu'elles soient toujours
+// disponibles dans le dropdown, même si aucune entrée ne les utilise
+// actuellement dans la page chargée. Les sources dynamiques (présentes dans
+// les lignes mais pas dans cette liste — ex: 'corrige') sont ajoutées en plus.
+var OFFICIAL_SOURCES = [
+    'Shazam',
+    'Emission',
+    'Chronique',
+    'Titre Discothèque',
+    'Recommandation',
+    'Autre'
+];
+
 // Peuple dynamiquement le dropdown de source à partir des valeurs présentes dans les lignes.
 // Conserve la sélection actuelle si elle est encore disponible.
 function populateSourceDropdown(prefix) {
@@ -391,6 +405,9 @@ function populateSourceDropdown(prefix) {
     if (!sel) return;
     var currentVal = sel.value;
     var sources = {};
+    // Ajouter d'abord les sources officielles (toujours présentes dans le dropdown)
+    OFFICIAL_SOURCES.forEach(function(s) { sources[s] = 1; });
+    // Puis ajouter les sources dynamiques présentes dans les lignes (ex: 'corrige')
     (allShazamRowsData[prefix] || []).forEach(function(r) {
         var s = (r.source || '').trim();
         if (s && !sources[s]) sources[s] = 1;
@@ -699,11 +716,35 @@ function renderShazamPagination(prefix, pagination) {
     var prevDisabled = state.page <= 1 ? ' disabled' : '';
     var nextDisabled = state.page >= pagination.total_pages ? ' disabled' : '';
 
-    var html = '<div>';
-    html += '<button class="btn btn-sm btn-outline-secondary me-1"' + prevDisabled +
-            ' onclick="window._shazamChangePage(\'' + prefix + '\', -1)"' + prevDisabled + '>← Précédent</button>';
+    // Bug fix (2026-10-29) : pagination ergonomique avec boutons Début/Fin
+    // + input direct de numéro de page. Avant, seulement Précédent/Suivant.
+    var html = '<div class="d-flex align-items-center gap-1">';
+    // Bouton ⏮ Début (première page)
+    html += '<button class="btn btn-sm btn-outline-secondary"' + prevDisabled +
+            ' onclick="window._shazamGoToPage(\'' + prefix + '\', 1)"' + prevDisabled +
+            ' title="Aller à la première page">⏮</button>';
+    // Bouton ← Précédent
+    html += '<button class="btn btn-sm btn-outline-secondary"' + prevDisabled +
+            ' onclick="window._shazamChangePage(\'' + prefix + '\', -1)"' + prevDisabled +
+            ' title="Page précédente">←</button>';
+    // Input direct numéro de page
+    html += '<div class="input-group input-group-sm" style="width: auto;">';
+    html += '<span class="input-group-text">Page</span>';
+    html += '<input type="number" class="form-control text-center" style="width: 60px;" ' +
+            'min="1" max="' + pagination.total_pages + '" value="' + state.page + '" ' +
+            'onchange="window._shazamGoToPage(\'' + prefix + '\', parseInt(this.value) || 1)" ' +
+            'onkeydown="if(event.key === \'Enter\'){window._shazamGoToPage(\'' + prefix + '\', parseInt(this.value) || 1); event.preventDefault();}" ' +
+            'title="Saisir un numéro de page puis Entrée">';
+    html += '<span class="input-group-text">/ ' + pagination.total_pages + '</span>';
+    html += '</div>';
+    // Bouton → Suivant
     html += '<button class="btn btn-sm btn-outline-secondary"' + nextDisabled +
-            ' onclick="window._shazamChangePage(\'' + prefix + '\', 1)"' + nextDisabled + '>Suivant →</button>';
+            ' onclick="window._shazamChangePage(\'' + prefix + '\', 1)"' + nextDisabled +
+            ' title="Page suivante">→</button>';
+    // Bouton ⏭ Fin (dernière page)
+    html += '<button class="btn btn-sm btn-outline-secondary"' + nextDisabled +
+            ' onclick="window._shazamGoToPage(\'' + prefix + '\', ' + pagination.total_pages + ')"' + nextDisabled +
+            ' title="Aller à la dernière page">⏭</button>';
     html += '</div>';
     html += '<div class="text-muted">Page ' + state.page + ' / ' + pagination.total_pages +
             ' — ' + pagination.total_count + ' entrée' + (pagination.total_count > 1 ? 's' : '') + ' au total</div>';
@@ -716,6 +757,15 @@ window._shazamChangePage = function(prefix, delta) {
     var newPage = state.page + delta;
     if (newPage < 1) return;
     state.page = newPage;
+    loadShazamList(prefix);
+};
+
+// Bug fix (2026-10-29) : handler global pour aller à une page spécifique
+// (utilisé par les boutons ⏮ Début + ⏭ Fin + l'input direct de numéro de page).
+window._shazamGoToPage = function(prefix, page) {
+    var state = getShazamPageState(prefix);
+    if (page < 1) return;
+    state.page = page;
     loadShazamList(prefix);
 };
 
