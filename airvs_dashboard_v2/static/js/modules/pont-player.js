@@ -9,6 +9,10 @@
  */
 (function() {
     'use strict';
+    // Phase 1 multi-stations (2026-10-29) : stream actuellement sélectionné dans les tabs.
+    // 'stream12' = Station 7 (DELL .30), 'stream6' = Station 6 (K53SC .37).
+    // Toutes les routes de monitoring utilisent cette variable dans l'URL.
+    var currentStreamId = 'stream12';
 
     // ── Références DOM ──
     var archiveContent = document.getElementById('flux_archive_content');
@@ -26,7 +30,7 @@
 
     // ── Status du player ──
     function fetchPlayerStatus() {
-        fetch('/api/airvs_player/status?t=' + Date.now())
+        fetch('/api/airvs_player/' + currentStreamId + '/status?t=' + Date.now())
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 let dot = document.getElementById('player_status_dot');
@@ -59,7 +63,7 @@
 
     // ── Journal du player ──
     function fetchPlayerJournal() {
-        fetch('/api/airvs_player/journal?lignes=50&t=' + Date.now())
+        fetch('/api/airvs_player/' + currentStreamId + '/journal?lignes=50&t=' + Date.now())
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 let terminal = document.getElementById('terminal_player_journal');
@@ -98,7 +102,7 @@
         let originalText = btn.innerHTML;
         btn.disabled = true;
         btn.innerHTML = '⏳...';
-        fetch('/api/airvs_player/' + action, { method: 'POST' })
+        fetch('/api/airvs_player/' + currentStreamId + '/' + action, { method: 'POST' })
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 btn.innerHTML = originalText;
@@ -133,7 +137,7 @@
 
     // ── Archives M3U ──
     function fetchArchivesList() {
-        fetch('/api/airvs_archives?t=' + Date.now())
+        fetch('/api/airvs_archives/' + currentStreamId + '?t=' + Date.now())
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.status !== 'ok') return;
@@ -161,7 +165,7 @@
             archiveCount.textContent = '0 titres';
             return;
         }
-        fetch('/api/airvs_archive/' + dateStr + '?t=' + Date.now())
+        fetch('/api/airvs_archive/' + currentStreamId + '/' + dateStr + '?t=' + Date.now())
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.status === 'ok') {
@@ -197,7 +201,7 @@
         var originalText = btn.innerHTML;
         btn.innerHTML = '⏳ Vérification…';
 
-        fetch('/api/flux_status?t=' + Date.now())
+        fetch('/api/flux_status/' + currentStreamId + '?t=' + Date.now())
             .then(function(r) {
                 if (!r.ok) throw new Error('HTTP ' + r.status);
                 return r.json();
@@ -208,7 +212,7 @@
 
                 if (data.statut === 'ok' && data.nb_titres_archive > 0) {
                     // L'archive du jour existe, lancer le téléchargement
-                    window.location.href = '/export_archive';
+                    window.location.href = '/export_archive/' + currentStreamId;
                 } else {
                     // Archive du jour non encore générée
                     var msg = '⏳ Archive du jour non encore disponible.\n\n';
@@ -233,7 +237,7 @@
 
     // ── Flux actif (M3U live) ──
     function fetchFluxStatus() {
-        fetch('/api/flux_status?t=' + Date.now())
+        fetch('/api/flux_status/' + currentStreamId + '?t=' + Date.now())
             .then(function(res) { return res.json(); })
             .then(function(data) {
                 if (data.statut === "ok") {
@@ -688,6 +692,22 @@
     }
 
     // ════════════════════════════════════
+    // Phase 1 multi-stations (2026-10-29) : handler tab switching
+    document.querySelectorAll('#player_streams_tabs a').forEach(function(tab) {
+        tab.addEventListener('click', function(e) {
+            e.preventDefault();
+            document.querySelectorAll('#player_streams_tabs a').forEach(function(t) {
+                t.classList.remove('active');
+            });
+            this.classList.add('active');
+            currentStreamId = this.dataset.stream;
+            fetchPlayerStatus();
+            fetchPlayerJournal();
+            fetchArchivesList();
+            fetchFluxStatus();
+        });
+    });
+
     // INITIALISATION DU PONT
     // ════════════════════════════════════
     setInterval(fetchPlayerStatus, 15000);

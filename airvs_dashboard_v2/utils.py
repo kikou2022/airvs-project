@@ -164,6 +164,27 @@ def _ssh_debian3(commande):
         return -1, "", str(e)
 
 
+def _ssh_generic(user, host, commande):
+    """Execute une commande SSH sur n'importe quelle machine.
+    Version generique de _ssh_debian3 (qui est hardcodee pour Debian 3).
+
+    Phase 1 multi-stations (2026-10-29) : utilisee par player.py pour
+    monitorer stream6 (K53SC .37) en plus de stream12 (DELL .30).
+    """
+    from config import _SUBPROCESS_CREATIONFLAGS
+    try:
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+               f"{user}@{host}", commande]
+        result = sp.run(cmd, capture_output=True, text=True,
+                        encoding='utf-8', errors='replace',
+                        timeout=10, creationflags=_SUBPROCESS_CREATIONFLAGS)
+        return result.returncode, (result.stdout or "").strip(), (result.stderr or "").strip()
+    except sp.TimeoutExpired:
+        return -1, "", "Timeout SSH (10s)"
+    except Exception as e:
+        return -1, "", str(e)
+
+
 def _assurer_schema_airvs_avance():
     """Verifie/cree les tables airvs_grille_avance, airvs_historique_avance,
     airvs_pool_titres et airvs_pool_auto_validation.

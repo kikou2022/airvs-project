@@ -1,11 +1,18 @@
 """Blueprint player — routes du lecteur AIRVS, archives M3U, flux radio, proxy audience.
 
 Contient :
-  - Statut et contrôle du service airvs-radio (start/stop/restart/journal)
+  - Statut et contrôle du service monitoring (start/stop/restart/journal)
   - Lecture et export des archives M3U et du flux actif
   - Relance du flux via SSH (systemctl restart)
   - Proxy audience temps réel et historique (délégation au worker Ubuntu)
   - Helper générique _worker_task_proxy (insertion tâche + polling)
+
+Phase 1 multi-stations (2026-10-29) :
+  - Toutes les routes acceptent un paramètre optionnel <stream_id>
+    (défaut = MONITORING_DEFAULT_STREAM = "stream12" pour compat ascendante)
+  - Les routes sans <stream_id> continuent de fonctionner comme avant
+  - Les routes avec <stream_id> (ex: /api/flux_status/stream6) utilisent
+    la config correspondante depuis MONITORING_STREAMS (config.py)
 """
 
 import json
@@ -21,17 +28,45 @@ from flask import Blueprint, Response, jsonify, request
 from config import (
     FLUX_BRIDGE_PATH,
     DEBIAN_3_IP, DEBIAN_3_SSH_USER,
+    MONITORING_STREAMS, MONITORING_DEFAULT_STREAM,
     _SUBPROCESS_CREATIONFLAGS,
 )
-from utils import get_db_connection, _ssh_debian3
+from utils import get_db_connection, _ssh_debian3, _ssh_generic
 from blueprints.auth import login_requis
 
 player_bp = Blueprint('player', __name__)
 
 
 # ═══════════════════════════════════════════
-# Helpers SSH pour le radio_bridge (Debian 3)
+# Helpers multi-stations
 # ═══════════════════════════════════════════
+
+def _get_stream_config(stream_id=None):
+    """Retourne la config du stream donné, ou le stream par défaut."""
+    sid = stream_id or MONITORING_DEFAULT_STREAM
+    s = MONITORING_STREAMS.get(sid)
+    if not s:
+        return None
+    return s
+
+
+def _ssh_stream(s, cmd):
+    """SSH vers la machine du stream config s."""
+    return _ssh_generic(s['ssh_user'], s['ssh_host'], cmd)
+
+
+def _ssh_cat_file_stream(s, remote_path):
+    """Lit un fichier sur la machine du stream via SSH."""
+    rc, stdout, _ = _ssh_stream(s, f"cat '{remote_path}' 2>/dev/null")
+    return stdout if rc == 0 else ""
+
+
+def _bridge_path_stream(s, filename):
+    """Construit le chemin M3U pour le stream config s."""
+    return f"{s['m3u_dir']}/{filename}"
+
+
+# ── Helpers legacy (compat ascendante — utilisés par les routes sans <stream_id>) ──
 
 def _ssh_cat_file(remote_path):
     """Lit un fichier sur Debian 3 via SSH. Retourne le contenu ou chaîne vide."""
@@ -53,24 +88,29 @@ def _bridge_path(filename):
 # ══════════════════════════════════════════
 # ROUTES PONT AZURACAST / RADIODJ
 # ══════════════════════════════════════════
+
 @player_bp.route('/api/flux_status')
+@player_bp.route('/api/flux_status/<stream_id>')
 @login_requis
-def api_flux_status():
+def api_flux_status(stream_id=None):
+    s = _get_stream_config(stream_id)
+    if not s:
+        return jsonify({"statut": "erreur", "message": f"Stream inconnu: {stream_id}"}), 404
     try:
         today_str = date.today().strftime("%Y-%m-%d")
-        archive_path = _bridge_path(f"archive_{today_str}.m3u")
-        active_path = _bridge_path("playlist_live_azuracast.m3u")
+        archive_path = _bridge_path_stream(s, f"archive_{today_str}.m3u")
+        active_path = _bridge_path_stream(s, "playlist_live_azuracast.m3u")
 
         archive_content = ""
         active_content = ""
 
-        content = _ssh_cat_file(archive_path)
+        content = _ssh_cat_file_stream(s, archive_path)
         if content:
             archive_content = "\n".join(
                 [l.strip() for l in content.split('\n') if l.strip() and not l.startswith("#")]
             )
 
-        content = _ssh_cat_file(active_path)
+        content = _ssh_cat_file_stream(s, active_path)
         if content:
             active_content = "\n".join(
                 [l.strip() for l in content.split('\n') if l.strip() and not l.startswith("#")]
@@ -91,17 +131,21 @@ def api_flux_status():
 
 
 @player_bp.route('/relancer_flux', methods=['POST'])
+@player_bp.route('/relancer_flux/<stream_id>', methods=['POST'])
 @login_requis
-def relancer_flux():
+def relancer_flux(stream_id=None):
+    s = _get_stream_config(stream_id)
+    if not s:
+        return jsonify({"status": "error", "message": f"Stream inconnu: {stream_id}"}), 404
     try:
         cmd = [
-            "ssh", f"{DEBIAN_3_SSH_USER}@{DEBIAN_3_IP}",
-            "sudo systemctl restart airvs-radio.service"
+            "ssh", f"{s['ssh_user']}@{s['ssh_host']}",
+            f"sudo systemctl restart {s['service_name']}"
         ]
         result = sp.run(cmd, capture_output=True, text=True, timeout=10,
                         creationflags=_SUBPROCESS_CREATIONFLAGS)
         if result.returncode == 0:
-            return jsonify({"status": "success", "message": "Redémarrage envoyé à Debian 3."})
+            return jsonify({"status": "success", "message": f"Redémarrage envoyé à {s['label']}."})
         else:
             return jsonify({"status": "error", "message": f"Erreur SSH : {result.stderr or 'sortie vide'}"}), 500
     except Exception as e:
@@ -109,11 +153,15 @@ def relancer_flux():
 
 
 @player_bp.route('/export_archive')
+@player_bp.route('/export_archive/<stream_id>')
 @login_requis
-def export_archive():
+def export_archive(stream_id=None):
+    s = _get_stream_config(stream_id)
+    if not s:
+        return "Stream inconnu", 404
     today_str = date.today().strftime("%Y-%m-%d")
-    archive_path = _bridge_path(f"archive_{today_str}.m3u")
-    content = _ssh_cat_file(archive_path)
+    archive_path = _bridge_path_stream(s, f"archive_{today_str}.m3u")
+    content = _ssh_cat_file_stream(s, archive_path)
     if not content:
         return "Aucune archive disponible", 404
     return Response(
@@ -123,10 +171,14 @@ def export_archive():
     )
 
 @player_bp.route('/export_flux_actif')
+@player_bp.route('/export_flux_actif/<stream_id>')
 @login_requis
-def export_flux_actif():
-    active_path = _bridge_path("playlist_live_azuracast.m3u")
-    content = _ssh_cat_file(active_path)
+def export_flux_actif(stream_id=None):
+    s = _get_stream_config(stream_id)
+    if not s:
+        return "Stream inconnu", 404
+    active_path = _bridge_path_stream(s, "playlist_live_azuracast.m3u")
+    content = _ssh_cat_file_stream(s, active_path)
     if not content:
         return "Aucun flux actif disponible", 404
     return Response(
@@ -139,13 +191,15 @@ def export_flux_actif():
 # ROUTES AIRVS PLAYER (Monitoring & Contrôle)
 # ══════════════════════════════════════════
 
-
-
 @player_bp.route('/api/airvs_player/status')
+@player_bp.route('/api/airvs_player/<stream_id>/status')
 @login_requis
-def api_airvs_player_status():
-    """Retourne le statut du service airvs-radio sur Debian 3 + titre en cours + uptime."""
-    rc, stdout, stderr = _ssh_debian3("systemctl show airvs-radio.service --no-pager "
+def api_airvs_player_status(stream_id=None):
+    """Retourne le statut du service monitoring + titre en cours + uptime."""
+    s = _get_stream_config(stream_id)
+    if not s:
+        return jsonify({"erreur": f"Stream inconnu: {stream_id}"}), 404
+    rc, stdout, stderr = _ssh_stream(s, f"systemctl show {s['service_name']} --no-pager "
                                        "--property=ActiveState,SubState,ActiveEnterTimestamp")
     status_info = {
         "service_actif": False,
@@ -159,7 +213,6 @@ def api_airvs_player_status():
         status_info["erreur"] = stderr or "SSH inaccessible"
         return jsonify(status_info)
 
-    # Parser les propriétés systemctl
     for line in stdout.split('\n'):
         line = line.strip()
         if line.startswith("ActiveState="):
@@ -171,19 +224,15 @@ def api_airvs_player_status():
             status_info["service_statut"] = val
         elif line.startswith("ActiveEnterTimestamp="):
             val = line.split("=", 1)[1]
-            # Format : "Day YYYY-MM-DD HH:MM:SS TZ"
             if val and val != "":
-                # Garder les derniers mots significatifs
                 status_info["service_depuis"] = val
 
-    # Récupérer le titre en cours depuis le journal systemctl (dernière ligne "Titre :")
     if status_info["service_actif"]:
-        rc2, stdout2, stderr2 = _ssh_debian3(
-            "journalctl -u airvs-radio.service --no-pager -n 30 --output=cat | "
+        rc2, stdout2, stderr2 = _ssh_stream(s,
+            f"journalctl -u {s['service_name']} --no-pager -n 30 --output=cat | "
             "grep 'Titre :' | tail -1"
         )
         if rc2 == 0 and stdout2:
-            # Extraire le titre après "Titre :"
             titre = stdout2.replace("Titre :", "").strip()
             status_info["titre_en_cours"] = titre
 
@@ -191,77 +240,82 @@ def api_airvs_player_status():
 
 
 @player_bp.route('/api/airvs_player/start', methods=['POST'])
+@player_bp.route('/api/airvs_player/<stream_id>/start', methods=['POST'])
 @login_requis
-def api_airvs_player_start():
-    """Démarre le service airvs-radio sur Debian 3."""
-    rc, stdout, stderr = _ssh_debian3("sudo systemctl start airvs-radio.service")
+def api_airvs_player_start(stream_id=None):
+    s = _get_stream_config(stream_id)
+    if not s:
+        return jsonify({"status": "error", "message": f"Stream inconnu: {stream_id}"}), 404
+    rc, stdout, stderr = _ssh_stream(s, f"sudo systemctl start {s['service_name']}")
     if rc == 0:
-        return jsonify({"status": "success", "message": "Service airvs-radio démarré."})
+        return jsonify({"status": "success", "message": f"Service {s['service_name']} démarré."})
     return jsonify({"status": "error", "message": stderr or "Échec du démarrage"}), 500
 
 
 @player_bp.route('/api/airvs_player/stop', methods=['POST'])
+@player_bp.route('/api/airvs_player/<stream_id>/stop', methods=['POST'])
 @login_requis
-def api_airvs_player_stop():
-    """Arrête le service airvs-radio sur Debian 3."""
-    rc, stdout, stderr = _ssh_debian3("sudo systemctl stop airvs-radio.service")
+def api_airvs_player_stop(stream_id=None):
+    s = _get_stream_config(stream_id)
+    if not s:
+        return jsonify({"status": "error", "message": f"Stream inconnu: {stream_id}"}), 404
+    rc, stdout, stderr = _ssh_stream(s, f"sudo systemctl stop {s['service_name']}")
     if rc == 0:
-        return jsonify({"status": "success", "message": "Service airvs-radio arrêté."})
+        return jsonify({"status": "success", "message": f"Service {s['service_name']} arrêté."})
     return jsonify({"status": "error", "message": stderr or "Échec de l'arrêt"}), 500
 
 
 @player_bp.route('/api/airvs_player/restart', methods=['POST'])
+@player_bp.route('/api/airvs_player/<stream_id>/restart', methods=['POST'])
 @login_requis
-def api_airvs_player_restart():
-    """Redémarre le service airvs-radio sur Debian 3."""
-    rc, stdout, stderr = _ssh_debian3("sudo systemctl restart airvs-radio.service")
+def api_airvs_player_restart(stream_id=None):
+    s = _get_stream_config(stream_id)
+    if not s:
+        return jsonify({"status": "error", "message": f"Stream inconnu: {stream_id}"}), 404
+    rc, stdout, stderr = _ssh_stream(s, f"sudo systemctl restart {s['service_name']}")
     if rc == 0:
-        return jsonify({"status": "success", "message": "Service airvs-radio redémarré."})
+        return jsonify({"status": "success", "message": f"Service {s['service_name']} redémarré."})
     return jsonify({"status": "error", "message": stderr or "Échec du redémarrage"}), 500
 
 
 @player_bp.route('/api/airvs_player/journal')
+@player_bp.route('/api/airvs_player/<stream_id>/journal')
 @login_requis
-def api_airvs_player_journal():
-    """Retourne les dernières lignes du journal du service airvs-radio."""
+def api_airvs_player_journal(stream_id=None):
+    s = _get_stream_config(stream_id)
+    if not s:
+        return jsonify({"status": "error", "journal": f"Stream inconnu: {stream_id}"}), 404
     lignes = request.args.get('lignes', 50, type=int)
-    lignes = min(lignes, 200)  # Plafond de sécurité
-    # Important : NE PAS rediriger stderr vers /dev/null — sinon on masque les
-    # vraies erreurs de journalctl (droits insuffisants, unité inexistante, etc.).
-    # On capture stderr séparément pour pouvoir l'afficher si stdout est vide.
-    rc, stdout, stderr = _ssh_debian3(
-        f"journalctl -u airvs-radio.service --no-pager -n {lignes} --output=cat"
+    lignes = min(lignes, 200)
+    rc, stdout, stderr = _ssh_stream(s,
+        f"journalctl -u {s['service_name']} --no-pager -n {lignes} --output=cat"
     )
     if rc == 0:
         if stdout:
             return jsonify({"status": "ok", "journal": stdout})
-        # SSH OK mais stdout vide : trois sous-cas possibles
         if stderr:
-            # journalctl s'est plaint (ex: "Failed to get journal entries" / "No journal files were found")
             return jsonify({"status": "ok",
                             "journal": f"[journalctl a retourné ceci sur stderr]\n{stderr}\n"
                                        f"[stdout vide — aucun log disponible]"})
-        # Ni stdout ni stderr : le service existe mais n'a encore rien écrit
         return jsonify({"status": "ok",
                         "journal": "[Aucun log disponible]\n"
-                                   "Le service airvs-radio.service existe mais n'a encore rien écrit "
-                                   "dans le journal. Causes possibles :\n"
-                                   "  - Démarrage très récent (les premières lignes arrivent en 1-2 s)\n"
-                                   "  - Service actif mais mpv n'a pas encore détecté de titre\n"
-                                   "  - Service arrêté (vérifiez le statut ci-dessus)"})
-    # SSH lui-même a échoué
+                                   f"Le service {s['service_name']} existe mais n'a encore rien écrit "
+                                   "dans le journal."})
     return jsonify({"status": "error",
-                    "journal": stderr or "SSH inaccessible (Debian 3 injoignable)"})
+                    "journal": stderr or "SSH inaccessible"})
 
 
 @player_bp.route('/api/airvs_archives')
+@player_bp.route('/api/airvs_archives/<stream_id>')
 @login_requis
-def api_airvs_archives():
-    """Liste toutes les archives M3U disponibles dans le radio_bridge sur Debian 3 (via SSH)."""
+def api_airvs_archives(stream_id=None):
+    s = _get_stream_config(stream_id)
+    if not s:
+        return jsonify({"status": "error", "message": f"Stream inconnu: {stream_id}"}), 404
     archives = []
     try:
-        rc, stdout, stderr = _ssh_debian3(
-            f"cd '{FLUX_BRIDGE_PATH}' && "
+        rc, stdout, stderr = _ssh_stream(s,
+            f"cd '{s['m3u_dir']}' && "
             f"for f in archive_*.m3u; do "
             f"[ -f \"$f\" ] || continue; "
             f"nb=$(grep -cv '^#\\|^$' \"$f\" 2>/dev/null || echo 0); "
@@ -300,13 +354,16 @@ def api_airvs_archives():
 
 
 @player_bp.route('/api/airvs_archive/<date_str>')
+@player_bp.route('/api/airvs_archive/<stream_id>/<date_str>')
 @login_requis
-def api_airvs_archive_date(date_str):
-    """Retourne le contenu d'une archive M3U pour une date donnée (via SSH Debian 3)."""
+def api_airvs_archive_date(stream_id=None, date_str=None):
+    s = _get_stream_config(stream_id)
+    if not s:
+        return jsonify({"status": "error", "message": f"Stream inconnu: {stream_id}"}), 404
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
         return jsonify({"status": "error", "message": "Format de date invalide."}), 400
-    archive_path = _bridge_path(f"archive_{date_str}.m3u")
-    content = _ssh_cat_file(archive_path)
+    archive_path = _bridge_path_stream(s, f"archive_{date_str}.m3u")
+    content = _ssh_cat_file_stream(s, archive_path)
     if not content:
         return jsonify({"status": "error", "message": f"Archive du {date_str} introuvable."}), 404
     lignes = [l.strip() for l in content.split('\n') if l.strip() and not l.startswith("#")]
@@ -314,7 +371,7 @@ def api_airvs_archive_date(date_str):
 
 
 # ══════════════════════════════════════════
-# ROUTES AUDIENCE (Évolution 3 — Stats agrégées, Approche B)
+# ROUTES AUDIENCE (Évolution 3 — non modifiées, pas stream-specific)
 # ══════════════════════════════════════════
 def _audience_proxy(endpoint, timeout=15):
     """Insère une tâche AUDIENCE_GET_DATA pour le worker Ubuntu, puis attend
