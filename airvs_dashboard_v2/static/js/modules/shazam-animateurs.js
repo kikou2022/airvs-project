@@ -431,6 +431,12 @@ function populateSourceDropdown(prefix) {
     }
 }
 
+// Bug fix (2026-10-29) : variable globale pour la recherche courante
+// par artiste/titre. Une entrée par prefix ('shazam' / 'animateurs').
+var currentShazamSearchByPrefix = {};
+// Timer pour le debounce de la live search
+var _shazamSearchDebounceTimer = null;
+
 // ── Hide-managed helpers ──
 function getHideManaged(prefix) {
     return !!hideManagedByPrefix[prefix];
@@ -769,6 +775,31 @@ window._shazamGoToPage = function(prefix, page) {
     loadShazamList(prefix);
 };
 
+// Bug fix (2026-10-29) : moteur de recherche par artiste/titre
+// setShazamSearch : met à jour la recherche courante + recharge la liste
+// (avec reset page à 1 pour éviter d'être sur une page inexistante
+// dans les résultats filtrés).
+function setShazamSearch(prefix, value) {
+    currentShazamSearchByPrefix[prefix] = (value || '').trim();
+    var state = getShazamPageState(prefix);
+    state.page = 1;
+    loadShazamList(prefix);
+}
+window._setShazamSearch = setShazamSearch;
+
+// _shazamDebouncedSearch : live search avec debounce 500ms
+// Évite de recharger la liste à chaque frappe — attend 500ms après la
+// dernière frappe avant de déclencher la recherche.
+window._shazamDebouncedSearch = function(prefix, value) {
+    if (_shazamSearchDebounceTimer) {
+        clearTimeout(_shazamSearchDebounceTimer);
+    }
+    _shazamSearchDebounceTimer = setTimeout(function() {
+        _shazamSearchDebounceTimer = null;
+        setShazamSearch(prefix, value);
+    }, 500);
+};
+
 // ── Charger la liste Shazam & Web (aperçu dans le tableau local) ──
 function loadShazamList(prefix = 'shazam') {
     // Peupler les dropdowns d'animateurs (une seule fois)
@@ -784,6 +815,11 @@ function loadShazamList(prefix = 'shazam') {
         ? '/api/animateurs/list'
         : '/api/shazam/list';
     var listUrl = baseUrl + '?page=' + state.page + '&page_size=' + state.page_size;
+    // Bug fix (2026-10-29) : ajouter &q= si une recherche est active
+    var search_q = (currentShazamSearchByPrefix[prefix] || '').trim();
+    if (search_q) {
+        listUrl += '&q=' + encodeURIComponent(search_q);
+    }
 
     var statsUrl = (prefix === 'animateurs')
         ? '/api/animateurs/stats'

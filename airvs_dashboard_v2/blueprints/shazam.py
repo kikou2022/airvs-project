@@ -705,6 +705,8 @@ def api_shazam_list():
     limite_arg = request.args.get('limit')
     page_arg = request.args.get('page')
     page_size_arg = request.args.get('page_size', '20')
+    # Bug fix (2026-10-29) : paramètre de recherche q (artiste OU titre)
+    search_q = (request.args.get('q') or '').strip()
 
     # Mode pagination (préféré si page est fourni)
     use_pagination = bool(page_arg)
@@ -726,16 +728,24 @@ def api_shazam_list():
         select_cols = ("id, artiste, titre, date_reconnaissance, source, animateur "
                        + (", statut, match_song_id, match_passe" if _has_statut else ""))
 
+        # Construire la clause WHERE si recherche active
+        where_clause = ""
+        params = ()
+        if search_q:
+            where_clause = " WHERE artiste LIKE %s OR titre LIKE %s"
+            like_q = f"%{search_q}%"
+            params = (like_q, like_q)
+
         if use_pagination:
-            # Compter le total
-            cursor.execute("SELECT COUNT(*) AS c FROM airvs_shazam")
+            # Compter le total (avec filtre recherche éventuel)
+            cursor.execute(f"SELECT COUNT(*) AS c FROM airvs_shazam{where_clause}", params)
             total_count = cursor.fetchone()['c']
             total_pages = max((total_count + page_size - 1) // page_size, 1)
             offset = (page - 1) * page_size
             cursor.execute(
-                f"SELECT {select_cols} FROM airvs_shazam "
+                f"SELECT {select_cols} FROM airvs_shazam{where_clause} "
                 f"ORDER BY date_reconnaissance DESC LIMIT %s OFFSET %s",
-                (page_size, offset)
+                params + (page_size, offset)
             )
             rows = cursor.fetchall()
             cursor.close()
@@ -752,8 +762,8 @@ def api_shazam_list():
             })
         else:
             cursor.execute(
-                f"SELECT {select_cols} FROM airvs_shazam ORDER BY date_reconnaissance DESC LIMIT %s",
-                (limite,)
+                f"SELECT {select_cols} FROM airvs_shazam{where_clause} ORDER BY date_reconnaissance DESC LIMIT %s",
+                params + (limite,)
             )
             rows = cursor.fetchall()
             cursor.close()
@@ -855,6 +865,8 @@ def api_animateurs_list():
     page_arg = request.args.get('page')
     page_size_arg = request.args.get('page_size', '20')
     animateur_filter = (request.args.get('animateur') or '').strip()
+    # Bug fix (2026-10-29) : paramètre de recherche q (artiste OU titre)
+    search_q = (request.args.get('q') or '').strip()
 
     use_pagination = bool(page_arg)
     page = max(int(page_arg or '1'), 1)
@@ -900,11 +912,20 @@ def api_animateurs_list():
                             "total_count": 0, "total_pages": 0})
 
         select_str = ", ".join(_select_cols)
-        where_clause = ""
-        params = ()
+        # Bug fix (2026-10-29) : combiner filtre animateur + recherche q
+        # AND entre les filtres, OR entre artiste/titre dans la recherche
+        where_parts = []
+        params_list = []
         if animateur_filter:
-            where_clause = " WHERE animateur = %s"
-            params = (animateur_filter,)
+            where_parts.append("animateur = %s")
+            params_list.append(animateur_filter)
+        if search_q:
+            where_parts.append("(artiste LIKE %s OR titre LIKE %s)")
+            like_q = f"%{search_q}%"
+            params_list.append(like_q)
+            params_list.append(like_q)
+        where_clause = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        params = tuple(params_list)
 
         if use_pagination:
             # Compter le total (avec filtre éventuel)
