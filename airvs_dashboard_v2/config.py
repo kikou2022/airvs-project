@@ -95,25 +95,49 @@ FLUX_BRIDGE_PATH = "/home/sebastien/radio_bridge/monitoring/stream12"  # Chemin 
 # ═══════════════════════════════════════════════════════════════════════
 MONITORING_STREAMS = {
     "stream12": {
-        "label":        "Station 7",
-        "ssh_host":     "192.168.1.30",      # DELL Debian Master
-        "ssh_user":     "sebastien",
-        "service_name": "airvs-radio.service",
-        "m3u_dir":      "/home/sebastien/radio_bridge/monitoring/stream12",
-        "flux_url":     "https://icecast-vps-ovh.airvs.fr/stream12",
-        "color":        "#1DB954",           # vert Spotify
+        "label":    "Station 7",
+        "flux_url": "https://icecast-vps-ovh.airvs.fr/stream12",
+        "color":    "#1DB954",
+        "hosts": {
+            "dell": {
+                "ssh_host":     "192.168.1.30",
+                "ssh_user":     "sebastien",
+                "service_name": "airvs-monitor-stream12.service",
+                "m3u_dir":      "/home/sebastien/radio_bridge/monitoring/stream12",
+            },
+            "k53sc": {
+                "ssh_host":     "192.168.1.37",
+                "ssh_user":     "ubuntu",
+                "service_name": "airvs-monitor-stream12.service",
+                "m3u_dir":      "/srv/radio_bridge/monitoring/stream12",
+            },
+        },
     },
     "stream6": {
-        "label":        "Station 6",
-        "ssh_host":     "192.168.1.37",      # K53SC Ubuntu
-        "ssh_user":     "ubuntu",
-        "service_name": "airvs_player_k53sc.service",
-        "m3u_dir":      "/srv/radio_bridge/monitoring/stream6",
-        "flux_url":     "https://icecast-vps-ovh.airvs.fr/stream6",
-        "color":        "#3498DB",           # bleu
+        "label":    "Station 6",
+        "flux_url": "https://icecast-vps-ovh.airvs.fr/stream6",
+        "color":    "#3498DB",
+        "hosts": {
+            "dell": {
+                "ssh_host":     "192.168.1.30",
+                "ssh_user":     "sebastien",
+                "service_name": "airvs-monitor-stream6.service",
+                "m3u_dir":      "/home/sebastien/radio_bridge/monitoring/stream6",
+            },
+            "k53sc": {
+                "ssh_host":     "192.168.1.37",
+                "ssh_user":     "ubuntu",
+                "service_name": "airvs-monitor-stream6.service",
+                "m3u_dir":      "/srv/radio_bridge/monitoring/stream6",
+            },
+        },
     },
 }
-MONITORING_DEFAULT_STREAM = "stream12"   # compat ascendante (routes sans <stream_id>)
+MONITORING_DEFAULT_STREAM = "stream12"
+MONITORING_DEFAULT_HOST = {
+    "stream12": "dell",
+    "stream6":  "k53sc",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════

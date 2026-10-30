@@ -705,8 +705,146 @@
             fetchPlayerJournal();
             fetchArchivesList();
             fetchFluxStatus();
+            fetchMonitoringAssignment();
+            fetchMonitoringVolume();
         });
     });
+
+    // Phase 2 (2026-10-29) : fetch l'assignment courant + populate le dropdown
+    function fetchMonitoringAssignment() {
+        fetch('/api/monitoring/assignment?t=' + Date.now())
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.status !== 'ok') return;
+                var assignment = data.assignment || {};
+                var streamInfo = assignment[currentStreamId];
+                if (!streamInfo) return;
+
+                var sel = document.getElementById('monitoring_host_select');
+                if (!sel) return;
+
+                // Stocker le host courant dans le dataset
+                sel.dataset.currentHost = streamInfo.assigned_to;
+
+                // Peupler le dropdown avec les hosts disponibles
+                var html = '<option value="stopped"' + (streamInfo.assigned_to === 'stopped' ? ' selected' : '') + '>⏹ Arrêté</option>';
+                (streamInfo.available_hosts || []).forEach(function(h) {
+                    var selected = (h === streamInfo.assigned_to) ? ' selected' : '';
+                    var label = h === 'dell' ? 'DELL .30' : (h === 'k53sc' ? 'K53SC .37' : h);
+                    html += '<option value="' + h + '"' + selected + '>' + label + '</option>';
+                });
+                sel.innerHTML = html;
+            })
+            .catch(function(err) {
+                console.warn('[monitoring] fetchAssignment error:', err);
+            });
+    }
+
+    // Phase 2 (2026-10-30) : fetch le volume ALSA du stream courant
+    function fetchMonitoringVolume() {
+        var slider = document.getElementById('monitoring_volume_slider');
+        var label = document.getElementById('monitoring_volume_label');
+        if (!slider || !label) return;
+
+        fetch('/api/monitoring/volume/' + currentStreamId + '?t=' + Date.now())
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.status === 'ok' && data.volume !== null && data.volume !== undefined) {
+                    slider.value = data.volume;
+                    slider.disabled = false;
+                    label.textContent = data.volume + '%';
+                } else {
+                    slider.value = 0;
+                    slider.disabled = true;
+                    label.textContent = data.message === 'Stream arrêté' ? 'Arrêté' : '—';
+                }
+            })
+            .catch(function(err) {
+                console.warn('[monitoring] fetchVolume error:', err);
+                label.textContent = '—';
+            });
+    }
+
+    // Phase 2 (2026-10-30) : set le volume ALSA
+    window._setMonitoringVolume = function(volume) {
+        var slider = document.getElementById('monitoring_volume_slider');
+        var label = document.getElementById('monitoring_volume_label');
+        if (label) label.textContent = volume + '%';
+        if (slider) slider.disabled = true;
+
+        fetch('/api/monitoring/volume/' + currentStreamId, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ volume: parseInt(volume) })
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (slider) slider.disabled = false;
+                if (data.status === 'ok') {
+                    if (label) label.textContent = data.volume + '%';
+                } else {
+                    alert('Erreur volume: ' + (data.message || ''));
+                    fetchMonitoringVolume();
+                }
+            })
+            .catch(function(err) {
+                if (slider) slider.disabled = false;
+                alert('Erreur réseau volume: ' + err.message);
+                fetchMonitoringVolume();
+            });
+    };
+
+    // Phase 2 (2026-10-29) : handler pour basculer le monitoring vers un autre host
+    window._switchMonitoringHost = function(newHost) {
+        if (!newHost || !currentStreamId) return;
+
+        var sel = document.getElementById('monitoring_host_select');
+        var currentHost = sel ? (sel.dataset.currentHost || '') : '';
+
+        if (newHost === currentHost) return;
+
+        var streamLabel = currentStreamId === 'stream12' ? 'Station 7 (stream12)' : 'Station 6 (stream6)';
+        var newHostLabel = newHost === 'dell' ? 'DELL .30' : 'K53SC .37';
+        var currentHostLabel = currentHost === 'dell' ? 'DELL .30' : 'K53SC .37';
+
+        if (!confirm(
+            'Basculer le monitoring de ' + streamLabel + '\n' +
+            'de ' + currentHostLabel + ' vers ' + newHostLabel + ' ?\n\n' +
+            'Le service actuel sera arrêté et le nouveau sera démarré.\n' +
+            'L\'audio peut être coupé pendant quelques secondes.'
+        )) {
+            // Annulé : remettre le dropdown à la valeur courante
+            fetchMonitoringAssignment();
+            return;
+        }
+
+        // Désactiver le dropdown pendant la bascule
+        if (sel) sel.disabled = true;
+
+        fetch('/api/monitoring/switch/' + currentStreamId + '/' + newHost, { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (sel) sel.disabled = false;
+                if (data.status === 'success' || (data.status === 'ok' && data.changed === false)) {
+                    alert(data.message);
+                    // Re-fetch toutes les données depuis le nouveau host
+                    fetchPlayerStatus();
+                    fetchPlayerJournal();
+                    fetchArchivesList();
+                    fetchFluxStatus();
+                    fetchMonitoringAssignment();
+                    fetchMonitoringVolume();
+                } else {
+                    alert('Erreur: ' + (data.message || 'Échec de la bascule'));
+                    fetchMonitoringAssignment();
+                }
+            })
+            .catch(function(err) {
+                if (sel) sel.disabled = false;
+                alert('Erreur réseau: ' + err.message);
+                fetchMonitoringAssignment();
+            });
+    };
 
     // INITIALISATION DU PONT
     // ════════════════════════════════════
@@ -717,5 +855,7 @@
     fetchArchivesList();
     fetchFluxStatus();
     fetchFluxConfig();
+    fetchMonitoringAssignment();
+    fetchMonitoringVolume();
 
 })();
