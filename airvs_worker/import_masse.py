@@ -832,9 +832,9 @@ def executer_import_masse(tache_id, parametres, _worker_ctx=None):
                 mp3_path = temp_dir / (flac_path.stem + ".mp3")
                 try:
                     proc = subprocess.run(
-                        ["ffmpeg", "-y", "-i", str(flac_path), "-codec:a", "libmp3lame",
+                        ["ffmpeg", "-nostdin", "-y", "-i", str(flac_path), "-vn", "-map", "0:a", "-codec:a", "libmp3lame",
                          "-b:a", f"{flac_bitrate}k", str(mp3_path)],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300
                     )
                     if proc.returncode == 0 and mp3_path.exists():
                         log(f"  [{i}/{len(flac_files)}] {flac_path.name} -> {mp3_path.name} ({flac_bitrate} kbps)")
