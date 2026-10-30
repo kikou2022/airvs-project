@@ -6178,6 +6178,9 @@ document.addEventListener('DOMContentLoaded', function() {
         if (window._lastImportParams && window._lastImportParams.sync_folder) {
             _validatePayload.sync_folder = window._lastImportParams.sync_folder;
         }
+        if (window._lastImportParams && window._lastImportParams.category_id) {
+            _validatePayload.category_id = window._lastImportParams.category_id;
+        }
         fetch('/api/suspects/validate', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -6385,6 +6388,9 @@ document.addEventListener('DOMContentLoaded', function() {
         };
         if (window._lastImportParams && window._lastImportParams.sync_folder) {
             _editValidatePayload.sync_folder = window._lastImportParams.sync_folder;
+        }
+        if (window._lastImportParams && window._lastImportParams.category_id) {
+            _editValidatePayload.category_id = window._lastImportParams.category_id;
         }
         fetch('/api/suspects/edit-validate', {
             method: 'POST',

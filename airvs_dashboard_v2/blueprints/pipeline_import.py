@@ -1514,32 +1514,117 @@ def _dossier_foldersync_courant():
     return dossier
 
 
-def _dossier_foldersync_pour_import(sync_folder):
-    """Retourne le dossier FolderSync a utiliser pour valider un suspect.
+# Bug fix définitif (2026-10-30) : conversion Linux -> Windows pour la validation suspects
+# Le categories_radiodj.json contient des chemins Linux (/mnt/projet_radio2/...).
+# Le Dashboard tourne sur Windows -> besoin de convertir en D:\projet_radio\...
+_LINUX_TO_WINDOWS_MAP = {
+    "/mnt/projet_radio2": r"D:\projet_radio",
+    "/mnt/projet_radio3": r"K:\projet_radio",
+    "/mnt/musique_172_go": r"M:",
+    "/mnt/musique_47_go": r"L:",
+    "/mnt/stockage_160go": r"U:",
+    "/mnt/stockage_80go": r"Y:",
+    "/media/sebastien/musique_debian": r"N:",
+    "/mnt/externe": r"Z:",
+}
 
-    Bug fix (2026-10-28) : si l import d origine a fourni un sync_folder
-    explicite (ex: K:\\projet_radio\\Musique\\LIVES\\MARY_MERCREDI), on
-    l utilise. Le suspect valide sera copie dans le meme dossier que les
-    fichiers NOUVEAU de l import d origine. RadioDJ lui assignera ainsi
-    automatiquement la bonne categorie (basee sur le chemin).
 
-    Si sync_folder est vide ou invalide -> fallback sur le comportement
-    par defaut (_dossier_foldersync_courant = NOUVELLES_ENTREES/SEMAINE_XX).
-    Cela preserve la compatibilite ascendante (si le frontend n envoie
-    pas encore le champ sync_folder, on retombe sur l ancien comportement).
+def _linux_to_windows_path(linux_path):
+    """Convertit un chemin Linux (/mnt/...) en chemin Windows (D:\\...).
+
+    Returns: str chemin Windows ou None si non convertissable.
     """
-    if not sync_folder:
-        return _dossier_foldersync_courant()
-    try:
-        dossier = Path(sync_folder)
-        dossier.mkdir(parents=True, exist_ok=True)
-        return dossier
-    except Exception as e:
-        _logger.warning(
-            "sync_folder invalide '%s' -> fallback sur _dossier_foldersync_courant(). Erreur : %s",
-            sync_folder, e
-        )
-        return _dossier_foldersync_courant()
+    if not linux_path:
+        return None
+    linux_path = linux_path.rstrip('/')
+    for linux_mount, windows_base in _LINUX_TO_WINDOWS_MAP.items():
+        if linux_path.startswith(linux_mount):
+            relative = linux_path[len(linux_mount):].lstrip('/')
+            if relative:
+                return windows_base + '\\' + relative.replace('/', '\\')
+            return windows_base
+    # Si ça commence par une lettre de lecteur Windows (D:\, K:\...), c'est déjà Windows
+    if len(linux_path) >= 2 and linux_path[1] == ':':
+        return linux_path
+    return None
+
+
+def _dossier_foldersync_pour_import(sync_folder, category_id=None):
+    """Retourne le dossier FolderSync Windows à utiliser pour valider un suspect.
+
+    Bug fix définitif (2026-10-30) :
+    1. Si sync_folder fourni (Linux ou Windows) → convertir en Windows si nécessaire
+    2. Si sync_folder vide mais category_id fourni → lire categories_radiodj.json
+       → trouver base_path (Linux) → convertir en Windows
+    3. Sinon → fallback sur _dossier_foldersync_courant()
+
+    Args:
+        sync_folder (str): chemin de sync (peut être Linux /mnt/... ou Windows D:\\...)
+        category_id (str): ID de catégorie (ex: "selection_paps") pour dérivation auto
+
+    Returns: Path Windows vers le dossier de sync
+    """
+    # 1. sync_folder fourni
+    if sync_folder:
+        win_path = _linux_to_windows_path(sync_folder)
+        if win_path:
+            try:
+                dossier = Path(win_path)
+                dossier.mkdir(parents=True, exist_ok=True)
+                return dossier
+            except Exception as e:
+                _logger.warning(
+                    "sync_folder Windows invalide '%s' -> fallback. Erreur : %s",
+                    win_path, e
+                )
+        else:
+            # Déjà un chemin Windows ou format inconnu → essayer tel quel
+            try:
+                dossier = Path(sync_folder)
+                dossier.mkdir(parents=True, exist_ok=True)
+                return dossier
+            except Exception as e:
+                _logger.warning(
+                    "sync_folder invalide '%s' -> fallback. Erreur : %s",
+                    sync_folder, e
+                )
+
+    # 2. Dériver depuis category_id via categories_radiodj.json
+    if category_id and category_id != 'auto':
+        try:
+            cats = _charger_categories_radiodj()
+            for cat in cats:
+                if cat.get('id') == category_id:
+                    base_path = cat.get('base_path')
+                    if base_path:
+                        win_path = _linux_to_windows_path(base_path)
+                        if win_path:
+                            try:
+                                dossier = Path(win_path)
+                                dossier.mkdir(parents=True, exist_ok=True)
+                                _logger.info(
+                                    "[suspect_validate] Dossier sync résolu depuis "
+                                    "category_id='%s' : %s (Linux: %s -> Windows: %s)",
+                                    category_id, win_path, base_path, win_path
+                                )
+                                return dossier
+                            except Exception as e:
+                                _logger.warning(
+                                    "Impossible de créer le dossier '%s' -> fallback. Erreur : %s",
+                                    win_path, e
+                                )
+                        else:
+                            _logger.warning(
+                                "base_path '%s' non convertissable en Windows -> fallback",
+                                base_path
+                            )
+                    break
+        except Exception as e:
+            _logger.warning("Erreur résolution category_id='%s' -> fallback. Erreur : %s",
+                            category_id, e)
+
+    # 3. Fallback
+    return _dossier_foldersync_courant()
 
 
 def _chercher_match_db(artist, title):
@@ -1848,8 +1933,9 @@ def api_suspect_validate():
     # si le frontend le fournit. Sinon, fallback sur _dossier_foldersync_courant
     # (NOUVELLES_ENTREES/SEMAINE_XX) pour compatibilite ascendante.
     sync_folder_param = (data.get('sync_folder') or '').strip()
+    category_id_param = (data.get('category_id') or '').strip()
     try:
-        sync_dir = _dossier_foldersync_pour_import(sync_folder_param)
+        sync_dir = _dossier_foldersync_pour_import(sync_folder_param, category_id_param)
     except Exception as e:
         return jsonify({"error": f"Erreur FolderSync : {e}"}), 500
 
@@ -2037,8 +2123,9 @@ def api_suspect_edit_validate():
     # si le frontend le fournit. Sinon, fallback sur _dossier_foldersync_courant
     # (NOUVELLES_ENTREES/SEMAINE_XX) pour compatibilite ascendante.
     sync_folder_param = (data.get('sync_folder') or '').strip()
+    category_id_param = (data.get('category_id') or '').strip()
     try:
-        sync_dir = _dossier_foldersync_pour_import(sync_folder_param)
+        sync_dir = _dossier_foldersync_pour_import(sync_folder_param, category_id_param)
     except Exception as e:
         return jsonify({"error": f"Erreur FolderSync : {e}"}), 500
 
