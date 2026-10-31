@@ -98,6 +98,18 @@
     });
 
     // ── Boutons de contrôle du service ──
+    // Helper (v6.6 fix) : récupère le label du host actuellement assigné au currentStreamId.
+    // Utilise le dataset du dropdown monitoring_host_select qui est peuplé par fetchMonitoringAssignment().
+    // Retourne "DELL .30", "K53SC .37", ou fallback générique "le serveur" si pas encore chargé.
+    function getCurrentHostLabel() {
+        var sel = document.getElementById('monitoring_host_select');
+        if (!sel) return 'le serveur';
+        var currentHost = sel.dataset.currentHost || '';
+        if (currentHost === 'dell') return 'DELL .30';
+        if (currentHost === 'k53sc') return 'K53SC .37';
+        return 'le serveur';
+    }
+
     function playerAction(action, btn) {
         let originalText = btn.innerHTML;
         btn.disabled = true;
@@ -117,7 +129,7 @@
             .catch(function() {
                 btn.innerHTML = originalText;
                 btn.disabled = false;
-                alert("Erreur de communication avec Debian 3.");
+                alert("Erreur de communication avec " + getCurrentHostLabel() + ".");
             });
     }
 
@@ -125,12 +137,12 @@
         playerAction('start', this);
     });
     document.getElementById('btn_player_stop').addEventListener('click', function() {
-        if (confirm("Arrêter le player sur Debian 3 ?")) {
+        if (confirm("Arrêter le player sur " + getCurrentHostLabel() + " ?")) {
             playerAction('stop', this);
         }
     });
     document.getElementById('btn_player_restart').addEventListener('click', function() {
-        if (confirm("Redémarrer le player sur Debian 3 ?")) {
+        if (confirm("Redémarrer le player sur " + getCurrentHostLabel() + " ?")) {
             playerAction('restart', this);
         }
     });
@@ -727,7 +739,7 @@
                 sel.dataset.currentHost = streamInfo.assigned_to;
 
                 // Peupler le dropdown avec les hosts disponibles
-                var html = '<option value="stopped"' + (streamInfo.assigned_to === 'stopped' ? ' selected' : '') + '>⏹ Arrêté</option>';
+                var html = '';
                 (streamInfo.available_hosts || []).forEach(function(h) {
                     var selected = (h === streamInfo.assigned_to) ? ' selected' : '';
                     var label = h === 'dell' ? 'DELL .30' : (h === 'k53sc' ? 'K53SC .37' : h);
