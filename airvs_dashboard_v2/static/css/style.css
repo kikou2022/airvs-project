@@ -126,6 +126,33 @@ body {
     background-color: #dc3545 !important;
 }
 
+/* ── Badges AzuraCast (Phase 0 — flags AZURA_*_S6_S7) ── */
+.badge-azura {
+    display: inline-block;
+    background: #0dcaf0;
+    color: #000;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.7em;
+    font-weight: bold;
+}
+.badge-azura-push {
+    background: #dbeafe;
+    color: #1e40af;
+}
+.badge-azura-active {
+    background: #dcfce7;
+    color: #166534;
+}
+.badge-azura-retired {
+    background: #fed7aa;
+    color: #9a3412;
+}
+.badge-azura-removed {
+    background: #fecaca;
+    color: #991b1b;
+}
+
 /* ── Formulaires ── */
 .form-control:focus,
 .form-select:focus {

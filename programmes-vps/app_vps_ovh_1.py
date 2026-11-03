@@ -34,6 +34,23 @@ from flask_login import (LoginManager, UserMixin, login_user,
 from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
 
+
+# ─── Helper Phase 0 : compatibilité flags AZURA_*_S6_S7 ───
+def is_in_azuracast(comments):
+    """Retourne True si le titre est présent dans AzuraCast (diffusable).
+    Compatible ancien format 'IN_AZURACAST' et nouveau 'AZURA_*_S6_S7'.
+    """
+    if not comments:
+        return False
+    s = str(comments).strip()
+    if s == 'IN_AZURACAST':
+        return True
+    if s.startswith('AZURA_'):
+        return not s.startswith('AZURA_REMOVED')
+    return False
+# ──────────────────────────────────────────────────────────
+
+
 # ============================================================
 # Configuration
 # ============================================================
@@ -773,7 +790,7 @@ def api_soumettre():
         response["match"] = {
             "song_id": match_result["song"].get('id'),
             "passe": match_result["passe"],
-            "in_azuracast": 'IN_AZURACAST' in match_result["song"].get('comments', ''),
+            "in_azuracast": is_in_azuracast(match_result["song"].get('comments', '')),
             "via_shazam": match_result["song"].get('label') == 'VIA_SHAZAM'
         }
     return jsonify(response), 200
@@ -905,7 +922,7 @@ def api_match():
             "artist": artist_val,
             "title": title_val,
             "year": song.get('year') or song.get('annee'),
-            "in_azuracast": 'IN_AZURACAST' in str(song.get('comments', '')),
+            "in_azuracast": is_in_azuracast(song.get('comments', '')),
             "via_shazam": song.get('label') == 'VIA_SHAZAM',
         })
 

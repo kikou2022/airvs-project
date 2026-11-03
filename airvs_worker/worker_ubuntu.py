@@ -48,6 +48,7 @@ WORKER_VERSION = "2026.09.17-A"  # + piges multi-sources (radio + station6) : ex
 
 import time
 import datetime
+from azura_flags import is_in_azuracast
 import json
 import shutil
 import os
@@ -1926,7 +1927,7 @@ def executer_suspect_reject(tache_id, parametres):
 
 
 def _marquer_in_azuracast_radiodb(tache_id, chemins):
-    """v2.7 — Marque comments='IN_AZURACAST' dans radiodb.songs (RadioDJ)
+    """v2.7 — Marque comments = 'AZURA_PUSHED_S6_S7' dans radiodb.songs (RadioDJ)
     pour chaque chemin réellement copié vers AzuraCast.
 
     But : garantir le tag même si le dashboard ne poll pas /lire_log_push
@@ -1942,8 +1943,8 @@ def _marquer_in_azuracast_radiodb(tache_id, chemins):
         n = 0
         for c in chemins:
             cur_m.execute(
-                "UPDATE radiodb.songs SET comments = 'IN_AZURACAST' "
-                "WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments != 'IN_AZURACAST')",
+                "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' "
+                "WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
                 (c, c.replace('/', '\\'))
             )
             n += cur_m.rowcount
@@ -4490,7 +4491,7 @@ def executer_audience_get_data(tache_id, parametres):
 
 
 def executer_sync_azura_status(tache_id, parametres):
-    """Compare les fichiers AzuraCast avec RadioDJ, met à jour comments='IN_AZURACAST'
+    """Compare les fichiers AzuraCast avec RadioDJ, met à jour comments = 'AZURA_PUSHED_S6_S7'
     (badge global = présent dans au moins une station), et rafraîchit le cache des dossiers.
 
     Parametres :
@@ -4761,7 +4762,7 @@ def executer_sync_azura_status(tache_id, parametres):
                 batch = ids_a_marquer[i:i+100]
                 placeholders = ','.join(['%s'] * len(batch))
                 cursor.execute(
-                    f"UPDATE radiodb.songs SET comments = 'IN_AZURACAST' WHERE ID IN ({placeholders}) AND (comments IS NULL OR comments != 'IN_AZURACAST')",
+                    f"UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE ID IN ({placeholders}) AND (comments IS NULL OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
                     batch
                 )
                 updated += cursor.rowcount
@@ -5404,7 +5405,7 @@ def executer_programmation_couleur(tache_id, parametres):
 
         # Marquer IN_AZURACAST pour chaque titre
         for t in titres:
-            t['in_azura'] = (str(t.get('comments', '')).strip() == 'IN_AZURACAST')
+            t['in_azura'] = (is_in_azuracast(t.get('comments', '')))
 
         # Afficher la sélection dans le log
         logger(tache_id, "  ── Sélection ──")

@@ -33,6 +33,7 @@ from flask import Blueprint, request, jsonify, session, Response
 
 from utils import get_db_connection, _logger, _charger_config_json, _assurer_schema_airvs_avance
 from blueprints.auth import login_requis
+from utils import is_in_azuracast
 
 
 programmation_bp = Blueprint('programmation', __name__)
@@ -485,7 +486,7 @@ def api_programmation_avance_dry_run(creneau_id):
 
         # Pour chaque titre, indiquer s'il est déjà IN_AZURACAST
         for t in titres:
-            t['in_azura'] = (str(t.get('comments', '')).strip() == 'IN_AZURACAST')
+            t['in_azura'] = (is_in_azuracast(t.get('comments', '')))
             if t.get('year') is not None and hasattr(t['year'], 'isoformat'):
                 t['year'] = t['year'].year if hasattr(t['year'], 'year') else int(t['year'])
 
@@ -595,7 +596,7 @@ def api_programmation_avance_test_pool():
         titres = cursor.fetchall()
 
         for t in titres:
-            t['in_azura'] = (str(t.get('comments', '')).strip() == 'IN_AZURACAST')
+            t['in_azura'] = (is_in_azuracast(t.get('comments', '')))
             if t.get('year') is not None and hasattr(t['year'], 'isoformat'):
                 t['year'] = t['year'].year if hasattr(t['year'], 'year') else int(t['year'])
 

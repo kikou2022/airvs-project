@@ -1174,3 +1174,65 @@ def correler_import_cible(artiste, titre, logger=None):
         except Exception:
             pass
     return result
+
+
+# ─── Helper Phase 0 : compatibilité flags AZURA_*_S6_S7 ───
+# Ajouté par apply_phase0.py — Migration IN_AZURACAST → AZURA_*_S6_S7
+def is_in_azuracast(comments):
+    """Retourne True si le titre est présent dans AzuraCast (diffusable).
+
+    Compatible avec :
+    - Ancien format : 'IN_AZURACAST'
+    - Nouveau format : 'AZURA_PUSHED_S*', 'AZURA_ACTIVE_S*', 'AZURA_RETIRED_S*'
+      (mais PAS 'AZURA_REMOVED_*' car le fichier n'est plus dans AzuraCast)
+    """
+    if not comments:
+        return False
+    s = str(comments).strip()
+    if s == 'IN_AZURACAST':
+        return True
+    if s.startswith('AZURA_'):
+        return not s.startswith('AZURA_REMOVED')
+    return False
+
+
+def get_azura_state(comments):
+    """Retourne l'état AzuraCast détaillé d'un titre.
+
+    Returns:
+        dict avec clés : flag, in_azura, state, stations, legacy
+    """
+    if not comments:
+        return {'flag': '', 'in_azura': False, 'state': None,
+                'stations': [], 'legacy': False}
+    s = str(comments).strip()
+    if s == 'IN_AZURACAST':
+        return {'flag': s, 'in_azura': True, 'state': 'PUSHED',
+                'stations': [6, 7], 'legacy': True}
+    if not s.startswith('AZURA_'):
+        return {'flag': s, 'in_azura': False, 'state': None,
+                'stations': [], 'legacy': False}
+    parts = s.split('_')
+    if len(parts) < 3:
+        return {'flag': s, 'in_azura': False, 'state': None,
+                'stations': [], 'legacy': False}
+    state = parts[1]
+    stations_str = '_'.join(parts[2:])
+    stations = []
+    if 'S6' in stations_str:
+        stations.append(6)
+    if 'S7' in stations_str:
+        stations.append(7)
+    in_azura = state in ('PUSHED', 'ACTIVE', 'RETIRED')
+    return {'flag': s, 'in_azura': in_azura, 'state': state,
+            'stations': stations, 'legacy': False}
+
+
+def format_azura_flag(state, stations):
+    """Construit un flag AZURA_*_S* à partir d'un état et d'une liste de stations."""
+    if state not in ('PUSHED', 'ACTIVE', 'RETIRED', 'REMOVED'):
+        raise ValueError("État AZURA invalide: " + str(state))
+    sorted_stations = sorted(set(stations))
+    stations_str = '_'.join('S' + str(s) for s in sorted_stations)
+    return 'AZURA_' + state + '_' + stations_str
+# ──────────────────────────────────────────────────────────

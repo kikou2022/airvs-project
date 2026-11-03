@@ -849,8 +849,8 @@ def lancer_push_azura():
                 _upd_deja = 0
                 for _p in _paths_deja:
                     cursor.execute(
-                        "UPDATE radiodb.songs SET comments = 'IN_AZURACAST' "
-                        "WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments != 'IN_AZURACAST')",
+                        "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' "
+                        "WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
                         (_p, _p.replace('/', '\\'))
                     )
                     _upd_deja += cursor.rowcount
@@ -1010,7 +1010,7 @@ def lire_log_push():
                     if not _eligible:
                         continue
                     cursor.execute(
-                        "UPDATE radiodb.songs SET comments = 'IN_AZURACAST' WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments != 'IN_AZURACAST')",
+                        "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
                         (fpath, fpath.replace('/', '\\'))
                     )
                     if cursor.rowcount > 0:
@@ -1199,7 +1199,7 @@ def api_marquer_in_azuracast():
         # Marquer par chemin de fichier
         for chemin in fichiers:
             cursor.execute(
-                "UPDATE radiodb.songs SET comments = 'IN_AZURACAST' WHERE `path` = %s AND (comments IS NULL OR comments = '' OR comments != 'IN_AZURACAST')",
+                "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE `path` = %s AND (comments IS NULL OR comments = '' OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
                 (chemin,)
             )
             updated += cursor.rowcount
@@ -1207,7 +1207,7 @@ def api_marquer_in_azuracast():
         # Marquer par ID
         for sid in ids:
             cursor.execute(
-                "UPDATE radiodb.songs SET comments = 'IN_AZURACAST' WHERE ID = %s AND (comments IS NULL OR comments = '' OR comments != 'IN_AZURACAST')",
+                "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE ID = %s AND (comments IS NULL OR comments = '' OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
                 (sid,)
             )
             updated += cursor.rowcount
@@ -1238,7 +1238,7 @@ def api_marquer_in_azuracast():
 def api_sync_azura_status():
     """Crée une tâche SYNC_AZURA_STATUS dans la file pour que le worker Ubuntu
     (qui a internet) compare les fichiers AzuraCast avec RadioDJ et mette à jour
-    le champ comments='IN_AZURACAST' (badge global).
+    le champ comments = 'AZURA_PUSHED_S6_S7' (badge global).
 
     Paramètres (JSON body) :
       - station_ids: liste d'IDs de stations à synchroniser (ex: [6, 7])
@@ -1703,7 +1703,7 @@ def _diagnostic_flux_editorial_data():
                 "FROM airvs_animateurs a "
                 "JOIN songs s ON s.ID = a.match_song_id "
                 "WHERE a.statut = 'matche' "
-                "  AND s.comments = 'IN_AZURACAST' LIMIT 50"
+                "  AND s.comments = 'AZURA_PUSHED_S6_S7' LIMIT 50"
             )
             data['deja_azura_non_qualifies'] = \
                 _diag_nettoie_lignes(cursor.fetchall())
@@ -1754,7 +1754,7 @@ def _diagnostic_flux_editorial_data():
                 "FROM airvs_animateurs a "
                 "JOIN songs s ON s.ID = a.match_song_id "
                 "WHERE a.statut = 'pousse_azura' "
-                "  AND (s.comments IS NULL OR s.comments <> 'IN_AZURACAST') "
+                "  AND (s.comments IS NULL OR s.comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%') "
                 "LIMIT 20"
             )
             data['incoherences']['badge_non_conforme'] = \

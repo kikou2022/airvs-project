@@ -567,7 +567,7 @@ document.addEventListener('click', function(e) {
     };
     document.getElementById('action_track_label').textContent = actionTrack.artist + ' — ' + actionTrack.title;
     if (actionTrack.inAzura) {
-        document.getElementById('action_track_badge').innerHTML = '<span class="badge-azura">IN_AZURACAST</span>';
+        document.getElementById('action_track_badge').innerHTML = AzuraFlags.getBadgeHTML(actionTrack.comments || 'AZURA_PUSHED_S6_S7');
         try {
             let tabTrigger = new bootstrap.Tab(document.querySelector('#actionTabs button[data-bs-target="#action-playlist"]'));
             tabTrigger.show();
@@ -946,7 +946,7 @@ function surveillerActionLog(taskId, playlistTaskIds) {
                         let nbErreurs = matchErreur ? parseInt(matchErreur[1]) : 0;
                         if (nbCopies > 0 && nbErreurs === 0) {
                             actionTrack.inAzura = true;
-                            document.getElementById('action_track_badge').innerHTML = '<span class="badge-azura">IN_AZURACAST</span>';
+                            document.getElementById('action_track_badge').innerHTML = AzuraFlags.getBadgeHTML(actionTrack.comments || 'AZURA_PUSHED_S6_S7');
                         }
                     }
                     if (playlistTaskIds.length > 0) {
@@ -1631,11 +1631,10 @@ function populatePushPreviewFromShazam(found, notFound, apiData) {
 
     if (found && found.length > 0) {
         found.forEach(function(t) {
-            var inAzura = (t.comments === 'IN_AZURACAST');
+            var inAzura = (AzuraFlags.isInAzuracast(t.comments));
             if (inAzura) nbInAzura++;
             var statusIcon = '<span class="text-success" title="Match Shazam">✓</span>';
-            var azuraBadge = inAzura
-                ? '<span class="badge-azura" style="font-size:0.7em">IN_AZURACAST</span>' : '';
+            var azuraBadge = AzuraFlags.getBadgeHTML(t.comments);
             var shazamSrc = (t._shazam_source || '');
             var src2 = shazamSrc.toLowerCase();
             var shazamBadge = (src2.includes('formulaire') || src2.includes('web') || src2.includes('programmeur') || src2.includes('animateur'))
@@ -1737,11 +1736,10 @@ function populatePushPreviewFromAnimateurs(found, notFound, apiData) {
 
     if (found && found.length > 0) {
         found.forEach(function(t) {
-            var inAzura = (t.comments === 'IN_AZURACAST');
+            var inAzura = (AzuraFlags.isInAzuracast(t.comments));
             if (inAzura) nbInAzura++;
             var statusIcon = '<span class="text-success" title="Match Animateur">✓</span>';
-            var azuraBadge = inAzura
-                ? '<span class="badge-azura" style="font-size:0.7em">IN_AZURACAST</span>' : '';
+            var azuraBadge = AzuraFlags.getBadgeHTML(t.comments);
             var shazamSrc = (t._shazam_source || '');
             var shazamBadge = (function(src) {
                 var s = (src || '').toLowerCase();
@@ -1950,14 +1948,12 @@ btnPreview.addEventListener('click', function() {
             let disabledAttr = absent ? 'disabled' : '';
             let rowClass = absent ? 'table-secondary' : '';
 
-            let azuraBadge = (t.comments === 'IN_AZURACAST')
-                ? '<span class="badge-azura" style="font-size:0.7em">IN_AZURACAST</span>'
-                : '';
+            let azuraBadge = AzuraFlags.getBadgeHTML(t.comments);
             let shazamBadge = !!t.in_shazam
                 ? '<span class="badge-shazam badge-shazam-sm">VIA_SHAZAM</span>'
                 : '';
 
-            let inAzuraFlag = (t.comments === 'IN_AZURACAST') ? 'true' : 'false';
+            let inAzuraFlag = (AzuraFlags.isInAzuracast(t.comments)) ? 'true' : 'false';
 
             // ── Évolution 2b : afficher Année et Album depuis la DB (mode assisté)
             //    Pour le mode Google Sheet, c'est populatePushPreviewFromSheet()

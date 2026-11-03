@@ -97,7 +97,7 @@
 
             // Filtre AzuraCast
             if (onlyAzura) {
-                resultats = resultats.filter(item => item.comments === "IN_AZURACAST");
+                resultats = resultats.filter(item => AzuraFlags.isInAzuracast(item.comments));
             }
 
             // Filtre Shazam
@@ -127,7 +127,7 @@
                 const dateFormatee = item.date_added ? item.date_added.split(' ')[0] : '';
                 
                 // --- NOUVEAU : Création du Badge AzuraCast ---
-                const azuraBadge = item.comments === "IN_AZURACAST" ? '<span class="badge-azura">IN_AZURACAST</span>' : '';
+                const azuraBadge = AzuraFlags.getBadgeHTML(item.comments);
                 // --- NOUVEAU : Création du Badge Shazam ---
                 const shazamBadge = item.in_shazam ? '<span class="badge-shazam">VIA SHAZAM</span>' : '';
                 // ---------------------------------------------
@@ -148,5 +148,6 @@
             }
         }
     </script>
+<script src="static/js/modules/azura_flags.js"></script>
 </body>
 </html>

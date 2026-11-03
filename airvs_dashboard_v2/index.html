@@ -473,7 +473,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -549,7 +549,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -588,7 +588,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -627,7 +627,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -703,7 +703,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -742,7 +742,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -1373,7 +1373,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -1412,7 +1412,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -1451,7 +1451,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -1490,7 +1490,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -1529,7 +1529,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -1568,7 +1568,7 @@
                                     </td>
                                     <td class="text-center">
                                         
-                                            <span class="badge-azura">IN_AZURACAST</span>
+                                            <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>
                                         
                                     </td>
                                     <td class="text-center">
@@ -4451,7 +4451,7 @@
                             <div class="col-md-4">
                                 <p class="small text-muted mb-2">
                                     Interroge l'API AzuraCast pour comparer tous les fichiers média avec la base RadioDJ.
-                                    Met à jour les badges <span class="badge-azura">IN_AZURACAST</span>, rafraîchit les playlists et les dossiers.
+                                    Met à jour les badges <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span>, rafraîchit les playlists et les dossiers.
                                 </p>
                                 <div class="mb-2">
                                     <label class="form-label small fw-bold mb-1" for="sync_azura_station_select">Stations à synchroniser :</label>
@@ -4461,7 +4461,7 @@
                                         <option value="all" selected>Les deux stations à la suite</option>
                                     </select>
                                     <div class="form-text small">
-                                        Le badge <span class="badge-azura">IN_AZURACAST</span> reste global (présent dans au moins une station).
+                                        Le badge <span class="badge-azura badge-azura-push">POUSSÉ S6+S7</span> reste global (présent dans au moins une station).
                                     </div>
                                     <div id="sync_azura_stations_diag" class="form-text small mt-1" style="font-family: monospace;">
                                         <span class="text-muted">⟳ Stations configurées : chargement…</span>
@@ -5182,11 +5182,10 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         titres.forEach(function(titre) {
-            let azuraBadge = titre.comments === 'IN_AZURACAST'
-                ? '<span class="badge-azura">IN_AZURACAST</span>' : '';
+            let azuraBadge = AzuraFlags.getBadgeHTML(titre.comments);
             let shazamBadge = titre.in_shazam
                 ? '<span class="badge-shazam badge-shazam-sm">VIA_SHAZAM</span>' : '';
-            let inAzura = titre.comments === 'IN_AZURACAST';
+            let inAzura = AzuraFlags.isInAzuracast(titre.comments);
             let actionBtn = inAzura
                 ? '<button class="btn btn-sm btn-outline-info action-btn" '
                   + 'data-id="' + titre.ID + '" '
@@ -5482,13 +5481,11 @@ document.addEventListener('DOMContentLoaded', function() {
         // Remplir le tableau avec les titres trouvés
         if (found && found.length > 0) {
             found.forEach(function(t) {
-                let inAzura = (t.comments === 'IN_AZURACAST');
+                let inAzura = (AzuraFlags.isInAzuracast(t.comments));
                 if (inAzura) nbInAzura++;
 
                 let statusIcon = '<span class="text-success" title="Trouvé dans RadioDJ">✓</span>';
-                let azuraBadge = inAzura
-                    ? '<span class="badge-azura" style="font-size:0.7em">IN_AZURACAST</span>'
-                    : '';
+                let azuraBadge = AzuraFlags.getBadgeHTML(t.comments);
                 let inShazam = !!t.in_shazam;
                 let shazamBadge = inShazam
                     ? '<span class="badge-shazam badge-shazam-sm">VIA_SHAZAM</span>'
@@ -7873,5 +7870,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <script src="/static/js/bootstrap.bundle.min.js"></script>
 
+<script src="/static/js/modules/azura_flags.js"></script>
 </body>
 </html>

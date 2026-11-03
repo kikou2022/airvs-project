@@ -40,6 +40,7 @@ from utils import (get_db_connection, _logger, _assurer_schema_airvs_avance,
                    _charger_config_json, correler_manquants_radiodj,
                    assurer_type_match_passe)
 from blueprints.auth import login_requis
+from utils import is_in_azuracast
 
 
 shazam_bp = Blueprint('shazam', __name__)
@@ -1465,7 +1466,7 @@ def api_shazam_prefill():
                     # (une nouvelle version a pu être importée entre-temps)
                     rows_engine.append(sr)
                     continue
-                if str(_song.get('comments') or '') == 'IN_AZURACAST':
+                if is_in_azuracast(_song.get('comments')):
                     # déjà poussé vers AzuraCast par le passé : on qualifie
                     # la ligne source 'pousse_azura' et on la retire du flux
                     # (elle ne doit plus remonter dans le push)
@@ -1839,7 +1840,7 @@ def api_shazam_pipeline_trigger():
                 if not _song:
                     rows_engine.append(sr)
                     continue
-                if str(_song.get('comments') or '') == 'IN_AZURACAST':
+                if is_in_azuracast(_song.get('comments')):
                     _ids_pousse_azura_pipe.append(sr['id'])
                     continue
                 _song['in_shazam'] = True

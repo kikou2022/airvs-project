@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify, request, send_file
 
 from utils import get_db_connection
 from blueprints.auth import login_requis
+from utils import is_in_azuracast
 
 explorateur_bp = Blueprint('explorateur', __name__)
 
@@ -284,7 +285,7 @@ def api_radiodj_titres():
         for r in rows:
             if r.get('year') is not None and hasattr(r['year'], 'isoformat'):
                 r['year'] = r['year'].year if hasattr(r['year'], 'year') else int(r['year'])
-            r['in_azura'] = (str(r.get('comments', '')).strip() == 'IN_AZURACAST')
+            r['in_azura'] = (is_in_azuracast(r.get('comments', '')))
         cursor.close()
         db.close()
         return jsonify(rows)
