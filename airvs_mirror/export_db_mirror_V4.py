@@ -353,7 +353,8 @@ def envoyer_vers_destination(nom, config):
     print(f"[{datetime.now()}] Envoi vers {nom} ({config['host']})...")
     try:
         cmd = ["scp", "-q", FICHIER_TEMPORAIRE, f"{config['host']}:{config['path']}"]
-        subprocess.run(cmd, check=True, timeout=30)
+        # Timeout augmenté à 180s pour les connexions ADSL lentes (15 Mo à 175 KB/s = ~85s)
+        subprocess.run(cmd, check=True, timeout=180)
         print(f"[{datetime.now()}] Succès vers {nom}.")
         return True
     except subprocess.TimeoutExpired:
