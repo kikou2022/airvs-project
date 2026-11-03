@@ -19,6 +19,19 @@
 #   - index.html           (modale versions : modal-lg, btn_annuler_remplissage, ?v=3)
 #   - grille-editoriale.js (renommer/dupliquer/supprimer actif, undo AzuraCast)
 #   - grille.py            (endpoints /desactiver, /dupliquer, /renommer)
+#
+# Phase 0 — Migration flags AZURA_*_S6_S7 (nov. 2026) :
+#   - blueprints/{explorateur,shazam,programmation,azuracast}.py (helpers is_in_azuracast)
+#   - utils.py            (helper is_in_azuracast/get_azura_state/format_azura_flag ajouté)
+#   - static/js/modules/sync-azuracast.js  (AzuraFlags.isInAzuracast)
+#   - static/js/modules/azura_flags.js      (NOUVEAU helper JS, copié automatiquement par static/* récursif)
+#   - index.html           (include <script src="/static/js/modules/azura_flags.js">)
+#
+# Phases futures (à activer quand implémentées) :
+#   - blueprints/rotation.py            (Phase 9+ : onglet Rotation éditoriale)
+#   - blueprints/audit_doublons.py      (Phase 13+ : onglet Audit éditorial)
+#   - static/js/modules/rotation.js     (Phase 9+ : UI rotation)
+#   - static/js/modules/audit_doublons.js (Phase 13+ : UI audit)
 # ════════════════════════════════════════════════════════════════════════════════
 
 set -u
@@ -54,6 +67,10 @@ BLUEPRINT_FILES=(
     "blueprints/programmation.py"
     "blueprints/taches.py"
     "blueprints/pipeline_import.py"
+    # ─── Phase 9+ (Rotation éditoriale) — à décommenter quand implémentée ───
+    # "blueprints/rotation.py"
+    # ─── Phase 13+ (Audit doublons) — à décommenter quand implémentée ──────
+    # "blueprints/audit_doublons.py"
 )
 
 # Fichiers frontend (à la racine source → copiés dans templates/ destination)
