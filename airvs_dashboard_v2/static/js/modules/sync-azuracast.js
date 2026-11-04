@@ -597,7 +597,8 @@ document.getElementById('btn_close_action_panel').addEventListener('click', func
 
 /**
  * Retire le titre courant (actionTrack) d'une playlist AzuraCast sélectionnée.
- * Demande confirmation, puis appelle l'API DELETE /api/azura/media/<id>/playlists/<pid>.
+ * Affiche un dropdown des playlists du titre (récupérées via API async),
+ * au lieu d'un prompt texte manuel.
  *
  * Le worker traitera la tâche en arrière-plan et mettra à jour le flag
  * AZURA_*_S* dans RadioDJ (→ AZURA_RETIRED_S* si plus aucune playlist,
@@ -609,66 +610,27 @@ function retirerTitrePlaylistAzura() {
         return;
     }
 
-    // Demander à l'utilisateur de sélectionner la playlist à retirer
-    // (pour l'instant, on utilise un prompt simple — une UI plus riche
-    //  viendra avec Phase 9 quand on aura la liste complète des playlists
-    //  associées au média)
-    let playlistIdStr = prompt(
-        'Retrait d\'un titre d\'une playlist AzuraCast\n\n' +
-        'Titre : ' + (actionTrack.artist || '?') + ' - ' + (actionTrack.title || '?') + '\n' +
-        'Station : ' + getActionStationId() + '\n\n' +
-        'Saisissez l\'ID de la playlist AzuraCast à retirer :\n' +
-        '(ex: 465 pour SELECTION_SPECIAL_1_MER)',
-        ''
-    );
+    var stationId = getActionStationId();
+    var songId = actionTrack.ID;
 
-    if (!playlistIdStr) return;  // Annulé
-
-    let playlistId = parseInt(playlistIdStr);
-    if (isNaN(playlistId) || playlistId <= 0) {
-        alert('ID de playlist invalide.');
-        return;
+    // Afficher le chargement dans la zone dropdown (pas le terminal)
+    var dropdownArea = document.getElementById('retire_playlist_area');
+    if (dropdownArea) {
+        dropdownArea.innerHTML = '<div class="alert alert-info py-2 small">' +
+            '⏳ Récupération des playlists AzuraCast...<br>' +
+            'Titre : ' + (actionTrack.artist || '?') + ' - ' + (actionTrack.title || '?') + '<br>' +
+            'Station : ' + stationId + ' · Song ID : ' + songId + '</div>';
     }
 
-    if (!confirm(
-        'Confirmer le retrait ?\n\n' +
-        'Titre : ' + (actionTrack.artist || '?') + ' - ' + (actionTrack.title || '?') + '\n' +
-        'Playlist AzuraCast ID : ' + playlistId + '\n' +
-        'Station : ' + getActionStationId() + '\n\n' +
-        'Le fichier ne sera PAS supprimé d\'AzuraCast.\n' +
-        'Il sera simplement retiré de cette playlist.'
-    )) return;
-
-    // Appel API
-    fetch('/api/azura/media/' + encodeURIComponent(actionTrack.mediaId || 0) +
-          '/playlists/' + encodeURIComponent(playlistId), {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            station_id: getActionStationId(),
-            song_id_radiodj: actionTrack.ID || null
-        })
+    // Appel API pour récupérer les playlists du média (async via worker)
+    fetch('/api/azura/media/' + encodeURIComponent(songId) + '/playlists?station_id=' + encodeURIComponent(stationId), {
+        method: 'GET'
     })
     .then(function(res) { return res.json(); })
     .then(function(data) {
-        if (data.status === 'ok') {
-            // Afficher le journal d'action (similaire au push)
-            let logWrapper = document.getElementById('action_log_wrapper');
-            let terminal = document.getElementById('terminal_action_output');
-            if (logWrapper && terminal) {
-                logWrapper.style.display = 'block';
-                terminal.textContent = '── Retrait playlist créé ──\n' +
-                    'Tâche ID : ' + data.task_id + '\n' +
-                    'Média : ' + data.media_id + '\n' +
-                    'Playlist : ' + data.playlist_id + '\n' +
-                    'Station : ' + data.station_id + '\n\n' +
-                    '⏳ Le worker va traiter la tâche prochainement.\n' +
-                    'Le flag AZURA_*_S' + data.station_id + ' sera mis à jour.';
-            }
-            // Poll du statut de la tâche (similaire à surveillerActionLog)
-            if (typeof surveillerActionLog === 'function') {
-                surveillerActionLog(data.task_id, []);
-            }
+        if (data.status === 'pending' && data.task_id) {
+            // Poll du résultat (pattern identique à surveillerActionLog)
+            pollMediaPlaylists(data.task_id, songId, stationId);
         } else {
             alert('Erreur : ' + (data.message || 'réponse inattendue'));
         }
@@ -676,6 +638,188 @@ function retirerTitrePlaylistAzura() {
     .catch(function(err) {
         alert('Erreur réseau : ' + err.message);
     });
+}
+
+/**
+ * Poll le résultat de la tâche GET_MEDIA_PLAYLISTS.
+ * Quand le worker a terminé, le résultat JSON est dans log_resultat
+ * avec le marqueur __RESULT__.
+ */
+function pollMediaPlaylists(taskId, songId, stationId) {
+    var attempts = 0;
+    var maxAttempts = 60;  // 60 tentatives × 2 sec = 120 sec max
+    var dropdownArea = document.getElementById('retire_playlist_area');
+
+    function poll() {
+        fetch('/lire_log_push?task_id=' + encodeURIComponent(taskId))
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            attempts++;
+
+            // Le résultat JSON est dans data.log (pas data.log_resultat)
+            if (data.log && data.log.indexOf('__RESULT__') !== -1) {
+                var startIdx = data.log.indexOf('__RESULT__') + 9;
+                var jsonStart = data.log.indexOf('{', startIdx);
+                var jsonEnd = data.log.lastIndexOf('}');
+                if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                    var jsonStr = data.log.substring(jsonStart, jsonEnd + 1);
+                    var result;
+                    try {
+                        result = JSON.parse(jsonStr);
+                    } catch (e) {
+                        if (dropdownArea) {
+                            dropdownArea.innerHTML = '<div class="alert alert-danger py-2 small">Erreur parsing : ' + e.message + '</div>';
+                        }
+                        return;
+                    }
+                    showPlaylistDropdown(result, songId, stationId, taskId);
+                    return;
+                }
+            }
+
+            if (data.statut === 'erreur') {
+                if (dropdownArea) {
+                    dropdownArea.innerHTML = '<div class="alert alert-danger py-2 small">' +
+                        '❌ Erreur lors de la récupération des playlists.<br><br>' +
+                        '<pre class="small mb-0">' + (data.log || '(vide)') + '</pre></div>';
+                }
+                return;
+            }
+
+            // Continuer à poller
+            if (attempts < maxAttempts) {
+                if (dropdownArea) {
+                    dropdownArea.innerHTML = '<div class="alert alert-info py-2 small">' +
+                        '⏳ Récupération des playlists... (' + attempts + '/' + maxAttempts + ')</div>';
+                }
+                setTimeout(poll, 2000);
+            } else {
+                if (dropdownArea) {
+                    dropdownArea.innerHTML = '<div class="alert alert-warning py-2 small">' +
+                        '❌ Timeout : le worker n\'a pas répondu à temps.</div>';
+                }
+            }
+        })
+        .catch(function(err) {
+            if (attempts < maxAttempts) {
+                setTimeout(poll, 2000);
+            }
+        });
+    }
+
+    poll();
+}
+
+/**
+ * Affiche le dropdown des playlists et gère le retrait.
+ */
+function showPlaylistDropdown(result, songId, stationId, fetchTaskId) {
+    var playlists = result.playlists || [];
+    var mediaId = result.media_id;
+    
+    // Injecter le dropdown dans la zone dédiée (pas dans le terminal)
+    var dropdownArea = document.getElementById('retire_playlist_area');
+    var terminal = document.getElementById('terminal_action_output');
+
+    if (playlists.length === 0) {
+        if (dropdownArea) {
+            dropdownArea.innerHTML = '<div class="alert alert-secondary py-2 small">' +
+                'ℹ️ Ce titre n\'est dans aucune playlist AzuraCast.<br>' +
+                'Aucun retrait possible.</div>';
+        }
+        return;
+    }
+
+    // Construire le HTML du dropdown dans la zone dédiée
+    var html = '<div class="card card-body p-2 mb-2">';
+    html += '<label class="form-label small fw-bold mb-1">Sélectionnez la playlist à retirer :</label>';
+    html += '<select class="form-select form-select-sm mb-2" id="retire_playlist_select">';
+    html += '<option value="">— Choisir une playlist —</option>';
+    playlists.forEach(function(p) {
+        var typeStr = p.is_folder_based ? ' (⚠️ folder-based)' : '';
+        var name = p.name || ('Playlist ' + p.id);
+        html += '<option value="' + p.id + '">' + name + ' (ID ' + p.id + ')' + typeStr + '</option>';
+    });
+    html += '</select>';
+    html += '<div class="form-text small mb-2">';
+    html += '⚠️ = playlist folder-based (le retrait peut être ignoré par AzuraCast).';
+    html += '</div>';
+    html += '<button class="btn btn-warning btn-sm" id="btn_confirm_retire" disabled>';
+    html += '➖ Retirer de cette playlist';
+    html += '</button>';
+    html += '</div>';
+
+    if (dropdownArea) {
+        dropdownArea.innerHTML = html;
+    }
+
+    // Le journal reste dans le terminal (pour les logs worker)
+    if (terminal) {
+        terminal.textContent = '';
+    }
+
+    // Activer le bouton quand une playlist est sélectionnée
+    var select = document.getElementById('retire_playlist_select');
+    var btn = document.getElementById('btn_confirm_retire');
+    if (select && btn) {
+        select.addEventListener('change', function() {
+            btn.disabled = (this.value === '');
+        });
+
+        btn.addEventListener('click', function() {
+            var playlistId = parseInt(select.value);
+            if (!playlistId) return;
+
+            // Trouver la playlist sélectionnée pour info
+            var selectedPlaylist = playlists.find(function(p) { return p.id === playlistId; });
+            var playlistName = selectedPlaylist ? selectedPlaylist.name : '?';
+
+            if (!confirm(
+                'Confirmer le retrait ?\n\n' +
+                'Titre : ' + (actionTrack.artist || '?') + ' - ' + (actionTrack.title || '?') + '\n' +
+                'Playlist : ' + playlistName + ' (ID ' + playlistId + ')\n' +
+                'Station : ' + stationId + '\n\n' +
+                'Le fichier ne sera PAS supprimé d\'AzuraCast.\n' +
+                'Il sera simplement retiré de cette playlist.'
+            )) return;
+
+            // Appel API pour le retrait
+            fetch('/api/azura/media/' + encodeURIComponent(mediaId || 0) +
+                  '/playlists/' + encodeURIComponent(playlistId), {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    station_id: stationId,
+                    song_id_radiodj: songId
+                })
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                if (data.status === 'ok') {
+                    // Afficher le statut dans la zone dropdown
+                    if (dropdownArea) {
+                        dropdownArea.innerHTML = '<div class="alert alert-success py-2 small">' +
+                            '✅ Tâche de retrait créée (ID ' + data.task_id + ')<br>' +
+                            'Média : ' + data.media_id + ' · Playlist : ' + data.playlist_id + ' · Station : ' + data.station_id + '<br>' +
+                            '⏳ Le worker va traiter la tâche prochainement.</div>';
+                    }
+                    // Afficher les logs worker dans le terminal
+                    if (terminal) {
+                        terminal.textContent = '⏳ En attente du worker...';
+                    }
+                    // Poll du statut de la tâche
+                    if (typeof surveillerActionLog === 'function') {
+                        surveillerActionLog(data.task_id, []);
+                    }
+                } else {
+                    alert('Erreur : ' + (data.message || 'réponse inattendue'));
+                }
+            })
+            .catch(function(err) {
+                alert('Erreur réseau : ' + err.message);
+            });
+        });
+    }
 }
 
 // Exposer la fonction globalement pour le onclick HTML

@@ -1296,6 +1296,79 @@ def api_remove_media_from_playlist(media_id, playlist_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 1 (améliorée) — Lister les playlists d'un média AzuraCast
+# ═══════════════════════════════════════════════════════════════════════
+
+@azuracast_bp.route('/api/azura/media/<int:song_id_radiodj>/playlists', methods=['GET'])
+@login_requis
+def api_get_media_playlists(song_id_radiodj):
+    """
+    Phase 1 (améliorée) — Retourne la liste des playlists AzuraCast
+    auxquelles un titre (song_id_radiodj) appartient, pour une station donnée.
+
+    Le dashboard appelle cet endpoint pour peupler le dropdown de retrait.
+
+    Query params :
+      - station_id: ID de la station AzuraCast (défaut: 7)
+
+    Returns:
+      JSON : {
+        'status': 'ok',
+        'playlists': [
+          {
+            'id': 168,
+            'name': 'SELECTION_SPECIAL_1_MER',
+            'folder': null,        # null = playlist directe, sinon nom du dossier (folder-based)
+            'is_folder_based': false,
+            'count': 1
+          },
+          ...
+        ]
+      }
+
+    Note : Le worker doit résoudre song_id_radiodj → media_id AzuraCast,
+    mais comme le dashboard n'a pas internet, on doit insérer une tâche
+    ASYNC pour récupérer cette info. Pour simplifier, on retourne
+    directement les playlists depuis le cache local (azuracast_folders_cache)
+    si disponible, sinon on demande au worker.
+
+    En pratique, pour Phase 1 améliorée, on délègue au worker via
+    une tâche GET_MEDIA_PLAYLISTS qui stocke le résultat.
+    """
+    # Pour Phase 1, on retourne un statut "pending" et on insère
+    # une tâche que le worker traitera. Le dashboard pollera le résultat.
+    # C'est le même pattern que SYNC_AZURA_STATUS / BULK_SCHEDULE.
+
+    station_id = int(request.args.get('station_id', 7))
+
+    db = get_db_connection()
+    if not db:
+        return jsonify({'status': 'error', 'message': 'Connexion DB impossible'}), 500
+    cursor = db.cursor()
+
+    parametres = {
+        'song_id_radiodj': song_id_radiodj,
+        'station_id': station_id,
+    }
+
+    cursor.execute(
+        "INSERT INTO taches_planifiees (type_action, statut, parametres, date_creation) "
+        "VALUES ('GET_MEDIA_PLAYLISTS', 'en_attente', %s, NOW())",
+        (json.dumps(parametres),)
+    )
+    db.commit()
+    task_id = cursor.lastrowid
+    cursor.close()
+    db.close()
+
+    return jsonify({
+        'status': 'pending',
+        'task_id': task_id,
+        'message': 'Tâche créée. Poll /lire_log_push?task_id=X pour récupérer le résultat.'
+    })
+
+
 @azuracast_bp.route('/api/sync_azura_status', methods=['POST'])
 @login_requis
 def api_sync_azura_status():
