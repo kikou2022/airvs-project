@@ -591,6 +591,96 @@ document.getElementById('btn_close_action_panel').addEventListener('click', func
     document.getElementById('explorer_action_panel').style.display = 'none';
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// PHASE 1 — Retrait d'un titre d'une playlist AzuraCast
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Retire le titre courant (actionTrack) d'une playlist AzuraCast sélectionnée.
+ * Demande confirmation, puis appelle l'API DELETE /api/azura/media/<id>/playlists/<pid>.
+ *
+ * Le worker traitera la tâche en arrière-plan et mettra à jour le flag
+ * AZURA_*_S* dans RadioDJ (→ AZURA_RETIRED_S* si plus aucune playlist,
+ *  → AZURA_ACTIVE_S* sinon).
+ */
+function retirerTitrePlaylistAzura() {
+    if (!actionTrack || !actionTrack.inAzura) {
+        alert('Ce titre n\'est pas dans AzuraCast, impossible de le retirer d\'une playlist.');
+        return;
+    }
+
+    // Demander à l'utilisateur de sélectionner la playlist à retirer
+    // (pour l'instant, on utilise un prompt simple — une UI plus riche
+    //  viendra avec Phase 9 quand on aura la liste complète des playlists
+    //  associées au média)
+    let playlistIdStr = prompt(
+        'Retrait d\'un titre d\'une playlist AzuraCast\n\n' +
+        'Titre : ' + (actionTrack.artist || '?') + ' - ' + (actionTrack.title || '?') + '\n' +
+        'Station : ' + getActionStationId() + '\n\n' +
+        'Saisissez l\'ID de la playlist AzuraCast à retirer :\n' +
+        '(ex: 465 pour SELECTION_SPECIAL_1_MER)',
+        ''
+    );
+
+    if (!playlistIdStr) return;  // Annulé
+
+    let playlistId = parseInt(playlistIdStr);
+    if (isNaN(playlistId) || playlistId <= 0) {
+        alert('ID de playlist invalide.');
+        return;
+    }
+
+    if (!confirm(
+        'Confirmer le retrait ?\n\n' +
+        'Titre : ' + (actionTrack.artist || '?') + ' - ' + (actionTrack.title || '?') + '\n' +
+        'Playlist AzuraCast ID : ' + playlistId + '\n' +
+        'Station : ' + getActionStationId() + '\n\n' +
+        'Le fichier ne sera PAS supprimé d\'AzuraCast.\n' +
+        'Il sera simplement retiré de cette playlist.'
+    )) return;
+
+    // Appel API
+    fetch('/api/azura/media/' + encodeURIComponent(actionTrack.mediaId || 0) +
+          '/playlists/' + encodeURIComponent(playlistId), {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            station_id: getActionStationId(),
+            song_id_radiodj: actionTrack.ID || null
+        })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.status === 'ok') {
+            // Afficher le journal d'action (similaire au push)
+            let logWrapper = document.getElementById('action_log_wrapper');
+            let terminal = document.getElementById('terminal_action_output');
+            if (logWrapper && terminal) {
+                logWrapper.style.display = 'block';
+                terminal.textContent = '── Retrait playlist créé ──\n' +
+                    'Tâche ID : ' + data.task_id + '\n' +
+                    'Média : ' + data.media_id + '\n' +
+                    'Playlist : ' + data.playlist_id + '\n' +
+                    'Station : ' + data.station_id + '\n\n' +
+                    '⏳ Le worker va traiter la tâche prochainement.\n' +
+                    'Le flag AZURA_*_S' + data.station_id + ' sera mis à jour.';
+            }
+            // Poll du statut de la tâche (similaire à surveillerActionLog)
+            if (typeof surveillerActionLog === 'function') {
+                surveillerActionLog(data.task_id, []);
+            }
+        } else {
+            alert('Erreur : ' + (data.message || 'réponse inattendue'));
+        }
+    })
+    .catch(function(err) {
+        alert('Erreur réseau : ' + err.message);
+    });
+}
+
+// Exposer la fonction globalement pour le onclick HTML
+window.retirerTitrePlaylistAzura = retirerTitrePlaylistAzura;
+
 // Charger les dossiers AzuraCast dans les select
 // Récupère l'ID de station actuellement sélectionné dans le header du Pont
 function getPushStationId() {

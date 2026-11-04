@@ -406,6 +406,73 @@ class AzuraCastAPI:
         return matches
 
     # ═══════════════════════════════════════════════
+    # OPÉRATIONS "RETOUR" (Phase 1+ du module Rotation éditoriale)
+    # ═══════════════════════════════════════════════
+
+    def remove_media_from_playlist(self, media_id, playlist_id):
+        """
+        Phase 1 — Retire un média d'une playlist AzuraCast sans supprimer le fichier.
+
+        Workflow :
+        1. GET /station/{id}/file/{media_id} → récupérer le dict complet
+        2. Extraire playlists[] (IDs uniquement)
+        3. Retirer playlist_id du tableau
+        4. PUT /station/{id}/file/{media_id} avec nouvelle liste
+
+        Args:
+            media_id: ID du média dans AzuraCast
+            playlist_id: ID de la playlist à retirer
+
+        Returns:
+            dict: {
+                'status': 'ok' | 'no_change',
+                'message': str,
+                'media_id': int,
+                'playlist_id': int,
+                'playlists_restantes': list
+            }
+
+        Raises:
+            AzuraCastAPIError: si erreur API
+        """
+        # 1. Récupérer le média actuel
+        media = self.get_media(media_id)
+
+        # 2. Extraire la liste actuelle des playlists (IDs)
+        current_playlists = []
+        for p in media.get('playlists', []):
+            if isinstance(p, dict):
+                pid = p.get('id')
+                if pid is not None:
+                    current_playlists.append(int(pid))
+            elif isinstance(p, int):
+                current_playlists.append(p)
+
+        # 3. Vérifier si le playlist_id est bien dans la liste
+        if playlist_id not in current_playlists:
+            return {
+                'status': 'no_change',
+                'message': f'Le média {media_id} n\'est pas dans la playlist {playlist_id}',
+                'media_id': media_id,
+                'playlist_id': playlist_id,
+                'playlists_restantes': current_playlists
+            }
+
+        # 4. Construire la nouvelle liste sans le playlist_id
+        new_playlists = [pid for pid in current_playlists if pid != playlist_id]
+
+        # 5. Mettre à jour via PUT /file/{media_id}
+        self.update_media(media_id, playlists=new_playlists)
+
+        return {
+            'status': 'ok',
+            'message': f'Média {media_id} retiré de la playlist {playlist_id}',
+            'media_id': media_id,
+            'playlist_id': playlist_id,
+            'playlists_restantes': new_playlists
+        }
+
+    # ═══════════════════════════════════════════════
     # OPÉRATIONS COMPOSITES (HAUT NIVEAU)
     # ═══════════════════════════════════════════════
 

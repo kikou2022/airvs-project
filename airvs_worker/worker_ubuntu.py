@@ -1863,6 +1863,221 @@ DEBIAN_SSH_HOST = "192.168.1.30"
 DEBIAN_SSH_USER = "sebastien"
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 1 — Module Rotation éditoriale
+# Retrait d'un titre d'une playlist AzuraCast
+# ═══════════════════════════════════════════════════════════════════════
+
+def executer_azura_remove_from_playlist(tache_id, parametres):
+    """
+    Phase 1 — Retire un média d'une playlist AzuraCast sans supprimer le fichier.
+
+    Parametres attendus :
+      - media_id: ID du média dans AzuraCast (obligatoire)
+      - playlist_id: ID de la playlist à retirer (obligatoire)
+      - station_id: ID de la station AzuraCast (défaut: 7)
+      - song_id_radiodj: ID du song dans RadioDJ (optionnel, pour maj flag)
+
+    Workflow :
+      1. Appelle api.remove_media_from_playlist(media_id, playlist_id)
+      2. Met à jour le flag AZURA_*_S{station_id} dans radiodb.songs.comments
+         → Si le média n'est plus dans AUCUNE playlist : AZURA_RETIRED_S*
+         → Sinon : conserve le flag AZURA_ACTIVE_S* (toujours en playlist)
+      3. Journalise l'opération (table journal_operations_azura si disponible)
+    """
+    media_id = parametres.get('media_id')
+    playlist_id = parametres.get('playlist_id')
+    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    song_id_radiodj = parametres.get('song_id_radiodj')
+
+    if not playlist_id:
+        logger(tache_id, "ERREUR: playlist_id obligatoire.")
+        logger(tache_id, "=== TERMINÉ === (paramètres manquants)")
+        return
+
+    try:
+        station_id = int(station_id)
+    except (ValueError, TypeError):
+        station_id = _DEFAULT_STATION_ID
+
+    logger(tache_id, f"=== DÉBUT RETRAIT PLAYLIST ===")
+    logger(tache_id, f"Playlist ID: {playlist_id}")
+    logger(tache_id, f"Station: {station_id}")
+
+    api = get_azura_api(station_id)
+    if not api:
+        logger(tache_id, "ERREUR FATALE: Module azuracast_api non disponible.")
+        logger(tache_id, "=== TERMINÉ === (module API indisponible)")
+        return
+
+    # ── Résoudre media_id si manquant (mapping song_id_radiodj → media_id_azura) ──
+    # Le dashboard ne connaît que le song_id RadioDJ, pas le media_id AzuraCast.
+    # On doit donc retrouver le media_id en cherchant dans la liste des médias AzuraCast.
+    if not media_id or media_id == 0:
+        logger(tache_id, f"media_id manquant — résolution depuis song_id_radiodj={song_id_radiodj}")
+
+        if not song_id_radiodj:
+            logger(tache_id, "ERREUR: Impossible de résoudre media_id (ni media_id ni song_id_radiodj fourni).")
+            logger(tache_id, "=== TERMINÉ === (paramètres insuffisants)")
+            return
+
+        # 1. Lire le song RadioDJ pour récupérer artist + title + path
+        try:
+            db = pymysql.connect(**DB_CONFIG)
+            cursor = db.cursor(pymysql.cursors.DictCursor)
+            cursor.execute(
+                "SELECT ID, artist, title, `path` FROM radiodb.songs WHERE ID = %s",
+                (song_id_radiodj,)
+            )
+            song = cursor.fetchone()
+            cursor.close()
+            db.close()
+        except Exception as e:
+            logger(tache_id, f"ERREUR: Impossible de lire song RadioDJ {song_id_radiodj}: {e}")
+            logger(tache_id, "=== TERMINÉ === (erreur DB)")
+            return
+
+        if not song:
+            logger(tache_id, f"ERREUR: Song RadioDJ {song_id_radiodj} introuvable.")
+            logger(tache_id, "=== TERMINÉ === (song introuvable)")
+            return
+
+        artist = song.get('artist', '') or ''
+        title = song.get('title', '') or ''
+        song_path = song.get('path', '') or ''
+        logger(tache_id, f"Song RadioDJ: {artist} - {title} (path={song_path})")
+
+        # 2. Lister tous les médias AzuraCast et chercher un match
+        #    Stratégie : d'abord par basename du fichier, puis par artist+title
+        try:
+            all_media = api.list_media()
+            rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
+            logger(tache_id, f"Recherche dans {len(rows)} médias AzuraCast...")
+
+            # Extraire basename du path RadioDJ (format Windows)
+            basename_radiodj = song_path.rsplit('\\', 1)[-1] if '\\' in song_path else song_path.rsplit('/', 1)[-1]
+            basename_radiodj_lower = basename_radiodj.lower().strip()
+
+            media_id_trouve = None
+            methode_match = None
+
+            # Passe 1 : matching par basename exact
+            for m in rows:
+                azura_path = m.get('path', '') or ''
+                basename_azura = azura_path.rsplit('/', 1)[-1] if '/' in azura_path else azura_path
+                if basename_azura.lower().strip() == basename_radiodj_lower:
+                    media_id_trouve = m.get('id')
+                    methode_match = 'path_exact'
+                    break
+
+            # Passe 2 : matching par artist+title normalisé
+            if not media_id_trouve and artist and title:
+                cle_radiodj = normaliser_pour_recherche(f"{artist} - {title}")
+                for m in rows:
+                    azura_artist = m.get('artist', '') or ''
+                    azura_title = m.get('title', '') or ''
+                    if azura_artist and azura_title:
+                        cle_azura = normaliser_pour_recherche(f"{azura_artist} - {azura_title}")
+                        if cle_radiodj == cle_azura:
+                            media_id_trouve = m.get('id')
+                            methode_match = 'artist_title_normalized'
+                            break
+
+            if not media_id_trouve:
+                logger(tache_id, f"ERREUR: Aucun média AzuraCast trouvé pour '{artist} - {title}' (song_id={song_id_radiodj})")
+                logger(tache_id, "=== TERMINÉ === (media_id non résolu)")
+                return
+
+            media_id = media_id_trouve
+            logger(tache_id, f"[OK] media_id résolu: {media_id} (méthode: {methode_match})")
+
+        except Exception as e:
+            logger(tache_id, f"ERREUR lors de la résolution media_id: {e}")
+            logger(tache_id, "=== TERMINÉ === (erreur résolution)")
+            return
+
+    logger(tache_id, f"Média AzuraCast ID: {media_id}")
+
+    try:
+        # 1. Appel API : retirer le média de la playlist
+        result = api.remove_media_from_playlist(media_id, playlist_id)
+
+        if result.get('status') == 'no_change':
+            logger(tache_id, f"[INFO] {result.get('message')}")
+            logger(tache_id, "=== TERMINÉ === (aucun changement nécessaire)")
+            return
+
+        logger(tache_id, f"[OK] Média {media_id} retiré de la playlist {playlist_id}")
+
+        playlists_restantes = result.get('playlists_restantes', [])
+        logger(tache_id, f"Playlists restantes: {playlists_restantes if playlists_restantes else 'Aucune'}")
+
+        # 2. Mettre à jour le flag AZURA_*_S{station_id} dans RadioDJ
+        # Si on a song_id_radiodj, on l'utilise directement
+        # Sinon, on tente de le retrouver par matching (path ou artist+title)
+        if not song_id_radiodj:
+            # Récupérer les détails du média pour matching
+            media_details = api.get_media(media_id)
+            artist = media_details.get('artist', '')
+            title = media_details.get('title', '')
+            logger(tache_id, f"Recherche song RadioDJ pour : {artist} - {title}")
+
+            # Matching par artist+title (fallback)
+            try:
+                db = pymysql.connect(**DB_CONFIG)
+                cursor = db.cursor(pymysql.cursors.DictCursor)
+                cursor.execute(
+                    "SELECT ID FROM radiodb.songs "
+                    "WHERE artist = %s AND title = %s LIMIT 1",
+                    (artist, title)
+                )
+                row = cursor.fetchone()
+                cursor.close()
+                db.close()
+                if row:
+                    song_id_radiodj = row['ID']
+                    logger(tache_id, f"Song RadioDJ trouvé : ID {song_id_radiodj}")
+                else:
+                    logger(tache_id, f"[WARN] Song RadioDJ non trouvé pour '{artist} - {title}'")
+            except Exception as e:
+                logger(tache_id, f"[WARN] Erreur recherche song RadioDJ : {e}")
+
+        # 3. Mise à jour du flag dans RadioDJ
+        if song_id_radiodj:
+            try:
+                db = pymysql.connect(**DB_CONFIG)
+                cursor = db.cursor(pymysql.cursors.DictCursor)
+
+                # Si playlists_restantes est vide → AZURA_RETIRED
+                # Sinon → AZURA_ACTIVE (toujours dans au moins une playlist)
+                if playlists_restantes:
+                    nouveau_flag = f'AZURA_ACTIVE_S{station_id}'
+                    logger(tache_id, f"Média toujours dans {len(playlists_restantes)} playlist(s) → flag: {nouveau_flag}")
+                else:
+                    nouveau_flag = f'AZURA_RETIRED_S{station_id}'
+                    logger(tache_id, f"Média plus dans aucune playlist → flag: {nouveau_flag}")
+
+                cursor.execute(
+                    "UPDATE radiodb.songs SET comments = %s WHERE ID = %s",
+                    (nouveau_flag, song_id_radiodj)
+                )
+                db.commit()
+                cursor.close()
+                db.close()
+                logger(tache_id, f"[OK] Flag RadioDJ mis à jour : {nouveau_flag} (song ID {song_id_radiodj})")
+            except Exception as e:
+                logger(tache_id, f"[ERREUR] Impossible de mettre à jour le flag RadioDJ : {e}")
+
+        logger(tache_id, "=== TERMINÉ === (succès)")
+
+    except AzuraCastAPIError as e:
+        logger(tache_id, f"[ERREUR API] {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur API)")
+    except Exception as e:
+        logger(tache_id, f"[ERREUR INATTENDUE] {type(e).__name__}: {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur)")
+
+
 def executer_suspect_reject(tache_id, parametres):
     """Supprime un fichier suspect sur le stockage Debian.
 
@@ -6856,7 +7071,8 @@ def main():
                 "    'AUDIENCE_GET_DATA', 'PIGE_LIST', 'PIGE_EXTRACT', "
                 "    'PIGE_PROMOTE_PODCAST', 'PODCASTS_LIST', 'PODCASTS_EPISODES', "
                 "    'SHAZAM_SYNC_SHEET', 'SYNC_VPS_SOUMISSIONS', 'SYNC_VPS_SHAZAM_EXT', "
-                "    'IMPORT_MASSE', 'SUSPECT_REJECT') "
+                "    'IMPORT_MASSE', 'SUSPECT_REJECT', "
+                "    'AZURA_REMOVE_FROM_PLAYLIST') "  # Phase 1 — module Rotation éditoriale
                 "ORDER BY id ASC LIMIT 1"
             )
             cursor.execute(query)
@@ -6935,6 +7151,8 @@ def main():
                         else:
                             logger(tache_id, "ERREUR : module import_masse.py non disponible.")
                             raise RuntimeError("Module import_masse.py non disponible")
+                    elif type_action == 'AZURA_REMOVE_FROM_PLAYLIST':
+                        executer_azura_remove_from_playlist(tache_id, parametres)
                     elif type_action == 'SUSPECT_REJECT':
                         executer_suspect_reject(tache_id, parametres)
                     else:

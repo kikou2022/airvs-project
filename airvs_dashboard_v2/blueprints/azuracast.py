@@ -1233,6 +1233,69 @@ def api_marquer_in_azuracast():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 1 — Module Rotation éditoriale
+# Retrait d'un titre d'une playlist AzuraCast
+# ═══════════════════════════════════════════════════════════════════════
+
+@azuracast_bp.route('/api/azura/media/<int:media_id>/playlists/<int:playlist_id>', methods=['DELETE'])
+@login_requis
+def api_remove_media_from_playlist(media_id, playlist_id):
+    """
+    Phase 1 — Retire un média d'une playlist AzuraCast.
+
+    Insère une tâche AZURA_REMOVE_FROM_PLAYLIST dans la file d'attente
+    (pattern identique aux autres opérations AzuraCast).
+
+    Le worker Ubuntu consommera la tâche et :
+      1. Appellera api.remove_media_from_playlist(media_id, playlist_id)
+      2. Mettra à jour le flag AZURA_*_S* dans RadioDJ
+         → Si plus aucune playlist : AZURA_RETIRED_S*
+         → Sinon : AZURA_ACTIVE_S*
+
+    Body JSON (optionnel) :
+      - station_id: ID de la station AzuraCast (défaut: 7)
+      - song_id_radiodj: ID du song dans RadioDJ (si connu, accélère le matching)
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        station_id = int(data.get('station_id', 7))
+        song_id_radiodj = data.get('song_id_radiodj')
+
+        db = get_db_connection()
+        if not db:
+            return jsonify({'status': 'error', 'message': 'Connexion DB impossible'}), 500
+        cursor = db.cursor()
+
+        parametres = {
+            'media_id': media_id,
+            'playlist_id': playlist_id,
+            'station_id': station_id,
+            'song_id_radiodj': song_id_radiodj,
+        }
+
+        cursor.execute(
+            "INSERT INTO taches_planifiees (type_action, statut, parametres, date_creation) "
+            "VALUES ('AZURA_REMOVE_FROM_PLAYLIST', 'en_attente', %s, NOW())",
+            (json.dumps(parametres),)
+        )
+        db.commit()
+        task_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            'status': 'ok',
+            'message': f'Tâche de retrait créée (média {media_id} ← playlist {playlist_id})',
+            'task_id': task_id,
+            'media_id': media_id,
+            'playlist_id': playlist_id,
+            'station_id': station_id
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @azuracast_bp.route('/api/sync_azura_status', methods=['POST'])
 @login_requis
 def api_sync_azura_status():
