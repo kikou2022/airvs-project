@@ -2869,21 +2869,31 @@
                                     <span class="sticky-divider" aria-hidden="true"></span>
                                     <button type="button" class="btn btn-success btn-sm" id="btn_sticky_copier"
                                             title="Afficher le panneau « Copier vers AzuraCast »"
+                                            disabled
                                             onclick="showPanel('copier')">🚀 Copier</button>
                                     <button type="button" class="btn btn-primary btn-sm" id="btn_sticky_ajouter"
                                             title="Afficher le panneau « Ajouter aux playlists »"
+                                            disabled
                                             onclick="showPanel('ajouter')">➕ Ajouter PLS</button>
                                     <button type="button" class="btn btn-warning btn-sm" id="btn_push_retire_playlist"
                                             title="Afficher le panneau « Retirer des playlists »"
+                                            disabled
                                             onclick="showPanel('retirer')">➖ Retirer PLS</button>
+                                    <button type="button" class="btn btn-danger btn-sm" id="btn_push_supprimer"
+                                            title="Afficher le panneau « Supprimer définitivement d'AzuraCast » (double confirmation)"
+                                            disabled
+                                            onclick="showPanel('supprimer')">🗑️ Supprimer</button>
                                     <small class="ms-auto" id="push_count" style="color:#cbd5e1;">0 fichier(s)</small>
                                 </div>
-                            <!-- ═══ Panneau dynamique (refactoring UI unifié V3) ═══
-                                 Contient 3 sous-panneaux .dynamic-panel :
-                                   - #panel-copier   : Dossier cible + bouton « 🚀 Copier vers AzuraCast »
-                                   - #panel-ajouter  : Playlists cibles + nouvelle playlist + bouton « ➕ Ajouter aux playlists »
-                                   - #panel-retirer  : contenu généré par retirerSelectionPlaylistAzura()
-                                                      dans #panel-retirer-content
+                            <!-- ═══ Panneau dynamique (refactoring UI unifié V3 + Phase 17) ═══
+                                 Contient 4 sous-panneaux .dynamic-panel :
+                                   - #panel-copier    : Dossier cible + bouton « 🚀 Copier vers AzuraCast »
+                                   - #panel-ajouter   : Playlists cibles + nouvelle playlist + bouton « ➕ Ajouter aux playlists »
+                                   - #panel-retirer   : contenu généré par retirerSelectionPlaylistAzura()
+                                                       dans #panel-retirer-content
+                                   - #panel-supprimer : Phase 17 — suppression définitive batch avec double
+                                                       confirmation (case + bouton), liste injectée par
+                                                       remplirPanelSupprimer() dans #panel-supprimer-content
                                  La fonction showPanel(name) active le bon panneau via la classe .active.
                                  Tous les IDs internes (push_dossier_cible, push_playlist_container,
                                  btn_add_push_playlist, push_new_folder_name, push_new_playlist_name,
@@ -2959,6 +2969,50 @@
                                         pour générer le panneau de retrait batch (si rien ne s'affiche,
                                         vérifiez qu'au moins un titre coché est déjà dans AzuraCast).
                                     </div>
+                                </div>
+
+                                <!-- PANNEAU : Supprimer définitivement (Phase 17 — double confirmation)
+                                     La liste des titres est injectée par remplirPanelSupprimer() dans
+                                     #panel-supprimer-content (les titres cochés doivent être collectés au
+                                     moment du clic). Double confirmation : la case #push_confirm_supprimer
+                                     active #btn_push_supprimer_go ; elle est réinitialisée à chaque
+                                     changement de sélection (updatePushCount → remplirPanelSupprimer).
+                                     Les compteurs utilisent les spans data-count-supprimer / data-count-ignores
+                                     (même convention que la maquette UX v4 validée). -->
+                                <div class="dynamic-panel" id="panel-supprimer">
+                                    <div class="alert alert-danger py-2 small mb-2">
+                                        <i class="bi bi-exclamation-triangle-fill"></i>
+                                        <strong>Action irréversible.</strong> Les fichiers concernés seront
+                                        <strong>supprimés du stockage AzuraCast</strong> (fichier physique + DB +
+                                        associations playlists). RadioDJ n'est <strong>pas affecté</strong> — le fichier
+                                        source reste intact, le flag passera à <code>AZURA_REMOVED_S*</code>.
+                                        Pour retirer des titres des playlists <em>sans</em> les supprimer,
+                                        utilisez <strong>➖ Retirer PLS</strong>.
+                                    </div>
+                                    <p class="small mb-2">
+                                        <strong><span data-count-supprimer>0</span> fichier(s)</strong> seront supprimés
+                                        définitivement — <span data-count-ignores>0</span> titre(s) absent(s)
+                                        d'AzuraCast dans la sélection seront ignorés :
+                                    </p>
+                                    <div class="border rounded p-2 mb-2" id="panel-supprimer-content"
+                                         style="max-height: 130px; overflow-y: auto; background: #fff5f5;">
+                                        <span class="text-muted small">Cliquez sur « 🗑️ Supprimer » pour afficher
+                                        les titres éligibles (titres cochés déjà présents dans AzuraCast).</span>
+                                    </div>
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="push_confirm_supprimer"
+                                               onchange="majBoutonSupprimerGo()">
+                                        <label class="form-check-label small" for="push_confirm_supprimer">
+                                            Je comprends que cette suppression est <strong>définitive</strong> et je
+                                            confirme vouloir supprimer ces <span data-count-supprimer>0</span>
+                                            fichier(s) du stockage AzuraCast.
+                                        </label>
+                                    </div>
+                                    <button type="button" class="btn btn-danger btn-sm" id="btn_push_supprimer_go" disabled
+                                            onclick="supprimerSelectionAzuraCast()">
+                                        🗑️ Supprimer définitivement ces <span data-count-supprimer>0</span> fichier(s)
+                                    </button>
+                                    <div id="push_supprimer_result" class="mt-2"></div>
                                 </div>
                             </div>
                         </div>
@@ -4926,7 +4980,7 @@
 <!-- PHASE 3 - Étape 3/5 : pont-player (player, archives, flux, spectrum, lecteur) -->
 <script src="/static/js/modules/stats-audience.js?v=1"></script>
 <!-- PHASE 3 - Étape 4/5 : stats-audience (onglet Audience, stats agrégées) -->
-<script src="/static/js/modules/sync-azuracast.js?v=7"></script>
+<script src="/static/js/modules/sync-azuracast.js?v=8"></script>
 <!-- PHASE 3 - Étape 4c : sync-azuracast (sync, action panel, push, bulk schedule) — v6 : scrollToPushPlaylists() + btn_push_envoyer masqué -->
 <script src="/static/js/modules/couleur.js?v=1"></script>
 <!-- PHASE 3 - Étape 4c : couleur (programmation couleur, grille, dry-run, historique, stats) -->

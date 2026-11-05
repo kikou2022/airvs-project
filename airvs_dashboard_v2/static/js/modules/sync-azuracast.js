@@ -1123,6 +1123,172 @@ function retirerSelectionPlaylistAzura() {
 window.retirerSelectionPlaylistAzura = retirerSelectionPlaylistAzura;
 
 // ═══════════════════════════════════════════════════════════════════
+// PHASE 17 — Suppression définitive BATCH d'AzuraCast (barre sticky)
+// ═══════════════════════════════════════════════════════════════════
+// 4ᵉ action de la barre sticky du push preview (maquette UX v4 validée).
+// Mêmes conventions que le retrait batch (Phase 2) : collecte des titres
+// cochés `.push-checkbox:checked[data-in-azura="true"]` au moment du clic,
+// création d'UNE tâche worker AZURA_DELETE_MEDIA_BATCH, suivi dans le
+// terminal push via surveillerPushLog().
+// Double confirmation (maquette v4) : panneau explicite + case à cocher
+// qui active le bouton ; la case est réinitialisée à chaque changement
+// de sélection (updatePushCount → remplirPanelSupprimer).
+
+/**
+ * remplirPanelSupprimer() — Phase 17
+ *
+ * Injecte dans #panel-supprimer-content la liste des titres cochés déjà
+ * présents dans AzuraCast, met à jour les compteurs (spans data-count-supprimer
+ * / data-count-ignores) et réinitialise la case de confirmation.
+ * Appelée par showPanel('supprimer') et par updatePushCount() quand le
+ * panneau est actif (sélection modifiée → liste et compteurs rafraîchis).
+ */
+function remplirPanelSupprimer() {
+    var zoneListe = document.getElementById('panel-supprimer-content');
+    if (!zoneListe) return;
+
+    var totalCoche = document.querySelectorAll('.push-checkbox:not(:disabled):checked').length;
+    var checkboxesAzura = document.querySelectorAll('.push-checkbox:checked[data-in-azura="true"]');
+    var nbAzura = checkboxesAzura.length;
+
+    // Compteurs (convention maquette v4 : spans data-count-*)
+    document.querySelectorAll('[data-count-supprimer]').forEach(function(el) { el.textContent = nbAzura; });
+    document.querySelectorAll('[data-count-ignores]').forEach(function(el) { el.textContent = Math.max(0, totalCoche - nbAzura); });
+
+    if (nbAzura === 0) {
+        zoneListe.innerHTML = '<span class="text-muted small">' +
+            (totalCoche === 0
+                ? 'Cochez d\'abord des titres dans la prévisualisation.'
+                : 'Aucun titre coché n\'est présent dans AzuraCast — la suppression ne s\'applique qu\'aux titres déjà poussés.') +
+            '</span>';
+    } else {
+        var lignes = [];
+        checkboxesAzura.forEach(function(cb) {
+            var artist = cb.dataset.artist || '?';
+            var title = cb.dataset.title || '?';
+            var badgeTxt = '';
+            var row = cb.closest('tr');
+            if (row) {
+                var badge = row.querySelector('td[data-col="azuracast"] span');
+                if (badge) badgeTxt = ' <span class="text-muted small">(' + badge.textContent.trim() + ')</span>';
+            }
+            lignes.push('<div class="small">🎵 ' + escapeHtml(artist) + ' — ' + escapeHtml(title) + badgeTxt + '</div>');
+        });
+        zoneListe.innerHTML = lignes.join('');
+    }
+
+    // Sélection potentiellement modifiée → réinitialiser la double confirmation
+    var conf = document.getElementById('push_confirm_supprimer');
+    if (conf) conf.checked = false;
+    majBoutonSupprimerGo();
+}
+window.remplirPanelSupprimer = remplirPanelSupprimer;
+
+/**
+ * majBoutonSupprimerGo() — Phase 17
+ *
+ * Active le bouton « 🗑️ Supprimer définitivement » uniquement si la case de
+ * confirmation est cochée ET qu'au moins un titre coché est dans AzuraCast.
+ * Appelée par onchange de la case et après chaque rafraîchissement du panneau.
+ */
+function majBoutonSupprimerGo() {
+    var conf = document.getElementById('push_confirm_supprimer');
+    var btn = document.getElementById('btn_push_supprimer_go');
+    if (!btn) return;
+    var nbAzura = document.querySelectorAll('.push-checkbox:checked[data-in-azura="true"]').length;
+    btn.disabled = !(conf && conf.checked && nbAzura > 0);
+}
+window.majBoutonSupprimerGo = majBoutonSupprimerGo;
+
+/**
+ * supprimerSelectionAzuraCast() — Phase 17
+ *
+ * Suppression définitive BATCH des titres cochés déjà présents dans AzuraCast.
+ *
+ * Workflow :
+ *   1. Re-collecte des song_ids au moment du clic (sécurité)
+ *   2. Vérifie la double confirmation (case cochée)
+ *   3. POST /api/azura/batch/delete_media { song_ids, station_id }
+ *   4. Accusé de création dans #push_supprimer_result + suivi détaillé
+ *      dans le terminal push (surveillerPushLog)
+ *
+ * Les fichiers ABSENTS d'AzuraCast dans la sélection sont ignorés
+ * (compteur « ignorés » du panneau).
+ */
+function supprimerSelectionAzuraCast() {
+    // 1. Re-collecter les song_ids cochés présents dans AzuraCast
+    var checkboxes = document.querySelectorAll('.push-checkbox:checked[data-in-azura="true"]');
+    var songIds = [];
+    checkboxes.forEach(function(cb) {
+        var sid = cb.value;
+        if (sid !== null && sid !== undefined && sid !== '') {
+            songIds.push(parseInt(sid));
+        }
+    });
+
+    var conf = document.getElementById('push_confirm_supprimer');
+    if (songIds.length === 0) {
+        alert('Aucun titre éligible : la suppression ne s\'applique qu\'aux titres cochés déjà présents dans AzuraCast.');
+        return;
+    }
+    if (!conf || !conf.checked) {
+        alert('Cochez d\'abord la case de confirmation dans le panneau.');
+        return;
+    }
+
+    var stationId = getPushStationId();
+    var resultArea = document.getElementById('push_supprimer_result');
+    if (resultArea) {
+        resultArea.innerHTML = '<div class="alert alert-info py-2 small">⏳ Création de la tâche de suppression batch (' +
+                                songIds.length + ' titre(s))...</div>';
+    }
+
+    fetch('/api/azura/batch/delete_media', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            song_ids: songIds,
+            station_id: stationId
+        })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.status === 'ok') {
+            if (resultArea) {
+                resultArea.innerHTML = '<div class="alert alert-success py-2 small">' +
+                    '✅ Tâche de suppression batch créée (ID ' + data.task_id + ') — ' +
+                    data.count + ' titre(s), station ' + data.station_id + '.<br>' +
+                    '⏳ Le worker va traiter les suppressions...</div>';
+            }
+            // Suivi détaillé dans le terminal push (même pattern que le retrait batch)
+            var terminal = document.getElementById('terminal_push_output');
+            var logWrapper = document.getElementById('push_log_wrapper');
+            if (logWrapper) logWrapper.style.display = 'block';
+            if (terminal) {
+                terminal.textContent = '🗑️ Suppression batch lancée (' + songIds.length + ' titre(s), station ' + stationId + ') — tâche ' + data.task_id + '\n' +
+                                        '⏳ Le worker traite les suppressions...';
+            }
+            surveillerPushLog(data.task_id);
+
+            // Réinitialiser la double confirmation après lancement
+            if (conf) conf.checked = false;
+            majBoutonSupprimerGo();
+        } else {
+            if (resultArea) {
+                resultArea.innerHTML = '<div class="alert alert-danger py-2 small">❌ Erreur : ' +
+                                        (data.message || 'réponse inattendue') + '</div>';
+            }
+        }
+    })
+    .catch(function(err) {
+        if (resultArea) {
+            resultArea.innerHTML = '<div class="alert alert-danger py-2 small">❌ Erreur réseau : ' + err.message + '</div>';
+        }
+    });
+}
+window.supprimerSelectionAzuraCast = supprimerSelectionAzuraCast;
+
+// ═══════════════════════════════════════════════════════════════════
 // Refactoring UI unifié V3 — Pattern panneau dynamique
 // ═══════════════════════════════════════════════════════════════════
 // Deux helpers symétriques pour gérer l'affichage exclusif d'un panneau
@@ -1148,8 +1314,9 @@ window.retirerSelectionPlaylistAzura = retirerSelectionPlaylistAzura;
  *
  * Si name === 'retirer', appelle aussi retirerSelectionPlaylistAzura() pour
  * peupler dynamiquement le contenu de #panel-retirer-content (batch de retrait).
+ * Phase 17 : 'supprimer' est également peuplé dynamiquement (remplirPanelSupprimer).
  *
- * @param {string} name — 'copier' | 'ajouter' | 'retirer'
+ * @param {string} name — 'copier' | 'ajouter' | 'retirer' | 'supprimer'
  */
 function showPanel(name) {
     document.querySelectorAll('#dynamic_action_panel .dynamic-panel').forEach(function(p) {
@@ -1162,6 +1329,11 @@ function showPanel(name) {
     // (les titres cochés peuvent avoir changé depuis le dernier affichage).
     if (name === 'retirer' && typeof retirerSelectionPlaylistAzura === 'function') {
         try { retirerSelectionPlaylistAzura(); } catch (_e) { /*silencieux*/ }
+    }
+    // Phase 17 — idem pour le panneau « supprimer » (liste + compteurs + reset
+    // de la case de confirmation).
+    if (name === 'supprimer' && typeof remplirPanelSupprimer === 'function') {
+        try { remplirPanelSupprimer(); } catch (_e) { /*silencieux*/ }
     }
 }
 window.showPanel = showPanel;
@@ -2222,8 +2394,35 @@ function getPushMode() {
 }
 
 function updatePushCount() {
+    var totalCoche = document.querySelectorAll('.push-checkbox:not(:disabled):checked').length;
+    var inAzuraCoche = document.querySelectorAll('.push-checkbox:checked[data-in-azura="true"]').length;
     btnEnvoyer.disabled = window.pushSelectedFiles.length === 0;
     pushCount.textContent = window.pushSelectedFiles.length + " fichier(s) sélectionné(s).";
+
+    // Phase 17 — activation contextuelle de la barre sticky (maquette UX v4,
+    // même logique adaptative que l'explorateur) :
+    //   Copier / Ajouter   → actifs dès qu'une sélection existe ;
+    //   Retirer / Supprimer → uniquement si des titres cochés sont déjà dans AzuraCast.
+    var bCopier = document.getElementById('btn_sticky_copier');
+    var bAjouter = document.getElementById('btn_sticky_ajouter');
+    var bRetirer = document.getElementById('btn_push_retire_playlist');
+    var bSupprimer = document.getElementById('btn_push_supprimer');
+    if (bCopier) bCopier.disabled = (totalCoche === 0);
+    if (bAjouter) bAjouter.disabled = (totalCoche === 0);
+    if (bRetirer) bRetirer.disabled = (inAzuraCoche === 0);
+    if (bSupprimer) bSupprimer.disabled = (inAzuraCoche === 0);
+
+    // Phase 17 — sélection modifiée → réinitialiser la double confirmation
+    // de suppression et rafraîchir le panneau s'il est affiché.
+    var pSup = document.getElementById('panel-supprimer');
+    if (pSup && pSup.classList.contains('active') && typeof remplirPanelSupprimer === 'function') {
+        try { remplirPanelSupprimer(); } catch (_e) { /*silencieux*/ }
+    } else {
+        var confSup = document.getElementById('push_confirm_supprimer');
+        if (confSup) confSup.checked = false;
+        majBoutonSupprimerGo();
+    }
+
     // Phase 1.5 — après rendu du push preview, fetch les playlists des titres AZURA
     fetchBatchMediaPlaylists();
 }
@@ -3698,5 +3897,5 @@ function surveillerFinPlaylist() {
         chargerPlaylistsCache();
     };
 
-    console.log('[sync-azuracast.js] Module chargé — v3 (fix playlists station change).');
+    console.log('[sync-azuracast.js] Module chargé — v4 (phase 17 : suppression batch AzuraCast + barre sticky adaptative).');
 })();

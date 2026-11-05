@@ -1348,6 +1348,96 @@ def api_delete_media(song_id_radiodj):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+@azuracast_bp.route('/api/azura/batch/delete_media', methods=['POST'])
+@login_requis
+def api_batch_delete_media():
+    """
+    Phase 17 — Suppression définitive BATCH de plusieurs médias AzuraCast.
+
+    4e action de la barre sticky du push preview (maquette UX v4 validée).
+    Insère UNE seule tâche AZURA_DELETE_MEDIA_BATCH dans la file d'attente
+    (vs N tâches AZURA_DELETE_MEDIA) : le worker résout tous les media_ids
+    avec un seul appel list_media et met à jour les flags en masse.
+
+    Le worker supprimera chaque fichier via API AzuraCast
+    (DELETE /station/{id}/file/{media_id} — cascade fichier + DB +
+    associations playlists) et mettra à jour les flags RadioDJ
+    → AZURA_REMOVED_S*.
+
+    Body JSON :
+      - song_ids: [123, 456, ...]   liste d'IDs RadioDJ (obligatoire, non vide)
+      - station_id: 7               ID de la station AzuraCast (défaut: 7)
+
+    Returns:
+        JSON : {
+            'status': 'ok',
+            'task_id': <id>,
+            'count': <nb de song_ids>,
+            'station_id': <id>
+        }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        song_ids = data.get('song_ids')
+        station_id = int(data.get('station_id', 7))
+
+        # Validation song_ids (même pattern que api_batch_remove_from_playlist)
+        if not isinstance(song_ids, list):
+            return jsonify({
+                'status': 'error',
+                'message': 'song_ids doit être une liste d\'entiers.'
+            }), 400
+
+        # Normaliser en entiers (filtre les nuls et invalides, dédoublonne)
+        song_ids_int = []
+        seen = set()
+        for sid in song_ids:
+            try:
+                sid_int = int(sid)
+            except (ValueError, TypeError):
+                continue
+            if sid_int <= 0 or sid_int in seen:
+                continue
+            seen.add(sid_int)
+            song_ids_int.append(sid_int)
+
+        if not song_ids_int:
+            return jsonify({
+                'status': 'error',
+                'message': 'song_ids vide ou invalide.'
+            }), 400
+
+        db = get_db_connection()
+        if not db:
+            return jsonify({'status': 'error', 'message': 'Connexion DB impossible'}), 500
+        cursor = db.cursor()
+
+        parametres = {
+            'song_ids': song_ids_int,
+            'station_id': station_id,
+        }
+
+        cursor.execute(
+            "INSERT INTO taches_planifiees (type_action, statut, parametres, date_creation) "
+            "VALUES ('AZURA_DELETE_MEDIA_BATCH', 'en_attente', %s, NOW())",
+            (json.dumps(parametres),)
+        )
+        db.commit()
+        task_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            'status': 'ok',
+            'message': f'Tâche de suppression batch créée ({len(song_ids_int)} média(s))',
+            'task_id': task_id,
+            'count': len(song_ids_int),
+            'station_id': station_id
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # PHASE 1.5 — Affichage des playlists dans le push preview
 # ═══════════════════════════════════════════════════════════════════════
