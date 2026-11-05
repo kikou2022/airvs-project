@@ -47,6 +47,14 @@
       "base_path": "/mnt/projet_radio2/Musique/SELECTION_PAPS",
       "sous_dossier_semaine": false,
       "periode": "all"
+    },
+    {
+      "id": "selection_mary",
+      "label": "Selection MARY",
+      "sous_categorie": "Selection_MARY",
+      "base_path": "/mnt/projet_radio2/Musique/SELECTION_MARY",
+      "sous_dossier_semaine": false,
+      "periode": "all"
     }
   ]
 }
