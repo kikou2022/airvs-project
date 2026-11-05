@@ -304,6 +304,54 @@
         .btn-outline-purple.active, .btn-outline-purple:active {
             color: #fff; background-color: #5a32a3; border-color: #5a32a3;
         }
+
+        /* ── Phase 1.5 : barre d'action sticky (push preview) ── */
+        .sticky-action-bar {
+            position: sticky;
+            bottom: 0;
+            background: #1e293b;
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 0 0 8px 8px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            z-index: 10;
+            flex-wrap: wrap;
+        }
+        .sticky-action-bar .form-select {
+            width: auto !important;
+            color: #1e293b;
+        }
+        .sticky-divider {
+            width: 1px;
+            height: 24px;
+            background: #475569;
+        }
+
+        /* ── Phase 1.5 : animation de mise en évidence temporaire ──
+           Utilisée par scrollToPushPlaylists() pour flasher le bloc
+           "Playlists cibles" quand on clique sur "➕ Ajouter playlist"
+           depuis la barre sticky. */
+        .airvs-highlight-flash {
+            animation: airvsFlash 1.5s ease-out;
+            border-radius: 6px;
+        }
+        @keyframes airvsFlash {
+            0%   { box-shadow: 0 0 0 0 rgba(13, 202, 240, 0.65); background-color: rgba(13, 202, 240, 0.18); }
+            50%  { box-shadow: 0 0 12px 4px rgba(13, 202, 240, 0.45); background-color: rgba(13, 202, 240, 0.10); }
+            100% { box-shadow: 0 0 0 0 rgba(13, 202, 240, 0); background-color: transparent; }
+        }
+
+        /* ── Pattern panneau dynamique (refactoring UI unifié V3) ──
+           Utilisé par :
+           - Programmation push preview (#dynamic_action_panel)
+             boutons sticky → showPanel('copier' | 'ajouter' | 'retirer')
+           - Explorateur action panel (#action_dynamic_panel)
+             boutons → showActionPanel('copier' | 'ajouter' | 'retirer')
+           Le panneau actif reçoit la classe .active (display:block). */
+        .dynamic-panel { display: none; padding: 16px; border: 1px solid #e2e8f0; border-top: none; background: #fff; }
+        .dynamic-panel.active { display: block; }
     </style>
 </head>
 <body>
@@ -1615,25 +1663,21 @@
                             <small class="ms-2" id="action_track_badge"></small>
                         </div>
     
-                        <!-- Onglets internes : Copie / Playlist / Retrait -->
-                        <ul class="nav nav-pills mb-3" id="actionTabs">
-                            <li class="nav-item">
-                                <button class="nav-link active" data-bs-toggle="pill"
-                                        data-bs-target="#action-copie">📡 Copier vers AzuraCast</button>
-                            </li>
-                            <li class="nav-item">
-                                <button class="nav-link" data-bs-toggle="pill"
-                                        data-bs-target="#action-playlist">➕ Ajouter à une playlist</button>
-                            </li>
-                            <li class="nav-item">
-                                <button class="nav-link" data-bs-toggle="pill"
-                                        data-bs-target="#action-retire">➖ Retirer d'une playlist</button>
-                            </li>
-                        </ul>
+                        <!-- ═══ Pattern panneau dynamique (refactoring UI unifié V3) ═══
+                             Remplace les onglets Bootstrap par 3 boutons + 3 panneaux.
+                             Les boutons appellent showActionPanel('copier'|'ajouter'|'retirer').
+                             Tous les IDs internes (action_dossier_cible, action_playlist_container,
+                             btn_action_copier, btn_action_ajouter_playlist, btn_action_copier_et_playlist,
+                             action_new_playlist_*, retire_playlist_area, etc.) sont préservés. -->
+                        <div class="d-flex gap-2 mb-3">
+                            <button class="btn btn-success btn-sm" onclick="showActionPanel('copier')">🚀 Copier</button>
+                            <button class="btn btn-primary btn-sm" onclick="showActionPanel('ajouter')">➕ Ajouter PLS</button>
+                            <button class="btn btn-warning btn-sm" onclick="showActionPanel('retirer')">➖ Retirer PLS</button>
+                        </div>
     
-                        <div class="tab-content">
-                            <!-- SOUS-ONGLET : Copie simple -->
-                            <div class="tab-pane fade show active" id="action-copie">
+                        <div id="action_dynamic_panel">
+                            <!-- PANNEAU : Copie simple (actif par défaut) -->
+                            <div class="dynamic-panel active" id="action-panel-copier">
                                 <div class="row g-2 align-items-end">
                                     <div class="col-md-4">
                                         <label class="form-label small fw-bold">Dossier cible AzuraCast :</label>
@@ -1655,8 +1699,8 @@
                                 </div>
                             </div>
     
-                            <!-- SOUS-ONGLET : Ajouter à une playlist (v2 — dynamique) -->
-                            <div class="tab-pane fade" id="action-playlist">
+                            <!-- PANNEAU : Ajouter à une playlist (v2 — dynamique) -->
+                            <div class="dynamic-panel" id="action-panel-ajouter">
                                 <!-- Playlists dynamiques pour action sur 1 titre -->
                                 <div class="mb-2">
                                     <label class="form-label small fw-bold">🎵 Playlists cibles :</label>
@@ -1715,8 +1759,8 @@
                                 </div>
                             </div>
 
-                            <!-- SOUS-ONGLET : Retrait d'une playlist (Phase 1) -->
-                            <div class="tab-pane fade" id="action-retire">
+                            <!-- PANNEAU : Retrait d'une playlist (Phase 1) -->
+                            <div class="dynamic-panel" id="action-panel-retirer">
                                 <div class="alert alert-info py-2 small">
                                     <i class="bi bi-info-circle"></i>
                                     <strong>Retrait d'une playlist AzuraCast</strong><br>
@@ -2267,12 +2311,16 @@
                     <div class="card-header d-flex justify-content-between align-items-center"
                          style="background-color: #0dcaf0; color: #000;">
                         <span>🚀 Pont RadioDJ → AzuraCast</span>
-                        <!-- Sélecteur de station cible (multi-station) -->
+                        <!-- Sélecteur de station cible (multi-station) + bouton Replier playlists -->
                         <div class="d-flex align-items-center gap-2">
                             <label class="form-label mb-0 small fw-bold" for="push_station_cible">Station cible :</label>
                             <select class="form-select form-select-sm" id="push_station_cible" style="width: auto;">
                                 <option value="7">Station 7</option>
                             </select>
+                            <button type="button" class="btn btn-sm btn-outline-dark py-0 px-2" id="btn_toggle_playlists"
+                                    title="Replier/déplier la table des playlists AzuraCast"
+                                    onclick="(function(btn){var c=document.getElementById('azura_playlists_container');if(!c)return;c.classList.toggle('d-none');var hidden=c.classList.contains('d-none');btn.textContent=hidden?'▸ Playlists':'▾ Playlists';btn.setAttribute('aria-expanded',hidden?'false':'true');})(this);"
+                                    aria-expanded="true">▾ Playlists</button>
                         </div>
                     </div>
                     <div class="card-body">
@@ -2280,7 +2328,8 @@
                         <!-- ═══ SOUS-SECTION : PLAYLISTS AZURACAST ═══ -->
                         <div class="mb-3">
                             <div class="d-flex justify-content-between align-items-center mb-2">
-                                <h6 class="mb-0">📋 Playlists AzuraCast
+                                <h6 class="mb-0 d-flex align-items-center gap-2 flex-wrap">
+                                    📋 Playlists AzuraCast
                                     <span class="badge bg-secondary ms-1" id="azura_playlists_station_filter" style="font-size:0.7em">Toutes stations</span>
                                 </h6>
                                 <small class="text-muted" id="azura_playlists_cache_date">Cache non synchronisé</small>
@@ -3019,56 +3068,15 @@
                         <div id="push_shared_params">
                         <hr>
     
-                        <!-- ═══ PARAMÈTRES D'ENVOI + PLAYLIST (v2 — playlists dynamiques) ═══ -->
-                        <div class="row g-2 align-items-end">
-                            <div class="col-md-4">
-                                <label class="form-label small fw-bold">Dossier cible AzuraCast :</label>
-                                <select class="form-select form-select-sm" id="push_dossier_cible">
-                                    <option value="">-- Charger les dossiers --</option>
-                                </select>
-                                <div id="push_new_folder_row" style="display:none" class="mt-1">
-                                    <input type="text" class="form-control form-control-sm"
-                                           id="push_new_folder_name" placeholder="ex: NOUVELLES_ENTREES/mon_dossier">
-                                </div>
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label small fw-bold">Ou nouvelle playlist :</label>
-                                <input type="text" class="form-control form-control-sm"
-                                       id="push_new_playlist_name" placeholder="(optionnel)">
-                            </div>
-                            <div class="col-md-2" id="push_new_playlist_type_col" style="display:none">
-                                <label class="form-label small fw-bold">Type :</label>
-                                <select class="form-select form-select-sm" id="push_playlist_type">
-                                    <option value="default">Standard</option>
-                                    <option value="once_per_x_songs">1/X titres</option>
-                                    <option value="once_per_x_minutes">1/X min</option>
-                                    <option value="once_per_hour">1/heure</option>
-                                    <option value="custom">Avancée</option>
-                                </select>
-                            </div>
-                            <div class="col-md-2" id="push_new_playlist_order_col" style="display:none">
-                                <label class="form-label small fw-bold">Lecture :</label>
-                                <select class="form-select form-select-sm" id="push_playlist_order">
-                                    <option value="shuffle">Aléatoire</option>
-                                    <option value="sequential">Séquentiel</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        <!-- Playlists dynamiques -->
-                        <div class="mt-2">
-                            <label class="form-label small fw-bold">🎵 Playlists cibles :</label>
-                            <div id="push_playlist_container">
-                                <!-- Lignes ajoutées dynamiquement par JS -->
-                            </div>
-                            <button type="button" class="btn btn-outline-primary btn-sm mt-1" id="btn_add_push_playlist">
-                                ➕ Ajouter une playlist
-                            </button>
-                        </div>
-
+                        <!-- ═══ Bouton Prévisualiser (refactoring UI unifié V3) ═══
+                             Les champs « Dossier cible » et « Playlists cibles » ont été déplacés
+                             dans le #dynamic_action_panel ci-dessous (panneaux panel-copier / panel-ajouter).
+                             Le bouton « 🚀 Envoyer » reste dans le DOM (masqué) : sync-azuracast.js
+                             gère son état (disabled, texte « Annuler l'envoi »), et la barre sticky
+                             « 🚀 Copier » déclenche l'envoi via btn_push_envoyer.click(). -->
                         <div class="mt-2 text-end">
                             <button class="btn btn-info me-2 btn-sm" id="btn_push_preview">🔍 Prévisualiser</button>
-                            <button class="btn btn-success btn-sm" id="btn_push_envoyer" disabled>🚀 Envoyer</button>
+                            <button class="btn btn-success btn-sm" id="btn_push_envoyer" disabled style="display:none;">🚀 Envoyer</button>
                         </div>
 
                         <!-- BUFFER BAR (badge + vider) -->
@@ -3131,14 +3139,110 @@
                                     </thead>
                                     <tbody id="push_preview_body"></tbody>
                                 </table>
-                                <div style="position: sticky; bottom: 0; background: #f8f9fa; padding: 8px 12px;
-                                            border-top: 1px solid #dee2e6; display: flex; align-items: center;
-                                            gap: 10px; z-index: 2;">
+                            </div>
+                                <div class="sticky-action-bar">
                                     <input type="checkbox" class="form-check-input" id="push_select_all_bottom">
-                                    <button class="btn btn-outline-secondary btn-sm py-0 px-2" id="btn_push_invert_selection" title="Inverser la sélection">⇄ Inverser</button>
+                                    <button class="btn btn-outline-light btn-sm py-0 px-2" id="btn_push_invert_selection" title="Inverser la sélection">⇄ Inverser</button>
                                     <label for="push_select_all_bottom" class="form-check-label small mb-0"
                                            style="cursor: pointer;">Tout sélectionner</label>
-                                    <small class="text-muted ms-auto" id="push_count">0 fichier(s)</small>
+                                    <span class="sticky-divider" aria-hidden="true"></span>
+                                    <label class="form-label mb-0 small fw-bold" for="sticky_station_select" style="color:#cbd5e1;">Station :</label>
+                                    <select class="form-select form-select-sm" id="sticky_station_select" style="width: auto;" title="Station cible (synchronisée avec le sélecteur du haut)">
+                                        <option value="7">Station 7</option>
+                                    </select>
+                                    <span class="sticky-divider" aria-hidden="true"></span>
+                                    <button type="button" class="btn btn-success btn-sm" id="btn_sticky_copier"
+                                            title="Afficher le panneau « Copier vers AzuraCast »"
+                                            onclick="showPanel('copier')">🚀 Copier</button>
+                                    <button type="button" class="btn btn-primary btn-sm" id="btn_sticky_ajouter"
+                                            title="Afficher le panneau « Ajouter aux playlists »"
+                                            onclick="showPanel('ajouter')">➕ Ajouter PLS</button>
+                                    <button type="button" class="btn btn-warning btn-sm" id="btn_push_retire_playlist"
+                                            title="Afficher le panneau « Retirer des playlists »"
+                                            onclick="showPanel('retirer')">➖ Retirer PLS</button>
+                                    <small class="ms-auto" id="push_count" style="color:#cbd5e1;">0 fichier(s)</small>
+                                </div>
+                            <!-- ═══ Panneau dynamique (refactoring UI unifié V3) ═══
+                                 Contient 3 sous-panneaux .dynamic-panel :
+                                   - #panel-copier   : Dossier cible + bouton « 🚀 Copier vers AzuraCast »
+                                   - #panel-ajouter  : Playlists cibles + nouvelle playlist + bouton « ➕ Ajouter aux playlists »
+                                   - #panel-retirer  : contenu généré par retirerSelectionPlaylistAzura()
+                                                      dans #panel-retirer-content
+                                 La fonction showPanel(name) active le bon panneau via la classe .active.
+                                 Tous les IDs internes (push_dossier_cible, push_playlist_container,
+                                 btn_add_push_playlist, push_new_folder_name, push_new_playlist_name,
+                                 push_playlist_type, push_playlist_order, etc.) sont préservés. -->
+                            <div id="dynamic_action_panel" class="mt-2">
+                                <!-- PANNEAU : Copier (Dossier cible + bouton d'envoi) -->
+                                <div class="dynamic-panel" id="panel-copier">
+                                    <div class="row g-2 align-items-end">
+                                        <div class="col-md-4">
+                                            <label class="form-label small fw-bold">Dossier cible AzuraCast :</label>
+                                            <select class="form-select form-select-sm" id="push_dossier_cible">
+                                                <option value="">-- Charger les dossiers --</option>
+                                            </select>
+                                            <div id="push_new_folder_row" style="display:none" class="mt-1">
+                                                <input type="text" class="form-control form-control-sm"
+                                                       id="push_new_folder_name" placeholder="ex: NOUVELLES_ENTREES/mon_dossier">
+                                            </div>
+                                        </div>
+                                        <div class="col-md-3">
+                                            <button class="btn btn-success btn-sm w-100"
+                                                    onclick="document.getElementById('btn_push_envoyer').click()">🚀 Copier vers AzuraCast</button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- PANNEAU : Ajouter (Playlists cibles + nouvelle playlist + bouton d'envoi) -->
+                                <div class="dynamic-panel" id="panel-ajouter">
+                                    <div class="mt-2">
+                                        <label class="form-label small fw-bold">🎵 Playlists cibles :</label>
+                                        <div id="push_playlist_container">
+                                            <!-- Lignes ajoutées dynamiquement par JS -->
+                                        </div>
+                                        <button type="button" class="btn btn-outline-primary btn-sm mt-1" id="btn_add_push_playlist">
+                                            ➕ Ajouter une playlist
+                                        </button>
+                                    </div>
+                                    <div class="row g-2 align-items-end mt-2">
+                                        <div class="col-md-3">
+                                            <label class="form-label small fw-bold">Ou nouvelle playlist :</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                   id="push_new_playlist_name" placeholder="(optionnel)">
+                                        </div>
+                                        <div class="col-md-2" id="push_new_playlist_type_col" style="display:none">
+                                            <label class="form-label small fw-bold">Type :</label>
+                                            <select class="form-select form-select-sm" id="push_playlist_type">
+                                                <option value="default">Standard</option>
+                                                <option value="once_per_x_songs">1/X titres</option>
+                                                <option value="once_per_x_minutes">1/X min</option>
+                                                <option value="once_per_hour">1/heure</option>
+                                                <option value="custom">Avancée</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-2" id="push_new_playlist_order_col" style="display:none">
+                                            <label class="form-label small fw-bold">Lecture :</label>
+                                            <select class="form-select form-select-sm" id="push_playlist_order">
+                                                <option value="shuffle">Aléatoire</option>
+                                                <option value="sequential">Séquentiel</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3">
+                                            <button class="btn btn-primary btn-sm w-100"
+                                                    onclick="document.getElementById('btn_push_envoyer').click()">➕ Ajouter aux playlists</button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- PANNEAU : Retirer (contenu généré dynamiquement par retirerSelectionPlaylistAzura())
+                                     La fonction showPanel('retirer') appelle retirerSelectionPlaylistAzura()
+                                     qui injecte le HTML du batch de retrait dans #panel-retirer-content. -->
+                                <div class="dynamic-panel" id="panel-retirer">
+                                    <div id="panel-retirer-content" class="text-muted small">
+                                        <i class="bi bi-info-circle"></i> Cliquez à nouveau sur « ➖ Retirer PLS »
+                                        pour générer le panneau de retrait batch (si rien ne s'affiche,
+                                        vérifiez qu'au moins un titre coché est déjà dans AzuraCast).
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -5106,8 +5210,8 @@
 <!-- PHASE 3 - Étape 3/5 : pont-player (player, archives, flux, spectrum, lecteur) -->
 <script src="/static/js/modules/stats-audience.js?v=1"></script>
 <!-- PHASE 3 - Étape 4/5 : stats-audience (onglet Audience, stats agrégées) -->
-<script src="/static/js/modules/sync-azuracast.js?v=5"></script>
-<!-- PHASE 3 - Étape 4c : sync-azuracast (sync, action panel, push, bulk schedule) -->
+<script src="/static/js/modules/sync-azuracast.js?v=6"></script>
+<!-- PHASE 3 - Étape 4c : sync-azuracast (sync, action panel, push, bulk schedule) — v6 : scrollToPushPlaylists() + btn_push_envoyer masqué -->
 <script src="/static/js/modules/couleur.js?v=1"></script>
 <!-- PHASE 3 - Étape 4c : couleur (programmation couleur, grille, dry-run, historique, stats) -->
 <script src="/static/js/modules/pool-tiers.js?v=1"></script>
@@ -7893,5 +7997,25 @@ document.addEventListener('DOMContentLoaded', function() {
 <script src="/static/js/bootstrap.bundle.min.js"></script>
 
 <script src="/static/js/modules/azura_flags.js"></script>
+
+<script>
+// Synchroniser les sélecteurs de station (haut ↔ sticky)
+(function() {
+    var top = document.getElementById('push_station_cible');
+    var sticky = document.getElementById('sticky_station_select');
+    if (!top || !sticky) return;
+    
+    // Copier les options du haut vers le sticky
+    sticky.innerHTML = top.innerHTML;
+    
+    top.addEventListener('change', function() {
+        sticky.value = top.value;
+    });
+    sticky.addEventListener('change', function() {
+        top.value = sticky.value;
+        top.dispatchEvent(new Event('change'));
+    });
+})();
+</script>
 </body>
 </html>

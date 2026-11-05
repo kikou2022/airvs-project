@@ -117,21 +117,26 @@ window.AzuraFlags = (function() {
         var st = getState(comments);
         if (!st.flag) return '';
         if (st.legacy) {
-            return '<span class="badge-azura">IN_AZURACAST</span>';
+            return '<span class="badge-azura" title="Présent dans AzuraCast (format legacy)">IN_AZURACAST</span>';
         }
 
         var labels = {
-            'PUSHED':  { text: 'POUSSÉ',   cls: 'badge-azura badge-azura-push' },
-            'ACTIVE':  { text: 'ACTIF',    cls: 'badge-azura badge-azura-active' },
-            'RETIRED': { text: 'RETRAIT',  cls: 'badge-azura badge-azura-retired' },
-            'REMOVED': { text: 'SUPPRIMÉ', cls: 'badge-azura badge-azura-removed' }
+            'PUSHED':  { text: 'POUSSÉ',   cls: 'badge-azura badge-azura-push',    desc: 'Poussé vers AzuraCast — pas encore en playlist' },
+            'ACTIVE':  { text: 'ACTIF',    cls: 'badge-azura badge-azura-active',  desc: 'Actif en playlist AzuraCast' },
+            'RETIRED': { text: 'RETRAIT',  cls: 'badge-azura badge-azura-retired', desc: 'Retiré des playlists AzuraCast — fichier conservé' },
+            'REMOVED': { text: 'SUPPRIMÉ', cls: 'badge-azura badge-azura-removed', desc: 'Supprimé d\'AzuraCast' }
         };
 
         var info = labels[st.state];
         if (!info) return '';
 
         var stationsTxt = st.stations.map(function(s) { return 'S' + s; }).join('+');
-        return '<span class="' + info.cls + '" title="' + _escapeHtml(st.flag) + '">' +
+        var stationsLabel = st.stations.length > 1 
+            ? 'stations ' + st.stations.join(' et ')
+            : 'station ' + st.stations[0];
+        var titleText = info.desc + ' (' + stationsLabel + ')';
+        
+        return '<span class="' + info.cls + '" title="' + _escapeHtml(titleText) + '">' +
                info.text + ' ' + stationsTxt + '</span>';
     }
 

@@ -568,16 +568,17 @@ document.addEventListener('click', function(e) {
     document.getElementById('action_track_label').textContent = actionTrack.artist + ' — ' + actionTrack.title;
     if (actionTrack.inAzura) {
         document.getElementById('action_track_badge').innerHTML = AzuraFlags.getBadgeHTML(actionTrack.comments || 'AZURA_PUSHED_S6_S7');
-        try {
-            let tabTrigger = new bootstrap.Tab(document.querySelector('#actionTabs button[data-bs-target="#action-playlist"]'));
-            tabTrigger.show();
-        } catch(_e) { /* bootstrap.Tab indisponible, l'onglet par défaut reste actif */ }
+        // Refactoring UI unifié V3 : le panneau « Ajouter PLS » est affiché via showActionPanel()
+        // (les onglets Bootstrap #actionTabs ont été remplacés par le pattern panneau dynamique).
+        if (typeof showActionPanel === 'function') {
+            showActionPanel('ajouter');
+        }
     } else {
         document.getElementById('action_track_badge').textContent = '(pas encore dans AzuraCast)';
-        try {
-            let tabTrigger = new bootstrap.Tab(document.querySelector('#actionTabs button[data-bs-target="#action-copie"]'));
-            tabTrigger.show();
-        } catch(_e) { /* bootstrap.Tab indisponible, l'onglet par défaut reste actif */ }
+        // Refactoring UI unifié V3 : le panneau « Copier » est affiché via showActionPanel().
+        if (typeof showActionPanel === 'function') {
+            showActionPanel('copier');
+        }
     }
     document.getElementById('explorer_action_panel').style.display = 'block';
     document.getElementById('explorer_action_panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -824,6 +825,337 @@ function showPlaylistDropdown(result, songId, stationId, fetchTaskId) {
 
 // Exposer la fonction globalement pour le onclick HTML
 window.retirerTitrePlaylistAzura = retirerTitrePlaylistAzura;
+
+
+// ════════════════════════════════════════════════════════════════════════
+// PHASE 2 — Retrait BATCH de plusieurs titres d'une playlist AzuraCast
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * Retire plusieurs titres cochés du push preview d'une même playlist AzuraCast.
+ *
+ * Workflow :
+ *   1. Collecte des checkboxes `.push-checkbox:checked` avec `data-in-azura="true"`
+ *   2. Extraction des song_ids (attribut `value` de la checkbox)
+ *   3. Si rien de sélectionné ou aucun dans AzuraCast → alerte
+ *   4. Demande la playlist_id via prompt texte (le dropdown sera amélioré en Phase 9)
+ *   5. POST /api/azura/batch/remove_from_playlist { song_ids, playlist_id, station_id }
+ *   6. Affiche le statut dans le terminal push (terminal_push_output)
+ *   7. Poll avec surveillerActionLog
+ */
+function retirerSelectionPlaylistAzura() {
+    // 1. Collecter les checkboxes cochées appartenant à AzuraCast
+    var checkboxes = document.querySelectorAll('.push-checkbox:checked[data-in-azura="true"]');
+    var songIds = [];
+    checkboxes.forEach(function(cb) {
+        var sid = cb.value;
+        if (sid !== null && sid !== undefined && sid !== '') {
+            songIds.push(parseInt(sid));
+        }
+    });
+
+    // 2. Vérifier qu'au moins un titre coché est dans AzuraCast
+    if (songIds.length === 0) {
+        // Soit rien de coché, soit rien dans AzuraCast — différencier le message
+        var totalChecked = document.querySelectorAll('.push-checkbox:checked').length;
+        if (totalChecked === 0) {
+            alert('Aucun titre sélectionné. Cochez d\'abord les titres à retirer dans le push preview.');
+        } else {
+            alert('Aucun des titres sélectionnés n\'est dans AzuraCast.\n' +
+                  'Le retrait de playlist ne s\'applique qu\'aux titres déjà poussés vers AzuraCast.');
+        }
+        return;
+    }
+
+    // 3. Afficher un panneau multi-playlists (même logique que "Ajouter à une playlist")
+    var stationId = getPushStationId();
+    
+    // Refactoring UI unifié V3 : le contenu du retrait batch est injecté dans #panel-retirer-content
+    // (sous-élément de #panel-retirer, lui-même enfant de #dynamic_action_panel).
+    // La visibilité du panneau parent est gérée par showPanel('retirer') via la classe .active.
+    var dropdownArea = document.getElementById('panel-retirer-content');
+    if (!dropdownArea) {
+        // Fallback 1 : ancien conteneur unique dynamic_action_panel (rétro-compat)
+        dropdownArea = document.getElementById('dynamic_action_panel');
+    }
+    if (!dropdownArea) {
+        // Fallback 2 : créer une zone ad-hoc si ni panel-retirer-content ni dynamic_action_panel
+        dropdownArea = document.createElement('div');
+        dropdownArea.id = 'panel-retirer-content';
+        dropdownArea.className = 'mt-2';
+        var logWrapper = document.getElementById('push_log_wrapper');
+        if (logWrapper) {
+            logWrapper.parentNode.insertBefore(dropdownArea, logWrapper);
+        }
+    }
+
+    // Récupérer les playlists du cache (déjà chargé par Phase 1.5)
+    // ou utiliser les options du Pont
+    var playlistOptions = (typeof _pushPlaylistOptionsHtml !== 'undefined') 
+        ? _pushPlaylistOptionsHtml 
+        : '<option value="">-- Aucune playlist chargée --</option>';
+
+    // Construire le HTML (même structure que "Ajouter à une playlist")
+    dropdownArea.innerHTML = 
+        '<div class="card card-body p-2 mb-2">' +
+            '<label class="form-label small fw-bold mb-1">Retrait batch de ' + songIds.length + ' titre(s) — sélectionnez les playlists à retirer :</label>' +
+            '<div id="batch_retire_playlist_container"></div>' +
+            '<button type="button" class="btn btn-outline-secondary btn-sm mt-1" id="btn_batch_retire_add_row">➕ Ajouter une playlist à retirer</button>' +
+            '<div class="mt-2">' +
+                '<button class="btn btn-warning btn-sm" id="btn_batch_retire_confirm">➖ Retirer ces ' + songIds.length + ' titre(s) des playlists sélectionnées</button>' +
+                ' <button class="btn btn-outline-secondary btn-sm" id="btn_batch_retire_cancel">Annuler</button>' +
+            '</div>' +
+        '</div>';
+
+    dropdownArea.style.display = 'block';
+
+    // Système de lignes dynamiques (comme push_playlist_container)
+    var batchRowCounter = 0;
+    var batchContainer = document.getElementById('batch_retire_playlist_container');
+
+    function addBatchRetireRow() {
+        var rowId = 'batch_retire_row_' + (++batchRowCounter);
+        var rowHtml = '<div class="row g-1 mb-1 batch-retire-row" id="' + rowId + '">' +
+            '<div class="col-md-10">' +
+                '<select class="form-select form-select-sm batch-retire-playlist-select" data-row-id="' + rowId + '">' +
+                    playlistOptions +
+                '</select>' +
+            '</div>' +
+            '<div class="col-md-2">' +
+                '<button class="btn btn-outline-danger btn-sm w-100 btn-batch-retire-remove" data-row-id="' + rowId + '" title="Retirer cette ligne">✕</button>' +
+            '</div>' +
+        '</div>';
+        batchContainer.insertAdjacentHTML('beforeend', rowHtml);
+    }
+
+    // Ajouter la première ligne
+    addBatchRetireRow();
+
+    // Bouton "+ Ajouter une playlist à retirer"
+    document.getElementById('btn_batch_retire_add_row').addEventListener('click', addBatchRetireRow);
+
+    // Bouton "Retirer ligne" (délégation)
+    batchContainer.addEventListener('click', function(e) {
+        if (e.target.classList.contains('btn-batch-retire-remove')) {
+            var rowId = e.target.dataset.rowId;
+            var row = document.getElementById(rowId);
+            if (row) row.remove();
+            // Si plus aucune ligne, en rajouter une
+            if (batchContainer.children.length === 0) addBatchRetireRow();
+        }
+    });
+
+    // Bouton Annuler
+    document.getElementById('btn_batch_retire_cancel').addEventListener('click', function() {
+        dropdownArea.style.display = 'none';
+        dropdownArea.innerHTML = '';
+    });
+
+    // Bouton Confirmer
+    document.getElementById('btn_batch_retire_confirm').addEventListener('click', function() {
+        // Collecter les playlist_ids sélectionnés (uniques, non vides)
+        var selects = document.querySelectorAll('.batch-retire-playlist-select');
+        var playlistIds = [];
+        selects.forEach(function(sel) {
+            var val = parseInt(sel.value);
+            if (val && val > 0 && playlistIds.indexOf(val) === -1) {
+                playlistIds.push(val);
+            }
+        });
+
+        if (playlistIds.length === 0) {
+            alert('Sélectionnez au moins une playlist à retirer.');
+            return;
+        }
+
+        // Construire le message de confirmation
+        var playlistNames = [];
+        playlistIds.forEach(function(pid) {
+            selects.forEach(function(sel) {
+                if (parseInt(sel.value) === pid && playlistNames.indexOf(sel.options[sel.selectedIndex].text) === -1) {
+                    playlistNames.push(sel.options[sel.selectedIndex].text);
+                }
+            });
+        });
+
+        if (!confirm(
+            'Confirmer le retrait batch ?\n\n' +
+            'Titres à traiter : ' + songIds.length + '\n' +
+            'Playlists à retirer : ' + playlistIds.length + '\n' +
+            playlistNames.map(function(n) { return '  • ' + n; }).join('\n') + '\n' +
+            'Station : ' + stationId + '\n\n' +
+            'Les fichiers ne seront PAS supprimés d\'AzuraCast.\n' +
+            'Ils seront simplement retirés des playlists sélectionnées.'
+        )) return;
+
+        // Masquer le panneau
+        dropdownArea.style.display = 'none';
+        dropdownArea.innerHTML = '';
+
+        // Afficher le statut dans le terminal push
+        var terminal = document.getElementById('terminal_push_output');
+        var logWrapper2 = document.getElementById('push_log_wrapper');
+        if (logWrapper2) logWrapper2.style.display = 'block';
+        if (terminal) {
+            terminal.textContent = '⏳ Création de la tâche de retrait batch (' +
+                                    songIds.length + ' titre(s) ← ' + playlistIds.length + ' playlist(s))...';
+        }
+
+        // Pour chaque playlist, créer une tâche batch séparée
+        // (le worker traitera chaque playlist indépendamment)
+        var tasksCreated = 0;
+        var totalTasks = playlistIds.length;
+
+        playlistIds.forEach(function(playlistId) {
+            fetch('/api/azura/batch/remove_from_playlist', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    song_ids: songIds,
+                    playlist_id: playlistId,
+                    station_id: stationId
+                })
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                tasksCreated++;
+                if (data.status === 'ok' && tasksCreated === 1) {
+                    // Afficher la première tâche et commencer le poll
+                    if (terminal) {
+                        terminal.textContent = '✅ Tâche 1/' + totalTasks + ' créée (ID ' + data.task_id + ')\n' +
+                                                '⏳ Le worker traite les retraits...';
+                    }
+                    // Poll la première tâche dans le terminal push
+                    if (typeof surveillerPushLog === 'function') {
+                        surveillerPushLog(data.task_id);
+                    }
+                } else if (data.status === 'ok') {
+                    if (terminal) {
+                        terminal.textContent += '\n✅ Tâche ' + tasksCreated + '/' + totalTasks + ' créée (ID ' + data.task_id + ')';
+                    }
+                }
+            })
+            .catch(function(err) {
+                if (terminal) {
+                    terminal.textContent += '\n❌ Erreur : ' + err.message;
+                }
+            });
+        });
+
+        if (terminal && totalTasks > 1) {
+            terminal.textContent += '\n📋 ' + totalTasks + ' tâches créées au total (1 poll actif).';
+        }
+    });
+}
+
+// Exposer la fonction globalement pour le onclick HTML
+window.retirerSelectionPlaylistAzura = retirerSelectionPlaylistAzura;
+
+// ═══════════════════════════════════════════════════════════════════
+// Refactoring UI unifié V3 — Pattern panneau dynamique
+// ═══════════════════════════════════════════════════════════════════
+// Deux helpers symétriques pour gérer l'affichage exclusif d'un panneau
+// parmi 3 panneaux frères (.dynamic-panel) portant la classe .active.
+//
+// 1. Programmation push preview :
+//      #dynamic_action_panel > .dynamic-panel#panel-copier|#panel-ajouter|#panel-retirer
+//      Boutons sticky : showPanel('copier' | 'ajouter' | 'retirer')
+//
+// 2. Explorateur action panel :
+//      #action_dynamic_panel > .dynamic-panel#action-panel-copier|#action-panel-ajouter|#action-panel-retirer
+//      Boutons : showActionPanel('copier' | 'ajouter' | 'retirer')
+//
+// Cas particulier : showPanel('retirer') appelle aussi retirerSelectionPlaylistAzura()
+// pour peupler le contenu du panneau #panel-retirer-content (les titres cochés du push
+// preview doivent être collectés au moment du clic, on ne peut pas pré-rendre le panneau).
+
+/**
+ * showPanel(name) — Programmation push preview
+ *
+ * Active un seul panneau parmi #panel-copier / #panel-ajouter / #panel-retirer
+ * dans #dynamic_action_panel. Tous les autres panneaux sont désactivés.
+ *
+ * Si name === 'retirer', appelle aussi retirerSelectionPlaylistAzura() pour
+ * peupler dynamiquement le contenu de #panel-retirer-content (batch de retrait).
+ *
+ * @param {string} name — 'copier' | 'ajouter' | 'retirer'
+ */
+function showPanel(name) {
+    document.querySelectorAll('#dynamic_action_panel .dynamic-panel').forEach(function(p) {
+        p.classList.remove('active');
+    });
+    var panel = document.getElementById('panel-' + name);
+    if (panel) panel.classList.add('active');
+
+    // Le panneau « retirer » doit être peuplé dynamiquement à chaque activation
+    // (les titres cochés peuvent avoir changé depuis le dernier affichage).
+    if (name === 'retirer' && typeof retirerSelectionPlaylistAzura === 'function') {
+        try { retirerSelectionPlaylistAzura(); } catch (_e) { /*silencieux*/ }
+    }
+}
+window.showPanel = showPanel;
+
+/**
+ * showActionPanel(name) — Explorateur action panel
+ *
+ * Active un seul panneau parmi #action-panel-copier / #action-panel-ajouter /
+ * #action-panel-retirer dans #action_dynamic_panel. Tous les autres panneaux
+ * sont désactivés.
+ *
+ * @param {string} name — 'copier' | 'ajouter' | 'retirer'
+ */
+function showActionPanel(name) {
+    document.querySelectorAll('#action_dynamic_panel .dynamic-panel').forEach(function(p) {
+        p.classList.remove('active');
+    });
+    var panel = document.getElementById('action-panel-' + name);
+    if (panel) panel.classList.add('active');
+}
+window.showActionPanel = showActionPanel;
+
+/**
+ * scrollToPushPlaylists()
+ *
+ * Appelée par le bouton "➕ Ajouter playlist" de la barre sticky (Pont RadioDJ → AzuraCast).
+ *
+ * Rôle : défiler la page vers la section « Playlists cibles » (push_playlist_container)
+ * et la mettre temporairement en évidence (animation .airvs-highlight-flash définie
+ * dans le <style> de index.html).
+ *
+ * On cible le bloc parent (.mt-2 contenant le label "🎵 Playlists cibles :", le container
+ * des lignes dynamiques et le bouton "➕ Ajouter une playlist") pour que l'utilisateur
+ * voit toute la zone d'ajout, pas seulement les lignes vides.
+ *
+ * NB : on ne déclenche PAS un click sur btn_action_ajouter_playlist (panneau Explorateur)
+ *      car ce dernier travaille sur actionTrack (titre unique de l'explorateur), pas sur
+ *      les titres cochés du push preview.
+ */
+function scrollToPushPlaylists() {
+    var c = document.getElementById('push_playlist_container');
+    if (!c) return;
+    var block = c.closest('.mt-2') || c;
+    // Si le panneau push_preview_wrapper est replié, l'afficher pour que le scroll ait une cible visible
+    var wrapper = document.getElementById('push_preview_wrapper');
+    if (wrapper && wrapper.style.display === 'none') {
+        // Le wrapper est caché tant qu'aucune prévisualisation n'a été faite :
+        // on ne le force pas ici, on défile juste vers le bloc playlists qui reste visible en haut.
+    }
+    try {
+        block.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (e) {
+        // Fallback navigateurs anciens
+        block.scrollIntoView();
+    }
+    // Highlight temporaire (classe définie dans index.html)
+    block.classList.remove('airvs-highlight-flash');  // éviter accumulation
+    // Forcer le reflow pour pouvoir réappliquer l'animation
+    void block.offsetWidth;
+    block.classList.add('airvs-highlight-flash');
+    setTimeout(function() {
+        block.classList.remove('airvs-highlight-flash');
+    }, 1600);
+}
+window.scrollToPushPlaylists = scrollToPushPlaylists;
 
 // Charger les dossiers AzuraCast dans les select
 // Récupère l'ID de station actuellement sélectionné dans le header du Pont
@@ -1140,6 +1472,44 @@ document.getElementById('btn_action_copier_et_playlist').addEventListener('click
 
 // Surveiller le journal d'action
 // playlistTaskIds : tableau d'IDs de tâches playlist à surveiller séquentiellement
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 2 — Surveillance des logs dans le terminal push (Programmation)
+// ═══════════════════════════════════════════════════════════════════════
+
+var pushLogInterval = null;
+
+function surveillerPushLog(taskId) {
+    var logWrapper = document.getElementById('push_log_wrapper');
+    var terminal = document.getElementById('terminal_push_output');
+    if (logWrapper) logWrapper.style.display = 'block';
+    if (!terminal) return;
+
+    if (pushLogInterval) clearInterval(pushLogInterval);
+
+    pushLogInterval = setInterval(function() {
+        fetch('/lire_log_push?task_id=' + taskId)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                terminal.textContent = data.log || '...';
+                terminal.scrollTop = terminal.scrollHeight;
+
+                if (data.statut === 'termine' || data.statut === 'erreur') {
+                    clearInterval(pushLogInterval);
+                    // Rafraîchir les playlists après l'opération
+                    window.pushPlaylistsLoaded = false;
+                    loadPushPlaylists();
+                    if (typeof chargerPlaylistsCache === 'function') chargerPlaylistsCache();
+                    // Re-fetch des badges PLS
+                    _pushPreviewPlaylistsCache = {};
+                    fetchBatchMediaPlaylists();
+                }
+            })
+            .catch(function(err) {
+                console.log('[surveillerPushLog] Erreur:', err);
+            });
+    }, 2000);
+}
+
 function surveillerActionLog(taskId, playlistTaskIds) {
     document.getElementById('action_log_wrapper').style.display = 'block';
     let terminal = document.getElementById('terminal_action_output');
@@ -1271,6 +1641,9 @@ function loadStationsList() {
             let actionSel = document.getElementById('action_station_cible');
             if (pushSel) pushSel.innerHTML = optionsHtml;
             if (actionSel) actionSel.innerHTML = optionsHtml;
+            // Phase 1.5 — synchroniser aussi le mini-sélecteur sticky
+            let stickySel = document.getElementById('sticky_station_select');
+            if (stickySel) stickySel.innerHTML = optionsHtml;
             // Déclencher le rechargement des playlists/dossiers pour la station par défaut
             reloadPlaylistsAndFoldersForStation();
         })
@@ -1317,12 +1690,20 @@ function reloadPushPanelForStation() {
 
 // Écouteur : quand on change de station cible dans le Pont, recharger UNIQUEMENT
 // les playlists + dossiers du Pont (sans perturber l'Action AzuraCast de l'explorateur)
+// + re-fetch des badges PLS + sync avec le sélecteur sticky
 (function bindStationChangeListener() {
     let sel = document.getElementById('push_station_cible');
     if (!sel) return;
     sel.addEventListener('change', function() {
         console.log('[push_station_cible] Change event fired, new value=' + this.value);
         reloadPushPanelForStation();
+        // Phase 1.5 — re-fetch des badges PLS pour la nouvelle station
+        _pushPreviewPlaylistsCache = {};
+        // Réinitialiser les badges (retirer le marquage enriched)
+        document.querySelectorAll('td[data-col="azuracast"]').forEach(function(cell) {
+            cell.removeAttribute('data-pl-enriched');
+        });
+        fetchBatchMediaPlaylists();
     });
 })();
 
@@ -1708,6 +2089,7 @@ var pushStats = document.getElementById('push_preview_stats');
 var pushCount = document.getElementById('push_count');
 var btnPreview = document.getElementById('btn_push_preview');
 var btnEnvoyer = document.getElementById('btn_push_envoyer');
+if (btnEnvoyer) btnEnvoyer.style.display = 'none';  // Masquer — remplacé par "🚀 Copier" dans la barre sticky
 var terminalPush = document.getElementById('terminal_push_output');
 var terminalPlaylist = document.getElementById('terminal_playlist_output');
 var pushSelectAll = document.getElementById('push_select_all');
@@ -1771,6 +2153,161 @@ function getPushMode() {
 function updatePushCount() {
     btnEnvoyer.disabled = window.pushSelectedFiles.length === 0;
     pushCount.textContent = window.pushSelectedFiles.length + " fichier(s) sélectionné(s).";
+    // Phase 1.5 — après rendu du push preview, fetch les playlists des titres AZURA
+    fetchBatchMediaPlaylists();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 1.5 — Affichage des playlists AzuraCast dans le push preview
+// ═══════════════════════════════════════════════════════════════════════
+
+var _batchPlaylistsTaskId = null;
+
+function fetchBatchMediaPlaylists() {
+    // Collecter les song_ids des titres déjà dans AzuraCast
+    var azuraCheckboxes = document.querySelectorAll('.push-checkbox[data-in-azura="true"]');
+    if (azuraCheckboxes.length === 0) return;
+
+    var songIds = [];
+    azuraCheckboxes.forEach(function(cb) {
+        var sid = cb.value;
+        if (sid) songIds.push(parseInt(sid));
+        // Ajouter spinner sur le badge
+        var row = cb.closest('tr');
+        if (row) {
+            var badge = row.querySelector('td[data-col="azuracast"] span');
+            if (badge && badge.textContent.indexOf('⏳') === -1) {
+                badge.textContent = badge.textContent.trim() + ' ⏳';
+            }
+        }
+    });
+    if (songIds.length === 0) return;
+
+    var stationId = getPushStationId();
+
+    // Lancer la tâche batch
+    fetch('/api/azura/batch/media_playlists', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ song_ids: songIds, station_id: stationId })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.status === 'pending' && data.task_id) {
+            _batchPlaylistsTaskId = data.task_id;
+            pollBatchMediaPlaylists(data.task_id);
+        }
+    })
+    .catch(function(err) {
+        console.log('[Phase 1.5] Erreur fetch batch playlists:', err);
+    });
+}
+
+function pollBatchMediaPlaylists(taskId) {
+    var attempts = 0;
+    var maxAttempts = 60;
+
+    function poll() {
+        fetch('/lire_log_push?task_id=' + encodeURIComponent(taskId))
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            attempts++;
+            if (data.log && data.log.indexOf('__RESULT__') !== -1) {
+                var startIdx = data.log.indexOf('__RESULT__') + 9;
+                var jsonStart = data.log.indexOf('{', startIdx);
+                var jsonEnd = data.log.lastIndexOf('}');
+                if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                    var jsonStr = data.log.substring(jsonStart, jsonEnd + 1);
+                    try {
+                        var result = JSON.parse(jsonStr);
+                        renderPlaylistsInPreview(result.results || []);
+                    } catch (e) {
+                        console.log('[Phase 1.5] Erreur parsing:', e);
+                    }
+                }
+                return;
+            }
+            if (data.statut === 'erreur') return;
+            if (attempts < maxAttempts) setTimeout(poll, 2000);
+        })
+        .catch(function() {
+            if (attempts < maxAttempts) setTimeout(poll, 2000);
+        });
+    }
+    poll();
+}
+
+// Cache local des playlists par song_id
+var _pushPreviewPlaylistsCache = {};
+
+function renderPlaylistsInPreview(results) {
+    results.forEach(function(item) {
+        var songId = item.song_id;
+        var playlists = item.playlists || [];
+
+        _pushPreviewPlaylistsCache[songId] = playlists;
+
+        // Trouver la cellule AzuraCast
+        var checkbox = document.querySelector('.push-checkbox[value="' + songId + '"]');
+        if (!checkbox) return;
+        var row = checkbox.closest('tr');
+        if (!row) return;
+        var azuraCell = row.querySelector('td[data-col="azuracast"]');
+        if (!azuraCell) return;
+
+        // Vérifier si déjà enrichi
+        if (azuraCell.getAttribute('data-pl-enriched') === '1') return;
+
+        var badgeSpan = azuraCell.querySelector('span');
+        if (!badgeSpan) return;
+
+        // Retirer le spinner
+        badgeSpan.textContent = badgeSpan.textContent.replace(' ⏳', '');
+
+        // Retirer le title anglais (AZURA_PUSHED_S6_S7) mis par getBadgeHTML
+        badgeSpan.removeAttribute('title');
+        badgeSpan.removeAttribute('data-bs-toggle');
+
+        if (playlists.length === 0) {
+            azuraCell.setAttribute('data-pl-enriched', '1');
+            return;
+        }
+
+        // Mettre le compteur + rendre cliquable
+        var originalText = badgeSpan.textContent.trim();
+        badgeSpan.textContent = originalText + ' · ' + playlists.length + ' PLS ▾';
+        badgeSpan.style.cursor = 'pointer';
+        badgeSpan.style.borderBottom = '2px solid #0dcaf0';
+
+        // Créer la zone dépliable avec createElement (PAS innerHTML += qui détruit les listeners)
+        var plExpand = document.createElement('div');
+        plExpand.id = 'pl-expand-' + songId;
+        plExpand.style.cssText = 'display:none; margin-top:4px; padding:3px; background:#f8f9fa; border-radius:4px; border:1px solid #dee2e6;';
+
+        playlists.forEach(function(p) {
+            var plDiv = document.createElement('div');
+            var icon = p.is_folder_based ? '📁 ' : '🎵 ';
+            var shortName = p.name.length > 18 ? p.name.substring(0, 16) + '…' : p.name;
+            plDiv.textContent = icon + shortName + ' (ID ' + p.id + ')';
+            plDiv.style.cssText = 'font-size:0.65em; white-space:nowrap; padding:1px 0;';
+            plDiv.style.color = p.is_folder_based ? '#fd7e14' : '#0d6efd';
+            plDiv.title = p.name + (p.is_folder_based ? ' (folder-based)' : '');
+            plExpand.appendChild(plDiv);
+        });
+
+        // Ajouter avec appendChild (préserve les event listeners existants)
+        azuraCell.appendChild(plExpand);
+
+        // Toggle au clic (closure pour capturer les bonnes références)
+        (function(span, expand) {
+            span.onclick = function(e) {
+                e.stopPropagation();
+                expand.style.display = (expand.style.display === 'none') ? 'block' : 'none';
+            };
+        })(badgeSpan, plExpand);
+
+        azuraCell.setAttribute('data-pl-enriched', '1');
+    });
 }
 
 function synchroniserPushSelectAll(source) {

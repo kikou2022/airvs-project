@@ -1297,6 +1297,176 @@ def api_remove_media_from_playlist(media_id, playlist_id):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# PHASE 1.5 — Affichage des playlists dans le push preview
+# ═══════════════════════════════════════════════════════════════════════
+
+@azuracast_bp.route('/api/azura/batch/media_playlists', methods=['POST'])
+@login_requis
+def api_get_batch_media_playlists():
+    """
+    Phase 1.5 — Récupère les playlists AzuraCast pour MULTIPLE titres.
+
+    Le dashboard appelle cet endpoint après le chargement du push preview
+    pour afficher les playlists de chaque titre à côté du badge AZURA.
+
+    Body JSON :
+      - song_ids: liste d'IDs RadioDJ (obligatoire)
+      - station_id: ID de la station (défaut: 7)
+
+    Returns :
+      JSON { status: 'pending', task_id: X } — le dashboard poll le résultat
+    """
+    try:
+        data = request.get_json(force=True)
+        song_ids = data.get('song_ids', [])
+        station_id = int(data.get('station_id', 7))
+
+        # Valider song_ids
+        if not song_ids or not isinstance(song_ids, list):
+            return jsonify({'status': 'error', 'message': 'song_ids (liste non vide) obligatoire'}), 400
+
+        # Nettoyer les IDs
+        song_ids_clean = [int(sid) for sid in song_ids if sid and str(sid).strip().isdigit()]
+        if not song_ids_clean:
+            return jsonify({'status': 'error', 'message': 'Aucun song_id valide'}), 400
+
+        db = get_db_connection()
+        if not db:
+            return jsonify({'status': 'error', 'message': 'Connexion DB impossible'}), 500
+        cursor = db.cursor()
+
+        parametres = {
+            'song_ids': song_ids_clean,
+            'station_id': station_id,
+        }
+
+        cursor.execute(
+            "INSERT INTO taches_planifiees (type_action, statut, parametres, date_creation) "
+            "VALUES ('GET_BATCH_MEDIA_PLAYLISTS', 'en_attente', %s, NOW())",
+            (json.dumps(parametres),)
+        )
+        db.commit()
+        task_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            'status': 'pending',
+            'task_id': task_id,
+            'count': len(song_ids_clean)
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 2 — Retrait BATCH de plusieurs titres d'une playlist AzuraCast
+# ═══════════════════════════════════════════════════════════════════════
+
+@azuracast_bp.route('/api/azura/batch/remove_from_playlist', methods=['POST'])
+@login_requis
+def api_batch_remove_from_playlist():
+    """Phase 2 — Retrait batch de plusieurs titres d'une playlist AzuraCast.
+
+    Insère UNE seule tâche AZURA_REMOVE_FROM_PLAYLIST_BATCH dans la file
+    d'attente (vs Phase 1 qui insérait 1 tâche par retrait).
+
+    Body JSON :
+      - song_ids: [123, 456, ...]    liste d'IDs RadioDJ (obligatoire, non vide)
+      - playlist_id: 465             ID de la playlist AzuraCast à retirer (obligatoire)
+      - station_id: 7                ID de la station AzuraCast (défaut: 7)
+
+    Returns:
+      JSON : {
+        'status': 'ok',
+        'task_id': <id>,
+        'count': <nb de song_ids>,
+        'playlist_id': <id>,
+        'station_id': <id>
+      }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        song_ids = data.get('song_ids')
+        playlist_id = data.get('playlist_id')
+        station_id = int(data.get('station_id', 7))
+
+        # Validation song_ids
+        if not isinstance(song_ids, list):
+            return jsonify({
+                'status': 'error',
+                'message': 'song_ids doit être une liste d\'entiers.'
+            }), 400
+
+        # Normaliser en entiers (filtre les nuls et invalides)
+        song_ids_int = []
+        seen = set()
+        for sid in song_ids:
+            try:
+                sid_int = int(sid)
+            except (ValueError, TypeError):
+                continue
+            if sid_int <= 0 or sid_int in seen:
+                continue
+            seen.add(sid_int)
+            song_ids_int.append(sid_int)
+
+        if not song_ids_int:
+            return jsonify({
+                'status': 'error',
+                'message': 'song_ids vide ou invalide.'
+            }), 400
+
+        # Validation playlist_id
+        try:
+            playlist_id = int(playlist_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                'status': 'error',
+                'message': 'playlist_id doit être un entier valide.'
+            }), 400
+
+        if playlist_id <= 0:
+            return jsonify({
+                'status': 'error',
+                'message': 'playlist_id invalide.'
+            }), 400
+
+        db = get_db_connection()
+        if not db:
+            return jsonify({'status': 'error', 'message': 'Connexion DB impossible'}), 500
+        cursor = db.cursor()
+
+        parametres = {
+            'song_ids': song_ids_int,
+            'playlist_id': playlist_id,
+            'station_id': station_id,
+        }
+
+        cursor.execute(
+            "INSERT INTO taches_planifiees (type_action, statut, parametres, date_creation) "
+            "VALUES ('AZURA_REMOVE_FROM_PLAYLIST_BATCH', 'en_attente', %s, NOW())",
+            (json.dumps(parametres),)
+        )
+        db.commit()
+        task_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            'status': 'ok',
+            'message': f'Tâche de retrait batch créée ({len(song_ids_int)} titre(s) ← playlist {playlist_id})',
+            'task_id': task_id,
+            'count': len(song_ids_int),
+            'song_ids': song_ids_int,
+            'playlist_id': playlist_id,
+            'station_id': station_id
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # PHASE 1 (améliorée) — Lister les playlists d'un média AzuraCast
 # ═══════════════════════════════════════════════════════════════════════
 

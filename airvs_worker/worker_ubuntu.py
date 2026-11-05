@@ -1949,6 +1949,7 @@ def executer_azura_remove_from_playlist(tache_id, parametres):
 
         # 2. Lister tous les médias AzuraCast et chercher un match
         #    Stratégie : d'abord par basename du fichier, puis par artist+title
+        # TODO Phase 6: utiliser cache mapping_radiodj_azura (évite le list_media() à ~35s)
         try:
             all_media = api.list_media()
             rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
@@ -2262,6 +2263,429 @@ def _store_task_result(tache_id, result_json):
         db.close()
     except Exception as e:
         print(f"[Tâche {tache_id}] Erreur stockage résultat: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 1.5 — Affichage des playlists dans le push preview
+# ═══════════════════════════════════════════════════════════════════════
+
+def executer_get_batch_media_playlists(tache_id, parametres):
+    """
+    Phase 1.5 — Récupère les playlists AzuraCast pour MULTIPLE titres en une seule fois.
+    Optimisation : 1 seul appel api.list_media() pour tous les titres.
+    """
+    song_ids = parametres.get('song_ids', [])
+    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+
+    if not song_ids:
+        logger(tache_id, "ERREUR: song_ids obligatoire.")
+        logger(tache_id, "=== TERMINÉ === (paramètres manquants)")
+        return
+
+    try:
+        station_id = int(station_id)
+    except (ValueError, TypeError):
+        station_id = _DEFAULT_STATION_ID
+
+    logger(tache_id, f"=== DÉBUT GET BATCH MEDIA PLAYLISTS ===")
+    logger(tache_id, f"Titres à traiter: {len(song_ids)}")
+    logger(tache_id, f"Station: {station_id}")
+
+    api = get_azura_api(station_id)
+    if not api:
+        logger(tache_id, "ERREUR FATALE: Module azuracast_api non disponible.")
+        logger(tache_id, "=== TERMINÉ === (module API indisponible)")
+        return
+
+    try:
+        # 1. Lire tous les songs RadioDJ en une seule requête
+        song_ids_int = [int(sid) for sid in song_ids if sid]
+        placeholders = ','.join(['%s'] * len(song_ids_int))
+
+        db = pymysql.connect(**DB_CONFIG)
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            f"SELECT ID, artist, title, `path` FROM radiodb.songs WHERE ID IN ({placeholders})",
+            song_ids_int
+        )
+        songs = cursor.fetchall()
+        cursor.close()
+        db.close()
+
+        logger(tache_id, f"Songs RadioDJ trouvés: {len(songs)}/{len(song_ids_int)}")
+
+        if not songs:
+            logger(tache_id, "ERREUR: Aucun song RadioDJ trouvé.")
+            result_json = json.dumps({'results': [], 'error': 'no_songs_found'})
+            _store_task_result(tache_id, result_json)
+            logger(tache_id, "=== TERMINÉ === (aucun song trouvé)")
+            return
+
+        # 2. Appeler api.list_media() UNE SEULE FOIS
+        all_media = api.list_media()
+        rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
+        logger(tache_id, f"Médias AzuraCast récupérés: {len(rows)}")
+
+        # 3. Construire 2 index pour lookup rapide O(1)
+        index_by_basename = {}
+        index_by_artist_title = {}
+
+        for m in rows:
+            azura_path = m.get('path', '') or ''
+            basename_azura = azura_path.rsplit('/', 1)[-1] if '/' in azura_path else azura_path
+            basename_lower = basename_azura.lower().strip()
+            if basename_lower:
+                index_by_basename[basename_lower] = m
+
+            azura_artist = m.get('artist', '') or ''
+            azura_title = m.get('title', '') or ''
+            if azura_artist and azura_title:
+                cle = normaliser_pour_recherche(f"{azura_artist} - {azura_title}")
+                if cle:
+                    index_by_artist_title[cle] = m
+
+        logger(tache_id, f"Index construits: {len(index_by_basename)} basenames, {len(index_by_artist_title)} artist+title")
+
+        # 4. Pour chaque song, résoudre media_id et récupérer playlists
+        results = []
+        nb_trouves = 0
+        nb_non_trouves = 0
+
+        for song in songs:
+            song_id = song.get('ID')
+            artist = song.get('artist', '') or ''
+            title = song.get('title', '') or ''
+            song_path = song.get('path', '') or ''
+
+            # Passe 1 : path_exact
+            basename_radiodj = song_path.rsplit('\\', 1)[-1] if '\\' in song_path else song_path.rsplit('/', 1)[-1]
+            basename_lower = basename_radiodj.lower().strip()
+
+            media = index_by_basename.get(basename_lower)
+
+            # Passe 2 : artist_title_normalized
+            if not media and artist and title:
+                cle = normaliser_pour_recherche(f"{artist} - {title}")
+                media = index_by_artist_title.get(cle)
+
+            if media:
+                media_id = media.get('id')
+                playlists_raw = media.get('playlists', [])
+                playlists = []
+                for p in playlists_raw:
+                    if isinstance(p, dict):
+                        playlists.append({
+                            'id': p.get('id'),
+                            'name': p.get('name', f"Playlist {p.get('id')}"),
+                            'folder': p.get('folder'),
+                            'is_folder_based': bool(p.get('folder')),
+                            'count': p.get('count', 0)
+                        })
+                results.append({
+                    'song_id': song_id,
+                    'media_id': media_id,
+                    'playlists': playlists
+                })
+                nb_trouves += 1
+            else:
+                results.append({
+                    'song_id': song_id,
+                    'media_id': None,
+                    'playlists': []
+                })
+                nb_non_trouves += 1
+
+        logger(tache_id, f"[OK] {nb_trouves} titre(s) trouvés, {nb_non_trouves} non trouvé(s)")
+
+        # 5. Stocker le résultat
+        result_json = json.dumps({'results': results})
+        _store_task_result(tache_id, result_json)
+
+        logger(tache_id, "=== TERMINÉ === (succès)")
+
+    except AzuraCastAPIError as e:
+        logger(tache_id, f"[ERREUR API] {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur API)")
+    except Exception as e:
+        logger(tache_id, f"[ERREUR INATTENDUE] {type(e).__name__}: {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur)")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PHASE 2 — Retrait BATCH de plusieurs titres d'une playlist AzuraCast
+# ═══════════════════════════════════════════════════════════════════════
+
+def executer_azura_remove_from_playlist_batch(tache_id, parametres):
+    """
+    Phase 2 — Retire plusieurs médias d'une playlist AzuraCast en une seule tâche.
+
+    Optimisation vs Phase 1 (1 tâche par retrait) :
+      - 1 seule lecture DB pour tous les songs RadioDJ (WHERE ID IN (...))
+      - 1 seul appel api.list_media() partagé pour la résolution media_id
+
+    Parametres attendus :
+      - song_ids: liste d'IDs RadioDJ (obligatoire, non vide)
+      - playlist_id: ID de la playlist AzuraCast à retirer (obligatoire)
+      - station_id: ID de la station AzuraCast (défaut: 7)
+
+    Workflow :
+      1. Lecture groupée des songs RadioDJ (WHERE ID IN (...))
+      2. Appel unique à api.list_media() puis construction d'un index
+         {basename_lower: media} pour lookup O(1)
+      3. Pour chaque song_id :
+         a. Résoudre media_id (path_exact puis artist_title_normalized)
+         b. Appeler api.remove_media_from_playlist(media_id, playlist_id)
+         c. Re-fetch du média pour vérifier les playlists restantes
+         d. Programmer la mise à jour du flag RadioDJ
+      4. Mise à jour batch des flags RadioDJ (AZURA_ACTIVE_S* si encore dans
+         au moins une playlist, AZURA_RETIRED_S* sinon)
+      5. Logger le progress (X/N traités)
+    """
+    song_ids = parametres.get('song_ids') or []
+    playlist_id = parametres.get('playlist_id')
+    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+
+    # ── Validation des paramètres ──
+    if not playlist_id:
+        logger(tache_id, "ERREUR: playlist_id obligatoire.")
+        logger(tache_id, "=== TERMINÉ === (paramètres manquants)")
+        return
+
+    try:
+        station_id = int(station_id)
+    except (ValueError, TypeError):
+        station_id = _DEFAULT_STATION_ID
+
+    # Normaliser song_ids en liste d'entiers (dédoublonner + filtrer les nuls)
+    if not isinstance(song_ids, (list, tuple)):
+        logger(tache_id, f"ERREUR: song_ids doit être une liste (reçu: {type(song_ids).__name__}).")
+        logger(tache_id, "=== TERMINÉ === (paramètres invalides)")
+        return
+
+    song_ids_int = []
+    seen = set()
+    for sid in song_ids:
+        try:
+            sid_int = int(sid)
+        except (ValueError, TypeError):
+            continue
+        if sid_int <= 0 or sid_int in seen:
+            continue
+        seen.add(sid_int)
+        song_ids_int.append(sid_int)
+
+    if not song_ids_int:
+        logger(tache_id, "ERREUR: song_ids vide ou invalide.")
+        logger(tache_id, "=== TERMINÉ === (paramètres insuffisants)")
+        return
+
+    total = len(song_ids_int)
+    logger(tache_id, "=== DÉBUT RETRAIT BATCH PLAYLIST ===")
+    logger(tache_id, f"Playlist ID: {playlist_id}")
+    logger(tache_id, f"Station: {station_id}")
+    logger(tache_id, f"Titres à traiter: {total}")
+
+    api = get_azura_api(station_id)
+    if not api:
+        logger(tache_id, "ERREUR FATALE: Module azuracast_api non disponible.")
+        logger(tache_id, "=== TERMINÉ === (module API indisponible)")
+        return
+
+    # ── 1. Lecture groupée des songs RadioDJ ──
+    songs_map = {}  # {song_id: {'artist':..., 'title':..., 'path':...}}
+    try:
+        db = pymysql.connect(**DB_CONFIG)
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        placeholders = ','.join(['%s'] * len(song_ids_int))
+        cursor.execute(
+            f"SELECT ID, artist, title, `path` FROM radiodb.songs WHERE ID IN ({placeholders})",
+            tuple(song_ids_int)
+        )
+        for row in cursor.fetchall():
+            songs_map[int(row['ID'])] = {
+                'artist': row.get('artist', '') or '',
+                'title': row.get('title', '') or '',
+                'path': row.get('path', '') or '',
+            }
+        cursor.close()
+        db.close()
+    except Exception as e:
+        logger(tache_id, f"ERREUR: Impossible de lire les songs RadioDJ: {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur DB)")
+        return
+
+    logger(tache_id, f"Songs RadioDJ lus en base: {len(songs_map)}/{total}")
+    songs_manquants = [sid for sid in song_ids_int if sid not in songs_map]
+    if songs_manquants:
+        logger(tache_id, f"[WARN] {len(songs_manquants)} song(s) introuvable(s) en base: {songs_manquants}")
+
+    # ── 2. Appel UNIQUE à list_media() + construction de l'index ──
+    try:
+        all_media = api.list_media()
+        rows_media = all_media if isinstance(all_media, list) else all_media.get('rows', [])
+        logger(tache_id, f"list_media() — {len(rows_media)} média(s) AzuraCast récupérés")
+    except AzuraCastAPIError as e:
+        logger(tache_id, f"[ERREUR API] list_media(): {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur API)")
+        return
+    except Exception as e:
+        logger(tache_id, f"[ERREUR INATTENDUE] list_media(): {type(e).__name__}: {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur)")
+        return
+
+    # Index {basename_lower: media} pour lookup rapide par path
+    index_by_basename = {}
+    # Index normalisé {artist+title normalisé: media} pour fallback
+    index_by_artist_title = {}
+    for m in rows_media:
+        azura_path = m.get('path', '') or ''
+        basename_azura = azura_path.rsplit('/', 1)[-1] if '/' in azura_path else azura_path
+        key_basename = basename_azura.lower().strip()
+        if key_basename and key_basename not in index_by_basename:
+            index_by_basename[key_basename] = m
+        azura_artist = m.get('artist', '') or ''
+        azura_title = m.get('title', '') or ''
+        if azura_artist and azura_title:
+            key_at = normaliser_pour_recherche(f"{azura_artist} - {azura_title}")
+            if key_at and key_at not in index_by_artist_title:
+                index_by_artist_title[key_at] = m
+
+    logger(tache_id, f"Index construit: {len(index_by_basename)} par basename, "
+                     f"{len(index_by_artist_title)} par artist+title")
+
+    # ── 3. Boucle de traitement : résolution + retrait + re-fetch ──
+    #        On accumule les mises à jour de flag pour les faire en batch à la fin.
+    updates_flag = []  # liste de tuples (song_id, nouveau_flag)
+    nb_ok = 0          # retraits effectifs
+    nb_no_change = 0   # déjà absent de la playlist
+    nb_non_resolus = 0 # media_id introuvable
+    nb_erreurs = 0     # erreurs API/autre pendant le retrait
+
+    for i, song_id in enumerate(song_ids_int, start=1):
+        song = songs_map.get(song_id)
+        if not song:
+            logger(tache_id, f"[{i}/{total}] song_id={song_id} — introuvable en base, ignoré")
+            nb_non_resolus += 1
+            continue
+
+        artist = song['artist']
+        title = song['title']
+        song_path = song['path']
+
+        # Résolution media_id
+        media_trouve = None
+        methode_match = None
+
+        # Passe 1 : basename exact
+        basename_radiodj = song_path.rsplit('\\', 1)[-1] if '\\' in song_path else song_path.rsplit('/', 1)[-1]
+        key_b = basename_radiodj.lower().strip()
+        if key_b:
+            m = index_by_basename.get(key_b)
+            if m is not None:
+                media_trouve = m
+                methode_match = 'path_exact'
+
+        # Passe 2 : artist+title normalisé
+        if media_trouve is None and artist and title:
+            key_at = normaliser_pour_recherche(f"{artist} - {title}")
+            if key_at:
+                m = index_by_artist_title.get(key_at)
+                if m is not None:
+                    media_trouve = m
+                    methode_match = 'artist_title_normalized'
+
+        if media_trouve is None:
+            logger(tache_id, f"[{i}/{total}] song_id={song_id} — NON résolu "
+                             f"({artist} - {title})")
+            nb_non_resolus += 1
+            continue
+
+        media_id = media_trouve.get('id')
+        if not media_id:
+            logger(tache_id, f"[{i}/{total}] song_id={song_id} — media_id vide, ignoré")
+            nb_non_resolus += 1
+            continue
+
+        # Appel API : retirer le média de la playlist
+        try:
+            result = api.remove_media_from_playlist(media_id, playlist_id)
+            if isinstance(result, dict) and result.get('status') == 'no_change':
+                logger(tache_id, f"[{i}/{total}] song_id={song_id} (media {media_id}) — "
+                                 f"aucun changement ({result.get('message', '')})")
+                nb_no_change += 1
+            else:
+                logger(tache_id, f"[{i}/{total}] song_id={song_id} (media {media_id}) — "
+                                 f"retiré de la playlist {playlist_id} "
+                                 f"[match: {methode_match}]")
+                nb_ok += 1
+        except AzuraCastAPIError as e:
+            logger(tache_id, f"[{i}/{total}] song_id={song_id} (media {media_id}) — "
+                             f"ERREUR API retrait: {e}")
+            nb_erreurs += 1
+            continue
+        except Exception as e:
+            logger(tache_id, f"[{i}/{total}] song_id={song_id} (media {media_id}) — "
+                             f"ERREUR inattendue retrait: {type(e).__name__}: {e}")
+            nb_erreurs += 1
+            continue
+
+        # Re-fetch du média pour vérifier les playlists restantes (vraie liste API)
+        try:
+            media_apres = api.get_media(media_id)
+            real_playlists = []
+            for p in media_apres.get('playlists', []):
+                if isinstance(p, dict):
+                    pid = p.get('id')
+                    if pid is not None:
+                        real_playlists.append(int(pid))
+                elif isinstance(p, int):
+                    real_playlists.append(p)
+            if real_playlists:
+                nouveau_flag = f'AZURA_ACTIVE_S{station_id}'
+                logger(tache_id, f"         → encore dans {len(real_playlists)} playlist(s): {real_playlists}")
+            else:
+                nouveau_flag = f'AZURA_RETIRED_S{station_id}'
+                logger(tache_id, f"         → plus dans aucune playlist")
+            updates_flag.append((song_id, nouveau_flag))
+        except AzuraCastAPIError as e:
+            logger(tache_id, f"         → [WARN] re-fetch impossible: {e} (flag non mis à jour)")
+        except Exception as e:
+            logger(tache_id, f"         → [WARN] re-fetch inattendu: {type(e).__name__}: {e}")
+
+    logger(tache_id, f"Boucle terminée — OK: {nb_ok}, no_change: {nb_no_change}, "
+                     f"non résolus: {nb_non_resolus}, erreurs: {nb_erreurs}")
+
+    # ── 4. Mise à jour BATCH des flags RadioDJ ──
+    if updates_flag:
+        try:
+            db = pymysql.connect(**DB_CONFIG)
+            cursor = db.cursor()
+            for song_id, flag in updates_flag:
+                try:
+                    cursor.execute(
+                        "UPDATE radiodb.songs SET comments = %s WHERE ID = %s",
+                        (flag, song_id)
+                    )
+                except Exception as e:
+                    logger(tache_id, f"[WARN] maj flag song {song_id} → {flag} échoué: {e}")
+            db.commit()
+            cursor.close()
+            db.close()
+            logger(tache_id, f"[OK] {len(updates_flag)} flag(s) RadioDJ mis à jour (batch)")
+        except Exception as e:
+            logger(tache_id, f"[ERREUR] maj batch flags RadioDJ: {e}")
+    else:
+        logger(tache_id, "Aucun flag RadioDJ à mettre à jour.")
+
+    # ── 5. Récapitulatif final ──
+    logger(tache_id, "=== RÉCAPITULATIF ===")
+    logger(tache_id, f"Titres traités: {total}")
+    logger(tache_id, f"Retraits effectifs: {nb_ok}")
+    logger(tache_id, f"Aucun changement: {nb_no_change}")
+    logger(tache_id, f"Médias non résolus: {nb_non_resolus}")
+    logger(tache_id, f"Erreurs: {nb_erreurs}")
+    logger(tache_id, f"Flags mis à jour: {len(updates_flag)}")
+    logger(tache_id, "=== TERMINÉ === (succès)")
 
 
 def executer_suspect_reject(tache_id, parametres):
@@ -7259,7 +7683,9 @@ def main():
                 "    'SHAZAM_SYNC_SHEET', 'SYNC_VPS_SOUMISSIONS', 'SYNC_VPS_SHAZAM_EXT', "
                 "    'IMPORT_MASSE', 'SUSPECT_REJECT', "
                 "    'AZURA_REMOVE_FROM_PLAYLIST', "  # Phase 1 — module Rotation éditoriale
-                "    'GET_MEDIA_PLAYLISTS') "  # Phase 1 améliorée — dropdown playlists
+                "    'AZURA_REMOVE_FROM_PLAYLIST_BATCH', "  # Phase 2 — retrait batch
+                "    'GET_MEDIA_PLAYLISTS', "  # Phase 1 améliorée — dropdown playlists
+                "    'GET_BATCH_MEDIA_PLAYLISTS') "  # Phase 1.5 — affichage playlists push preview
                 "ORDER BY id ASC LIMIT 1"
             )
             cursor.execute(query)
@@ -7340,8 +7766,12 @@ def main():
                             raise RuntimeError("Module import_masse.py non disponible")
                     elif type_action == 'AZURA_REMOVE_FROM_PLAYLIST':
                         executer_azura_remove_from_playlist(tache_id, parametres)
+                    elif type_action == 'AZURA_REMOVE_FROM_PLAYLIST_BATCH':
+                        executer_azura_remove_from_playlist_batch(tache_id, parametres)
                     elif type_action == 'GET_MEDIA_PLAYLISTS':
                         executer_get_media_playlists(tache_id, parametres)
+                    elif type_action == 'GET_BATCH_MEDIA_PLAYLISTS':
+                        executer_get_batch_media_playlists(tache_id, parametres)
                     elif type_action == 'SUSPECT_REJECT':
                         executer_suspect_reject(tache_id, parametres)
                     else:
