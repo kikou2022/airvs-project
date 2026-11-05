@@ -2709,8 +2709,12 @@ function populatePushPreviewFromShazam(found, notFound, apiData) {
                 + '</tr>';
             pushPreviewBody.innerHTML += row;
         });
-        pushSelectAll.checked = true;
-        pushSelectAllBottom.checked = true;
+        // Phase 17.1 — sécurité (remarque test 06/11/2026) : plus de pré-cochage
+        // massif à l'affichage de la prévisualisation. La sélection démarre vide ;
+        // les actions de masse (dont Supprimer) redeviennent opt-in via les cases
+        // ou « Tout sélectionner ».
+        pushSelectAll.checked = false;
+        pushSelectAllBottom.checked = false;
         synchroniserPushSelectAll(pushSelectAll);
     }
 
@@ -2821,8 +2825,12 @@ function populatePushPreviewFromAnimateurs(found, notFound, apiData) {
                 + '</tr>';
             pushPreviewBody.innerHTML += row;
         });
-        pushSelectAll.checked = true;
-        pushSelectAllBottom.checked = true;
+        // Phase 17.1 — sécurité (remarque test 06/11/2026) : plus de pré-cochage
+        // massif à l'affichage de la prévisualisation. La sélection démarre vide ;
+        // les actions de masse (dont Supprimer) redeviennent opt-in via les cases
+        // ou « Tout sélectionner ».
+        pushSelectAll.checked = false;
+        pushSelectAllBottom.checked = false;
         synchroniserPushSelectAll(pushSelectAll);
     }
 
@@ -3076,8 +3084,12 @@ btnPreview.addEventListener('click', function() {
             activeBuffer._previewWrapperDisplay = 'block';
         }
 
-        pushSelectAll.checked = true;
-        pushSelectAllBottom.checked = true;
+        // Phase 17.1 — sécurité (remarque test 06/11/2026) : plus de pré-cochage
+        // massif à l'affichage de la prévisualisation. La sélection démarre vide ;
+        // les actions de masse (dont Supprimer) redeviennent opt-in via les cases
+        // ou « Tout sélectionner ».
+        pushSelectAll.checked = false;
+        pushSelectAllBottom.checked = false;
         synchroniserPushSelectAll(pushSelectAll);
     })
     .catch(function() {

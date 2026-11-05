@@ -4980,7 +4980,7 @@
 <!-- PHASE 3 - Étape 3/5 : pont-player (player, archives, flux, spectrum, lecteur) -->
 <script src="/static/js/modules/stats-audience.js?v=1"></script>
 <!-- PHASE 3 - Étape 4/5 : stats-audience (onglet Audience, stats agrégées) -->
-<script src="/static/js/modules/sync-azuracast.js?v=8"></script>
+<script src="/static/js/modules/sync-azuracast.js?v=9"></script>
 <!-- PHASE 3 - Étape 4c : sync-azuracast (sync, action panel, push, bulk schedule) — v6 : scrollToPushPlaylists() + btn_push_envoyer masqué -->
 <script src="/static/js/modules/couleur.js?v=1"></script>
 <!-- PHASE 3 - Étape 4c : couleur (programmation couleur, grille, dry-run, historique, stats) -->
@@ -5456,9 +5456,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 pushPreviewBody.innerHTML += row;
             });
 
-            // Sélectionner tout par défaut
-            pushSelectAll.checked = true;
-            pushSelectAllBottom.checked = true;
+            // Phase 17.1 — sécurité (remarque test 06/11/2026) : plus de
+            // pré-cochage massif à l'affichage. Sélection vide par défaut,
+            // actions de masse (dont Supprimer) en opt-in.
+            pushSelectAll.checked = false;
+            pushSelectAllBottom.checked = false;
             synchroniserPushSelectAll(pushSelectAll);
         }
 
