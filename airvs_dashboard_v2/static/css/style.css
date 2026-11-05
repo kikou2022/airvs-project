@@ -126,33 +126,6 @@ body {
     background-color: #dc3545 !important;
 }
 
-/* ── Badges AzuraCast (Phase 0 — flags AZURA_*_S6_S7) ── */
-.badge-azura {
-    display: inline-block;
-    background: #0dcaf0;
-    color: #000;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 0.7em;
-    font-weight: bold;
-}
-.badge-azura-push {
-    background: #dbeafe;
-    color: #1e40af;
-}
-.badge-azura-active {
-    background: #dcfce7;
-    color: #166534;
-}
-.badge-azura-retired {
-    background: #fed7aa;
-    color: #9a3412;
-}
-.badge-azura-removed {
-    background: #fecaca;
-    color: #991b1b;
-}
-
 /* ── Formulaires ── */
 .form-control:focus,
 .form-select:focus {
@@ -247,6 +220,46 @@ body {
 .action-btn[data-in-azura="false"]:hover {
     background-color: #6f42c1;
     color: #fff;
+}
+
+/* ── Split-button (option A) : fusion badge AzuraCast + bouton d'action ──
+   Deux boutons côte à côte : [action principale] [▾ panneau complet].
+   L'état AzuraCast est porté par la couleur + l'icône du bouton principal,
+   ce qui supprime la colonne badge-azura séparée. */
+.action-split {
+    display: inline-flex;
+    align-items: stretch;
+}
+
+.action-split .action-btn {
+    border-radius: 4px !important;
+    /* Désactiver le scale au hover (sinon chaque bouton grossit individuellement
+       et la bordure commune se déchire). On garde un effet plus discret. */
+    transform: none !important;
+}
+
+.action-split .action-btn-main {
+    border-top-right-radius: 0 !important;
+    border-bottom-right-radius: 0 !important;
+    margin-right: -1px;  /* Éviter la double-bordure entre les deux boutons */
+    padding: 0.15rem 0.45rem !important;
+    font-size: 0.72rem !important;
+    white-space: nowrap;
+}
+
+.action-split .action-btn-more {
+    border-top-left-radius: 0 !important;
+    border-bottom-left-radius: 0 !important;
+    min-width: 22px;
+    padding: 0.15rem 0.3rem !important;
+    font-size: 0.72rem !important;
+    font-weight: bold;
+    line-height: 1.2 !important;
+}
+
+.action-split .action-btn-main:hover,
+.action-split .action-btn-more:hover {
+    box-shadow: 0 1px 4px rgba(0,0,0,0.12);
 }
 
 /* Variante btn-outline-purple (classe personnalisée) */

@@ -555,9 +555,11 @@ let actionTrack = null;
 let actionLogInterval = null;
 
 // Ouvrir le panneau d'action au clic sur un bouton d'action
+// (split-button option A : .action-btn-main = action directe, .action-btn-more = panneau complet)
 document.addEventListener('click', function(e) {
     let btn = e.target.closest('.action-btn');
     if (!btn) return;
+    let isMore = btn.classList.contains('action-btn-more');
     actionTrack = {
         ID: btn.dataset.id,
         artist: btn.dataset.artist,
@@ -568,17 +570,15 @@ document.addEventListener('click', function(e) {
     document.getElementById('action_track_label').textContent = actionTrack.artist + ' — ' + actionTrack.title;
     if (actionTrack.inAzura) {
         document.getElementById('action_track_badge').innerHTML = AzuraFlags.getBadgeHTML(actionTrack.comments || 'AZURA_PUSHED_S6_S7');
-        // Refactoring UI unifié V3 : le panneau « Ajouter PLS » est affiché via showActionPanel()
-        // (les onglets Bootstrap #actionTabs ont été remplacés par le pattern panneau dynamique).
-        if (typeof showActionPanel === 'function') {
-            showActionPanel('ajouter');
-        }
     } else {
         document.getElementById('action_track_badge').textContent = '(pas encore dans AzuraCast)';
-        // Refactoring UI unifié V3 : le panneau « Copier » est affiché via showActionPanel().
-        if (typeof showActionPanel === 'function') {
-            showActionPanel('copier');
-        }
+    }
+    // Onglet auto-sélectionné : seulement sur le bouton principal (data-action-tab),
+    // pas sur le chevron ▾ qui ouvre le panneau sans changer d'onglet.
+    // Valeurs : 'copier' (titre pas encore dans AzuraCast) | 'ajouter' (déjà dans AzuraCast).
+    let targetPanel = btn.dataset.actionTab;
+    if (!isMore && targetPanel && typeof showActionPanel === 'function') {
+        showActionPanel(targetPanel);
     }
     document.getElementById('explorer_action_panel').style.display = 'block';
     document.getElementById('explorer_action_panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -825,6 +825,77 @@ function showPlaylistDropdown(result, songId, stationId, fetchTaskId) {
 
 // Exposer la fonction globalement pour le onclick HTML
 window.retirerTitrePlaylistAzura = retirerTitrePlaylistAzura;
+
+
+// ════════════════════════════════════════════════════════════════════════
+// PHASE 3 — Suppression définitive d'un titre d'AzuraCast
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * Phase 3 — Supprime définitivement un titre d'AzuraCast.
+ * Demande confirmation, puis appelle l'API DELETE /api/azura/media/<song_id>/delete.
+ */
+function supprimerTitreAzuraCast() {
+    if (!actionTrack || !actionTrack.inAzura) {
+        alert('Ce titre n\'est pas dans AzuraCast, impossible de le supprimer.');
+        return;
+    }
+
+    var stationId = getActionStationId();
+    var songId = actionTrack.ID;
+
+    if (!confirm(
+        '⚠️ SUPPRESSION DÉFINITIVE ⚠️\n\n' +
+        'Titre : ' + (actionTrack.artist || '?') + ' - ' + (actionTrack.title || '?') + '\n' +
+        'Station : ' + stationId + '\n' +
+        'Song ID : ' + songId + '\n\n' +
+        'Le fichier sera SUPPRIMÉ d\'AzuraCast :\n' +
+        '• Fichier physique supprimé\n' +
+        '• Entrée DB supprimée\n' +
+        '• Associations playlists supprimées\n\n' +
+        'RadioDJ n\'est PAS affecté — le fichier source reste intact.\n' +
+        'Le flag passera à AZURA_REMOVED_S' + stationId + '.\n\n' +
+        'Cette action est IRRÉVERSIBLE côté AzuraCast.\n\n' +
+        'Confirmer la suppression ?'
+    )) return;
+
+    var resultArea = document.getElementById('supprimer_result_area');
+    if (resultArea) {
+        resultArea.innerHTML = '<div class="alert alert-info py-2 small">⏳ Suppression en cours...</div>';
+    }
+
+    fetch('/api/azura/media/' + encodeURIComponent(songId) + '/delete', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ station_id: stationId })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.status === 'ok') {
+            if (resultArea) {
+                resultArea.innerHTML = '<div class="alert alert-success py-2 small">' +
+                    '✅ Tâche de suppression créée (ID ' + data.task_id + ')<br>' +
+                    'Station : ' + data.station_id + '<br>' +
+                    '⏳ Le worker va traiter la suppression...</div>';
+            }
+            // Surveiller le journal d'action
+            if (typeof surveillerActionLog === 'function') {
+                surveillerActionLog(data.task_id, []);
+            }
+        } else {
+            if (resultArea) {
+                resultArea.innerHTML = '<div class="alert alert-danger py-2 small">❌ Erreur : ' + (data.message || 'réponse inattendue') + '</div>';
+            }
+        }
+    })
+    .catch(function(err) {
+        if (resultArea) {
+            resultArea.innerHTML = '<div class="alert alert-danger py-2 small">❌ Erreur réseau : ' + err.message + '</div>';
+        }
+    });
+}
+
+window.supprimerTitreAzuraCast = supprimerTitreAzuraCast;
 
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1099,10 +1170,10 @@ window.showPanel = showPanel;
  * showActionPanel(name) — Explorateur action panel
  *
  * Active un seul panneau parmi #action-panel-copier / #action-panel-ajouter /
- * #action-panel-retirer dans #action_dynamic_panel. Tous les autres panneaux
- * sont désactivés.
+ * #action-panel-retirer / #action-panel-supprimer dans #action_dynamic_panel.
+ * Tous les autres panneaux sont désactivés.
  *
- * @param {string} name — 'copier' | 'ajouter' | 'retirer'
+ * @param {string} name — 'copier' | 'ajouter' | 'retirer' | 'supprimer'
  */
 function showActionPanel(name) {
     document.querySelectorAll('#action_dynamic_panel .dynamic-panel').forEach(function(p) {
