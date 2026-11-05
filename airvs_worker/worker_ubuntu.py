@@ -2107,6 +2107,129 @@ def executer_azura_remove_from_playlist(tache_id, parametres):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# PHASE 3 — Suppression définitive d'un média AzuraCast
+# ═══════════════════════════════════════════════════════════════════════
+
+def executer_azura_delete_media(tache_id, parametres):
+    """
+    Phase 3 — Supprime un média d'AzuraCast (fichier + DB + associations).
+
+    Workflow :
+    1. Résoudre song_id_radiodj → media_id AzuraCast (path_exact puis artist_title)
+    2. Appeler api.delete_media(media_id) → DELETE /station/{id}/file/{media_id}
+    3. Mettre à jour le flag RadioDJ → AZURA_REMOVED_S{station_id}
+    """
+    song_id_radiodj = parametres.get('song_id_radiodj')
+    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+
+    if not song_id_radiodj:
+        logger(tache_id, "ERREUR: song_id_radiodj obligatoire.")
+        logger(tache_id, "=== TERMINÉ === (paramètres manquants)")
+        return
+
+    try:
+        station_id = int(station_id)
+    except (ValueError, TypeError):
+        station_id = _DEFAULT_STATION_ID
+
+    logger(tache_id, f"=== DÉBUT SUPPRESSION MÉDIA ===")
+    logger(tache_id, f"Song RadioDJ ID: {song_id_radiodj}")
+    logger(tache_id, f"Station: {station_id}")
+
+    api = get_azura_api(station_id)
+    if not api:
+        logger(tache_id, "ERREUR FATALE: Module azuracast_api non disponible.")
+        logger(tache_id, "=== TERMINÉ === (module API indisponible)")
+        return
+
+    try:
+        # 1. Lire le song RadioDJ pour résoudre media_id
+        db = pymysql.connect(**DB_CONFIG)
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            "SELECT ID, artist, title, `path` FROM radiodb.songs WHERE ID = %s",
+            (song_id_radiodj,)
+        )
+        song = cursor.fetchone()
+        cursor.close()
+        db.close()
+
+        if not song:
+            logger(tache_id, f"ERREUR: Song RadioDJ {song_id_radiodj} introuvable.")
+            logger(tache_id, "=== TERMINÉ === (song introuvable)")
+            return
+
+        artist = song.get('artist', '') or ''
+        title = song.get('title', '') or ''
+        song_path = song.get('path', '') or ''
+        logger(tache_id, f"Song RadioDJ: {artist} - {title}")
+
+        # 2. Résoudre media_id via list_media (1 appel)
+        all_media = api.list_media()
+        rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
+        logger(tache_id, f"Recherche dans {len(rows)} médias AzuraCast...")
+
+        basename_radiodj = song_path.rsplit('\\', 1)[-1] if '\\' in song_path else song_path.rsplit('/', 1)[-1]
+        basename_lower = basename_radiodj.lower().strip()
+
+        media_id = None
+
+        # Passe 1 : path_exact
+        for m in rows:
+            azura_path = m.get('path', '') or ''
+            basename_azura = azura_path.rsplit('/', 1)[-1] if '/' in azura_path else azura_path
+            if basename_azura.lower().strip() == basename_lower:
+                media_id = m.get('id')
+                logger(tache_id, f"[OK] media_id trouvé (path_exact): {media_id}")
+                break
+
+        # Passe 2 : artist_title_normalized
+        if not media_id and artist and title:
+            cle_radiodj = normaliser_pour_recherche(f"{artist} - {title}")
+            for m in rows:
+                azura_artist = m.get('artist', '') or ''
+                azura_title = m.get('title', '') or ''
+                if azura_artist and azura_title:
+                    cle_azura = normaliser_pour_recherche(f"{azura_artist} - {azura_title}")
+                    if cle_radiodj == cle_azura:
+                        media_id = m.get('id')
+                        logger(tache_id, f"[OK] media_id trouvé (artist_title): {media_id}")
+                        break
+
+        if not media_id:
+            logger(tache_id, f"ERREUR: Aucun média AzuraCast trouvé pour '{artist} - {title}'")
+            logger(tache_id, "=== TERMINÉ === (media_id non résolu)")
+            return
+
+        # 3. Supprimer le média via API AzuraCast
+        logger(tache_id, f"Suppression du média {media_id} sur station {station_id}...")
+        api.delete_media(media_id)
+        logger(tache_id, f"[OK] Média {media_id} supprimé d'AzuraCast")
+
+        # 4. Mettre à jour le flag RadioDJ → AZURA_REMOVED_S{station_id}
+        db = pymysql.connect(**DB_CONFIG)
+        cursor = db.cursor()
+        nouveau_flag = f'AZURA_REMOVED_S{station_id}'
+        cursor.execute(
+            "UPDATE radiodb.songs SET comments = %s WHERE ID = %s",
+            (nouveau_flag, song_id_radiodj)
+        )
+        db.commit()
+        cursor.close()
+        db.close()
+        logger(tache_id, f"[OK] Flag RadioDJ mis à jour : {nouveau_flag} (song ID {song_id_radiodj})")
+
+        logger(tache_id, "=== TERMINÉ === (succès)")
+
+    except AzuraCastAPIError as e:
+        logger(tache_id, f"[ERREUR API] {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur API)")
+    except Exception as e:
+        logger(tache_id, f"[ERREUR INATTENDUE] {type(e).__name__}: {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur)")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # PHASE 1 (améliorée) — Lister les playlists d'un média pour le dropdown
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -7685,7 +7808,8 @@ def main():
                 "    'AZURA_REMOVE_FROM_PLAYLIST', "  # Phase 1 — module Rotation éditoriale
                 "    'AZURA_REMOVE_FROM_PLAYLIST_BATCH', "  # Phase 2 — retrait batch
                 "    'GET_MEDIA_PLAYLISTS', "  # Phase 1 améliorée — dropdown playlists
-                "    'GET_BATCH_MEDIA_PLAYLISTS') "  # Phase 1.5 — affichage playlists push preview
+                "    'GET_BATCH_MEDIA_PLAYLISTS', "  # Phase 1.5 — affichage playlists push preview
+                "    'AZURA_DELETE_MEDIA') "  # Phase 3 — suppression définitive d'un média
                 "ORDER BY id ASC LIMIT 1"
             )
             cursor.execute(query)
@@ -7768,6 +7892,8 @@ def main():
                         executer_azura_remove_from_playlist(tache_id, parametres)
                     elif type_action == 'AZURA_REMOVE_FROM_PLAYLIST_BATCH':
                         executer_azura_remove_from_playlist_batch(tache_id, parametres)
+                    elif type_action == 'AZURA_DELETE_MEDIA':
+                        executer_azura_delete_media(tache_id, parametres)
                     elif type_action == 'GET_MEDIA_PLAYLISTS':
                         executer_get_media_playlists(tache_id, parametres)
                     elif type_action == 'GET_BATCH_MEDIA_PLAYLISTS':
