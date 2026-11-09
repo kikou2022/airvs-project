@@ -850,7 +850,7 @@ def lancer_push_azura():
                 for _p in _paths_deja:
                     cursor.execute(
                         "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' "
-                        "WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
+                        "WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments = '' OR comments = 'IN_AZURACAST')",
                         (_p, _p.replace('/', '\\'))
                     )
                     _upd_deja += cursor.rowcount
@@ -1010,7 +1010,7 @@ def lire_log_push():
                     if not _eligible:
                         continue
                     cursor.execute(
-                        "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
+                        "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments = '' OR comments = 'IN_AZURACAST')",
                         (fpath, fpath.replace('/', '\\'))
                     )
                     if cursor.rowcount > 0:
@@ -1199,7 +1199,7 @@ def api_marquer_in_azuracast():
         # Marquer par chemin de fichier
         for chemin in fichiers:
             cursor.execute(
-                "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE `path` = %s AND (comments IS NULL OR comments = '' OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
+                "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE `path` = %s AND (comments IS NULL OR comments = '' OR comments = 'IN_AZURACAST')",
                 (chemin,)
             )
             updated += cursor.rowcount
@@ -1207,7 +1207,7 @@ def api_marquer_in_azuracast():
         # Marquer par ID
         for sid in ids:
             cursor.execute(
-                "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE ID = %s AND (comments IS NULL OR comments = '' OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
+                "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE ID = %s AND (comments IS NULL OR comments = '' OR comments = 'IN_AZURACAST')",
                 (sid,)
             )
             updated += cursor.rowcount
@@ -2202,7 +2202,7 @@ def _diagnostic_flux_editorial_data():
                 "FROM airvs_animateurs a "
                 "JOIN songs s ON s.ID = a.match_song_id "
                 "WHERE a.statut = 'pousse_azura' "
-                "  AND (s.comments IS NULL OR s.comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%') "
+                "  AND (s.comments IS NULL OR s.comments = '' OR s.comments = 'IN_AZURACAST') "
                 "LIMIT 20"
             )
             data['incoherences']['badge_non_conforme'] = \

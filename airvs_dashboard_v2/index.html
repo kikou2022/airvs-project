@@ -352,6 +352,18 @@
            Le panneau actif reçoit la classe .active (display:block). */
         .dynamic-panel { display: none; padding: 16px; border: 1px solid #e2e8f0; border-top: none; background: #fff; }
         .dynamic-panel.active { display: block; }
+
+        /* ── Phase 18 (V5) : section playlists intégrée au panneau Copier ──
+           Le bloc playlists (#push_pls_bloc) est UNIQUE et partagé entre les
+           panneaux Copier et Ajouter : showPanel() le déplace (appendChild)
+           dans la zone du panneau actif — même état des deux côtés. */
+        .pls-section {
+            background: #f8fafc;
+            border: 1px dashed #cbd5e1;
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-top: 12px;
+        }
     </style>
 </head>
 <body>
@@ -2885,21 +2897,28 @@
                                             onclick="showPanel('supprimer')">🗑️ Supprimer</button>
                                     <small class="ms-auto" id="push_count" style="color:#cbd5e1;">0 fichier(s)</small>
                                 </div>
-                            <!-- ═══ Panneau dynamique (refactoring UI unifié V3 + Phase 17) ═══
+                            <!-- ═══ Panneau dynamique (refactoring UI unifié V3 + Phase 17 + Phase 18/V5) ═══
                                  Contient 4 sous-panneaux .dynamic-panel :
-                                   - #panel-copier    : Dossier cible + bouton « 🚀 Copier vers AzuraCast »
-                                   - #panel-ajouter   : Playlists cibles + nouvelle playlist + bouton « ➕ Ajouter aux playlists »
+                                   - #panel-copier    : V5 — envoi COMBINÉ restauré : dossier cible + playlists
+                                                       (section .pls-section), une seule action. C'est l'ancien
+                                                       bouton « 🚀 Envoyer » d'avant la barre sticky, en panneau
+                                                       contextuel. Bouton #btn_push_copier_go à libellé dynamique.
+                                   - #panel-ajouter   : V5 — ajout playlist seul, avec transparence sur la copie
+                                                       éventuelle (compteurs déjà-AzuraCast / à copier + rappel
+                                                       du dossier, modifiable en 1 clic vers le panneau Copier).
                                    - #panel-retirer   : contenu généré par retirerSelectionPlaylistAzura()
                                                        dans #panel-retirer-content
                                    - #panel-supprimer : Phase 17 — suppression définitive batch avec double
                                                        confirmation (case + bouton), liste injectée par
                                                        remplirPanelSupprimer() dans #panel-supprimer-content
-                                 La fonction showPanel(name) active le bon panneau via la classe .active.
-                                 Tous les IDs internes (push_dossier_cible, push_playlist_container,
+                                 La fonction showPanel(name) active le bon panneau via la classe .active et
+                                 DÉPLACE le bloc playlists unique (#push_pls_bloc) vers la zone du panneau
+                                 actif (#copier_pls_zone ou #ajouter_pls_zone) — état partagé, aucune
+                                 duplication. Tous les IDs internes (push_dossier_cible, push_playlist_container,
                                  btn_add_push_playlist, push_new_folder_name, push_new_playlist_name,
                                  push_playlist_type, push_playlist_order, etc.) sont préservés. -->
                             <div id="dynamic_action_panel" class="mt-2">
-                                <!-- PANNEAU : Copier (Dossier cible + bouton d'envoi) -->
+                                <!-- PANNEAU : Copier (V5 — envoi combiné : dossier cible + playlists, une seule action) -->
                                 <div class="dynamic-panel" id="panel-copier">
                                     <div class="row g-2 align-items-end">
                                         <div class="col-md-4">
@@ -2911,53 +2930,90 @@
                                                 <input type="text" class="form-control form-control-sm"
                                                        id="push_new_folder_name" placeholder="ex: NOUVELLES_ENTREES/mon_dossier">
                                             </div>
+                                            <div class="form-text small">💡 Dernier dossier utilisé, mémorisé d'une session à l'autre (défaut usine : imports_push)</div>
                                         </div>
                                         <div class="col-md-3">
-                                            <button class="btn btn-success btn-sm w-100"
+                                            <button class="btn btn-success btn-sm w-100" id="btn_push_copier_go"
                                                     onclick="document.getElementById('btn_push_envoyer').click()">🚀 Copier vers AzuraCast</button>
                                         </div>
                                     </div>
+                                    <!-- Phase 18 (V5) : section playlists intégrée — le bouton adapte son libellé
+                                         (« 🚀 Copier vers AzuraCast » ou « 🚀 Copier + Ajouter aux N PLS »). -->
+                                    <div class="pls-section">
+                                        <label class="form-label small fw-bold mb-2">
+                                            🎵 Et ajouter aux playlists <span class="text-muted fw-normal">(optionnel — laisser vide pour une copie seule)</span> :
+                                        </label>
+                                        <div id="copier_pls_zone">
+                                            <!-- ═══ BLOC PLAYLISTS UNIQUE (V5 — état partagé Copier ⇄ Ajouter) ═══
+                                                 Déplacé dans #ajouter_pls_zone par showPanel('ajouter'), ramené ici
+                                                 par showPanel('copier'). Les lignes choisies sont conservées d'un
+                                                 panneau à l'autre (aucune ressaisie). -->
+                                            <div id="push_pls_bloc">
+                                                <div id="push_playlist_container">
+                                                    <!-- Lignes ajoutées dynamiquement par JS -->
+                                                </div>
+                                                <button type="button" class="btn btn-outline-primary btn-sm mt-1" id="btn_add_push_playlist">
+                                                    ➕ Ajouter une playlist
+                                                </button>
+                                                <div class="row g-2 align-items-end mt-2">
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small fw-bold">Ou nouvelle playlist :</label>
+                                                        <input type="text" class="form-control form-control-sm"
+                                                               id="push_new_playlist_name" placeholder="(optionnel)">
+                                                    </div>
+                                                    <div class="col-md-2" id="push_new_playlist_type_col" style="display:none">
+                                                        <label class="form-label small fw-bold">Type :</label>
+                                                        <select class="form-select form-select-sm" id="push_playlist_type">
+                                                            <option value="default">Standard</option>
+                                                            <option value="once_per_x_songs">1/X titres</option>
+                                                            <option value="once_per_x_minutes">1/X min</option>
+                                                            <option value="once_per_hour">1/heure</option>
+                                                            <option value="custom">Avancée</option>
+                                                        </select>
+                                                    </div>
+                                                    <div class="col-md-2" id="push_new_playlist_order_col" style="display:none">
+                                                        <label class="form-label small fw-bold">Lecture :</label>
+                                                        <select class="form-select form-select-sm" id="push_playlist_order">
+                                                            <option value="shuffle">Aléatoire</option>
+                                                            <option value="sequential">Séquentiel</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <small class="text-muted d-block mt-2">
+                                            ℹ️ Un récapitulatif complet (dossier + playlists + fichiers à copier / déjà présents) est présenté avant l'envoi.
+                                        </small>
+                                    </div>
                                 </div>
 
-                                <!-- PANNEAU : Ajouter (Playlists cibles + nouvelle playlist + bouton d'envoi) -->
+                                <!-- PANNEAU : Ajouter (V5 — ajout playlist seul, transparence sur le dossier de copie éventuel) -->
                                 <div class="dynamic-panel" id="panel-ajouter">
-                                    <div class="mt-2">
+                                    <div class="alert alert-info py-2 small mb-3">
+                                        <i class="bi bi-info-circle"></i>
+                                        <strong><span data-count-deja>0</span> titre(s)</strong> déjà dans AzuraCast → ajout direct aux playlists.
+                                        <strong><span data-count-nonazura>0</span> titre(s)</strong> non présent(s) → ils seront d'abord copiés vers
+                                        « <strong id="push_rappel_dossier">imports_push</strong> »
+                                        (<a href="#" onclick="showPanel('copier'); return false;">changer le dossier</a>).
+                                    </div>
+                                    <div class="mb-2">
                                         <label class="form-label small fw-bold">🎵 Playlists cibles :</label>
-                                        <div id="push_playlist_container">
-                                            <!-- Lignes ajoutées dynamiquement par JS -->
+                                        <div id="ajouter_pls_zone">
+                                            <!-- Le bloc playlists (#push_pls_bloc) est DÉPLACÉ ici quand ce panneau
+                                                 est actif (même état que le panneau Copier : vos lignes choisies
+                                                 sont conservées). -->
                                         </div>
-                                        <button type="button" class="btn btn-outline-primary btn-sm mt-1" id="btn_add_push_playlist">
-                                            ➕ Ajouter une playlist
-                                        </button>
                                     </div>
                                     <div class="row g-2 align-items-end mt-2">
-                                        <div class="col-md-3">
-                                            <label class="form-label small fw-bold">Ou nouvelle playlist :</label>
-                                            <input type="text" class="form-control form-control-sm"
-                                                   id="push_new_playlist_name" placeholder="(optionnel)">
-                                        </div>
-                                        <div class="col-md-2" id="push_new_playlist_type_col" style="display:none">
-                                            <label class="form-label small fw-bold">Type :</label>
-                                            <select class="form-select form-select-sm" id="push_playlist_type">
-                                                <option value="default">Standard</option>
-                                                <option value="once_per_x_songs">1/X titres</option>
-                                                <option value="once_per_x_minutes">1/X min</option>
-                                                <option value="once_per_hour">1/heure</option>
-                                                <option value="custom">Avancée</option>
-                                            </select>
-                                        </div>
-                                        <div class="col-md-2" id="push_new_playlist_order_col" style="display:none">
-                                            <label class="form-label small fw-bold">Lecture :</label>
-                                            <select class="form-select form-select-sm" id="push_playlist_order">
-                                                <option value="shuffle">Aléatoire</option>
-                                                <option value="sequential">Séquentiel</option>
-                                            </select>
-                                        </div>
                                         <div class="col-md-3">
                                             <button class="btn btn-primary btn-sm w-100"
                                                     onclick="document.getElementById('btn_push_envoyer').click()">➕ Ajouter aux playlists</button>
                                         </div>
                                     </div>
+                                    <p class="small text-muted mt-2 mb-0">
+                                        ℹ️ C'est le même bloc playlists que le panneau 🚀 Copier : ce que vous avez
+                                        choisi d'un côté est retrouvé de l'autre — aucune ressaisie.
+                                    </p>
                                 </div>
 
                                 <!-- PANNEAU : Retirer (contenu généré dynamiquement par retirerSelectionPlaylistAzura())
@@ -4980,7 +5036,7 @@
 <!-- PHASE 3 - Étape 3/5 : pont-player (player, archives, flux, spectrum, lecteur) -->
 <script src="/static/js/modules/stats-audience.js?v=1"></script>
 <!-- PHASE 3 - Étape 4/5 : stats-audience (onglet Audience, stats agrégées) -->
-<script src="/static/js/modules/sync-azuracast.js?v=9"></script>
+<script src="/static/js/modules/sync-azuracast.js?v=10"></script>
 <!-- PHASE 3 - Étape 4c : sync-azuracast (sync, action panel, push, bulk schedule) — v6 : scrollToPushPlaylists() + btn_push_envoyer masqué -->
 <script src="/static/js/modules/couleur.js?v=1"></script>
 <!-- PHASE 3 - Étape 4c : couleur (programmation couleur, grille, dry-run, historique, stats) -->

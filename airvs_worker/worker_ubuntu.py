@@ -3058,7 +3058,7 @@ def _marquer_in_azuracast_radiodb(tache_id, chemins):
         for c in chemins:
             cur_m.execute(
                 "UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' "
-                "WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
+                "WHERE `path` IN (%s, %s) AND (comments IS NULL OR comments = '' OR comments = 'IN_AZURACAST')",
                 (c, c.replace('/', '\\'))
             )
             n += cur_m.rowcount
@@ -5876,7 +5876,7 @@ def executer_sync_azura_status(tache_id, parametres):
                 batch = ids_a_marquer[i:i+100]
                 placeholders = ','.join(['%s'] * len(batch))
                 cursor.execute(
-                    f"UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE ID IN ({placeholders}) AND (comments IS NULL OR comments NOT LIKE 'IN_AZURACAST' AND comments NOT LIKE 'AZURA%')",
+                    f"UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE ID IN ({placeholders}) AND (comments IS NULL OR comments = '' OR comments = 'IN_AZURACAST')",
                     batch
                 )
                 updated += cursor.rowcount

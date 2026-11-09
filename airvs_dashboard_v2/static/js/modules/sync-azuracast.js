@@ -1315,6 +1315,9 @@ window.supprimerSelectionAzuraCast = supprimerSelectionAzuraCast;
  * Si name === 'retirer', appelle aussi retirerSelectionPlaylistAzura() pour
  * peupler dynamiquement le contenu de #panel-retirer-content (batch de retrait).
  * Phase 17 : 'supprimer' est également peuplé dynamiquement (remplirPanelSupprimer).
+ * Phase 18 (V5) : déplace aussi le bloc playlists unique #push_pls_bloc vers la
+ * zone du panneau actif (Copier ⇄ Ajouter) et rafraîchit le libellé du bouton
+ * combiné / le rappel du dossier.
  *
  * @param {string} name — 'copier' | 'ajouter' | 'retirer' | 'supprimer'
  */
@@ -1335,8 +1338,101 @@ function showPanel(name) {
     if (name === 'supprimer' && typeof remplirPanelSupprimer === 'function') {
         try { remplirPanelSupprimer(); } catch (_e) { /*silencieux*/ }
     }
+
+    // Phase 18 (V5) — bloc playlists UNIQUE partagé Copier ⇄ Ajouter :
+    // on DÉPLACE #push_pls_bloc dans la zone du panneau actif. L'état des
+    // lignes choisies est conservé d'un panneau à l'autre (aucune duplication,
+    // aucun état divergent).
+    var plsBloc = document.getElementById('push_pls_bloc');
+    if (plsBloc) {
+        if (name === 'copier') {
+            var zoneCopier = document.getElementById('copier_pls_zone');
+            if (zoneCopier && plsBloc.parentElement !== zoneCopier) zoneCopier.appendChild(plsBloc);
+        } else if (name === 'ajouter') {
+            var zoneAjouter = document.getElementById('ajouter_pls_zone');
+            if (zoneAjouter && plsBloc.parentElement !== zoneAjouter) zoneAjouter.appendChild(plsBloc);
+        }
+    }
+    // Phase 18 (V5) — rafraîchissements contextuels :
+    //  - Copier  : libellé dynamique du bouton combiné (« Copier + Ajouter aux N PLS ») ;
+    //  - Ajouter : rappel du dossier de copie courant (transparence).
+    if (name === 'copier') {
+        try { updateBoutonCopierCombine(); } catch (_e) { /*silencieux*/ }
+    } else if (name === 'ajouter') {
+        try { updateRappelDossierAjouter(); } catch (_e) { /*silencieux*/ }
+    }
 }
 window.showPanel = showPanel;
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 18 (V5) — Envoi combiné « Copier + Ajouter PLS » restauré
+// ═══════════════════════════════════════════════════════════════
+// Retour utilisateur 06/11/2026 : la séparation des panneaux Copier /
+// Ajouter (V4) avait rendu invisible le dossier cible lors d'un ajout
+// playlist sur des titres pas encore dans AzuraCast (copie silencieuse
+// vers imports_push) et impossible le choix dossier + playlists dans la
+// même action. La V5 réunit les deux dans le panneau Copier :
+//   - #panel-copier  : dossier cible + section playlists (.pls-section)
+//                      → UNE SEULE action (l'ancien « 🚀 Envoyer ») ;
+//   - #panel-ajouter : ajout seul, avec transparence (compteurs + rappel
+//                      du dossier, modifiable en 1 clic) ;
+//   - bloc playlists UNIQUE (#push_pls_bloc) déplacé par showPanel() ;
+//   - dernier dossier utilisé mémorisé (localStorage, défaut imports_push).
+
+/**
+ * nbPlaylistsChoisiesPush() — Phase 18 (V5)
+ *
+ * Compte les playlists choisies dans le bloc partagé : lignes avec une
+ * playlist sélectionnée + création éventuelle d'une nouvelle playlist.
+ * Sert au libellé dynamique du bouton combiné du panneau Copier.
+ */
+function nbPlaylistsChoisiesPush() {
+    var n = getPushPlaylistIds().length;
+    var np = document.getElementById('push_new_playlist_name');
+    if (np && np.value.trim()) n++;
+    return n;
+}
+
+/**
+ * updateBoutonCopierCombine() — Phase 18 (V5)
+ *
+ * Adapte le libellé du bouton d'envoi du panneau Copier :
+ * « 🚀 Copier vers AzuraCast » (copie seule) ou
+ * « 🚀 Copier + Ajouter aux N PLS » (envoi combiné).
+ */
+function updateBoutonCopierCombine() {
+    var btn = document.getElementById('btn_push_copier_go');
+    if (!btn) return;
+    var n = nbPlaylistsChoisiesPush();
+    btn.textContent = (n > 0)
+        ? '🚀 Copier + Ajouter aux ' + n + ' PLS'
+        : '🚀 Copier vers AzuraCast';
+}
+window.updateBoutonCopierCombine = updateBoutonCopierCombine;
+
+/**
+ * updateRappelDossierAjouter() — Phase 18 (V5)
+ *
+ * Met à jour le rappel du dossier de copie courant affiché dans le
+ * panneau Ajouter (#push_rappel_dossier) : les titres cochés pas encore
+ * dans AzuraCast seront copiés vers ce dossier avant ajout aux playlists.
+ */
+function updateRappelDossierAjouter() {
+    var rappel = document.getElementById('push_rappel_dossier');
+    if (!rappel) return;
+    var sel = document.getElementById('push_dossier_cible');
+    var inp = document.getElementById('push_new_folder_name');
+    var dossier;
+    if (sel && sel.value === '__new_folder__') {
+        dossier = (inp && inp.value.trim())
+            ? 'nouveau dossier : ' + inp.value.trim()
+            : 'nouveau dossier…';
+    } else {
+        dossier = (sel && sel.value) ? sel.value : 'imports_push';
+    }
+    rappel.textContent = dossier;
+}
+window.updateRappelDossierAjouter = updateRappelDossierAjouter;
 
 /**
  * showActionPanel(name) — Explorateur action panel
@@ -1489,6 +1585,13 @@ function loadPushFolders() {
                 el.innerHTML = html;
                 var opts = Array.from(el.options).map(function(o) { return o.value; });
                 if (opts.indexOf('imports_push') >= 0) el.value = 'imports_push';
+                // Phase 18 (V5) — restaurer le dernier dossier utilisé (mémorisé
+                // en localStorage) : priorité dernier utilisé > défaut imports_push.
+                try {
+                    var memoDossier = window.localStorage
+                        ? localStorage.getItem('airvs_push_dernier_dossier') : null;
+                    if (memoDossier && opts.indexOf(memoDossier) >= 0) el.value = memoDossier;
+                } catch (_e) { /* silencieux (navigation privée etc.) */ }
             }
         })
         .catch(function(err) {
@@ -1515,6 +1618,17 @@ function bindNewFolderToggle(selectId, colId, inputId) {
 bindNewFolderToggle('action_dossier_cible', 'action_new_folder_col', 'action_new_folder_name');
 bindNewFolderToggle('action_playlist_dossier', 'action_playlist_new_folder_col', 'action_playlist_new_folder_name');
 bindNewFolderToggle('push_dossier_cible', 'push_new_folder_row', 'push_new_folder_name');
+
+// Phase 18 (V5) — le rappel du dossier (panneau Ajouter) suit le sélecteur
+// et le champ « nouveau dossier » du panneau Copier.
+var _selDossierPush = document.getElementById('push_dossier_cible');
+if (_selDossierPush) _selDossierPush.addEventListener('change', function() {
+    try { updateRappelDossierAjouter(); } catch (_e) { /*silencieux*/ }
+});
+var _inpDossierPush = document.getElementById('push_new_folder_name');
+if (_inpDossierPush) _inpDossierPush.addEventListener('input', function() {
+    try { updateRappelDossierAjouter(); } catch (_e) { /*silencieux*/ }
+});
 
 // Récupérer le dossier effectif (existant ou nouveau saisi)
 function getDossierCible(selectId, inputId) {
@@ -2159,6 +2273,9 @@ function loadPushPlaylists() {
             if (container && container.children.length === 0) {
                 addPushPlaylistRow();
             }
+            // Phase 18 (V5) — les sélections des lignes ont été réinitialisées
+            // (changement de station) → rafraîchir le libellé du bouton combiné.
+            try { updateBoutonCopierCombine(); } catch (_e) { /*silencieux*/ }
             // NOTE : on ne modifie PAS _actionPlaylistOptionsHtml ici —
             // l'Action panel a son propre sélecteur de station (action_station_cible)
             // et sa propre fonction loadActionPlaylists() qui gère ses options.
@@ -2205,6 +2322,8 @@ function addPushPlaylistRow() {
     sel.addEventListener('change', function() {
         var opt = sel.options[sel.selectedIndex];
         display.textContent = opt && opt.value ? opt.text : '';
+        // Phase 18 (V5) — libellé dynamique du bouton combiné (panneau Copier)
+        try { updateBoutonCopierCombine(); } catch (_e) { /*silencieux*/ }
     });
 }
 
@@ -2212,6 +2331,8 @@ function addPushPlaylistRow() {
 function removePushPlaylistRow(rowId) {
     var row = document.getElementById(rowId);
     if (row) row.remove();
+    // Phase 18 (V5) — libellé dynamique du bouton combiné (panneau Copier)
+    try { updateBoutonCopierCombine(); } catch (_e) { /*silencieux*/ }
 }
 
 // Collecter les IDs de playlists sélectionnées (Push) — version dynamique
@@ -2314,6 +2435,8 @@ document.getElementById('push_new_playlist_name').addEventListener('input', func
         if (typeCol) typeCol.style.display = 'none';
         if (orderCol) orderCol.style.display = 'none';
     }
+    // Phase 18 (V5) — la nouvelle playlist compte dans le libellé du bouton combiné
+    try { updateBoutonCopierCombine(); } catch (_e) { /*silencieux*/ }
 });
 
 // Charger le cache et les dossiers au démarrage
@@ -2422,6 +2545,15 @@ function updatePushCount() {
         if (confSup) confSup.checked = false;
         majBoutonSupprimerGo();
     }
+
+    // Phase 18 (V5) — compteurs de transparence du panneau Ajouter :
+    // combien de titres cochés sont déjà dans AzuraCast (ajout direct)
+    // et combien seront d'abord copiés (vers le dossier rappelé).
+    var cDeja = document.querySelectorAll('#panel-ajouter [data-count-deja]');
+    var cNonAzura = document.querySelectorAll('#panel-ajouter [data-count-nonazura]');
+    cDeja.forEach(function(el) { el.textContent = inAzuraCoche; });
+    cNonAzura.forEach(function(el) { el.textContent = (totalCoche - inAzuraCoche); });
+    try { updateRappelDossierAjouter(); } catch (_e) { /*silencieux*/ }
 
     // Phase 1.5 — après rendu du push preview, fetch les playlists des titres AZURA
     fetchBatchMediaPlaylists();
@@ -3195,6 +3327,14 @@ btnEnvoyer.addEventListener('click', function() {
 
     if (!confirm(msg)) return;
 
+    // Phase 18 (V5) — mémoriser le dossier utilisé pour la prochaine session
+    // (restauré par loadPushFolders() ; défaut usine : imports_push).
+    try {
+        if (dossierCible && window.localStorage) {
+            localStorage.setItem('airvs_push_dernier_dossier', dossierCible);
+        }
+    } catch (_e) { /* silencieux */ }
+
     // Marquer le buffer comme en cours d'envoi
     if (activeBuffer) activeBuffer.isPushing = true;
 
@@ -3909,5 +4049,5 @@ function surveillerFinPlaylist() {
         chargerPlaylistsCache();
     };
 
-    console.log('[sync-azuracast.js] Module chargé — v4 (phase 17 : suppression batch AzuraCast + barre sticky adaptative).');
+    console.log('[sync-azuracast.js] Module chargé — v5 (phase 18 : envoi combiné Copier + PLS restauré, bloc playlists partagé).');
 })();
