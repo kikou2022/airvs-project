@@ -412,6 +412,20 @@
         body.airvs-theme-dark .table thead th { background-color: #1e293b !important; color: #94a3b8 !important; border-bottom: 2px solid rgba(255,255,255,0.1) !important; }
         body.airvs-theme-dark .table tbody td { color: #e2e8f0 !important; border-color: rgba(255,255,255,0.06) !important; }
         body.airvs-theme-dark .table-hover tbody tr:hover { background-color: rgba(56,189,248,0.08) !important; }
+        /* Phase 20.2 fix : Bootstrap 5.3 peint chaque cellule avec background-color:
+           var(--bs-table-bg) (blanc par défaut) PAR-DESSUS .airvs-main sombre.
+           → redéfinir les variables Bootstrap de tableau pour tout le dark mode
+           (fond des cellules, zébrage, survol, bordures) en un seul bloc. */
+        body.airvs-theme-dark .table {
+            --bs-table-bg: #0f172a;
+            --bs-table-color: #e2e8f0;
+            --bs-table-border-color: rgba(255,255,255,0.06);
+            --bs-table-accent-bg: transparent;
+            --bs-table-striped-bg: #16223a;
+            --bs-table-striped-color: #e2e8f0;
+            --bs-table-hover-bg: rgba(56,189,248,0.10);
+            --bs-table-hover-color: #f1f5f9;
+        }
         body.airvs-theme-dark .card { background-color: #1e293b !important; color: #e2e8f0 !important; border-color: rgba(255,255,255,0.08) !important; }
         body.airvs-theme-dark .card-header { background-color: #334155 !important; color: #f1f5f9 !important; border-bottom-color: rgba(255,255,255,0.08) !important; }
         body.airvs-theme-dark .card-body { background-color: #1e293b !important; color: #e2e8f0 !important; }
@@ -459,6 +473,44 @@
         body.airvs-theme-dark .list-group-item { background: #1e293b !important; color: #e2e8f0 !important; }
         body.airvs-theme-dark .progress { background: #334155 !important; }
         body.airvs-theme-dark code { background: #0f172a !important; color: #e2e8f0 !important; }
+        /* ── Phase 20.2 (suite) : grille éditoriale + popups des modules ── */
+        body.airvs-theme-dark .ge-week-container { background: #0f172a !important; }
+        body.airvs-theme-dark .ge-day-col { background: #0f172a !important; border-right-color: rgba(255,255,255,0.06) !important; }
+        body.airvs-theme-dark .ge-time-label { background: #16223a !important; color: #94a3b8 !important; border-right-color: rgba(255,255,255,0.06) !important; border-bottom-color: rgba(255,255,255,0.06) !important; }
+        body.airvs-theme-dark .ge-hour-line { background: #1e293b !important; }
+        body.airvs-theme-dark .ge-toolbar .badge-version { background: #14532d !important; color: #bbf7d0 !important; }
+        /* Classes utilitaires Bootstrap utilisées dans index.html + modules JS */
+        body.airvs-theme-dark .bg-white,
+        body.airvs-theme-dark .bg-light { background-color: #1e293b !important; color: #e2e8f0 !important; }
+        /* Styles inline (style="background:...") : seules des règles !important à
+           sélecteur d'attribut peuvent les écraser — boîtes info index.html,
+           modales Rejet/Correction shazam-animateurs.js, panneau playlists
+           sync-azuracast.js. Les blocs .ge-block (fonds pastel choisis par
+           l'utilisateur via color-swatch) restent volontairement inchangés. */
+        body.airvs-theme-dark [style*="f8f9fa"] { background-color: #1e293b !important; border-color: rgba(255,255,255,0.12) !important; }
+        body.airvs-theme-dark [style*="fff5f5"] { background-color: #450a0a !important; }
+        body.airvs-theme-dark div[style*="background:#fff;"] { background-color: #1e293b !important; color: #e2e8f0 !important; }
+        body.airvs-theme-dark button[style*="background:#fff"] { background-color: #334155 !important; color: #e2e8f0 !important; border-color: #475569 !important; }
+        /* ── Phase 20.2 (fin) : lignes à surlignage contextuel Bootstrap ──
+           Grosses tables >1 MiB de Maintenance SQL (table-warning), entrées non
+           lues du Pool intervenants, th table-light, etc. Bootstrap 5.3 redéfinit
+           --bs-table-bg AU NIVEAU de la ligne, court-circuitant le fix global :
+           il faut redéfinir les variables PAR CONTEXTE, tous états confondus
+           (bg / bg-type / bg-state / accent) pour rester uniforme même dans une
+           table-striped. */
+        body.airvs-theme-dark .table-warning   { --bs-table-bg: #78350f; --bs-table-bg-type: #78350f; --bs-table-bg-state: #78350f; --bs-table-accent-bg: #78350f; --bs-table-color: #fde68a; --bs-table-color-type: #fde68a; --bs-table-color-state: #fde68a; }
+        body.airvs-theme-dark .table-danger    { --bs-table-bg: #7f1d1d; --bs-table-bg-type: #7f1d1d; --bs-table-bg-state: #7f1d1d; --bs-table-accent-bg: #7f1d1d; --bs-table-color: #fecaca; --bs-table-color-type: #fecaca; --bs-table-color-state: #fecaca; }
+        body.airvs-theme-dark .table-success   { --bs-table-bg: #14532d; --bs-table-bg-type: #14532d; --bs-table-bg-state: #14532d; --bs-table-accent-bg: #14532d; --bs-table-color: #bbf7d0; --bs-table-color-type: #bbf7d0; --bs-table-color-state: #bbf7d0; }
+        body.airvs-theme-dark .table-info      { --bs-table-bg: #0c4a6e; --bs-table-bg-type: #0c4a6e; --bs-table-bg-state: #0c4a6e; --bs-table-accent-bg: #0c4a6e; --bs-table-color: #bae6fd; --bs-table-color-type: #bae6fd; --bs-table-color-state: #bae6fd; }
+        body.airvs-theme-dark .table-secondary,
+        body.airvs-theme-dark .table-active    { --bs-table-bg: #334155; --bs-table-bg-type: #334155; --bs-table-bg-state: #334155; --bs-table-accent-bg: #334155; --bs-table-color: #e2e8f0; --bs-table-color-type: #e2e8f0; --bs-table-color-state: #e2e8f0; }
+        body.airvs-theme-dark .table-light     { --bs-table-bg: #1e293b; --bs-table-bg-type: #1e293b; --bs-table-bg-state: #1e293b; --bs-table-accent-bg: #1e293b; --bs-table-color: #e2e8f0; --bs-table-color-type: #e2e8f0; --bs-table-color-state: #e2e8f0; }
+        /* Teinte de texte contextuelle — spécificité > à la règle générique
+           "body.airvs-theme-dark .table tbody td" (0,2,3) ci-dessus */
+        body.airvs-theme-dark .table tr.table-warning td, body.airvs-theme-dark .table tr.table-warning th { color: #fde68a !important; }
+        body.airvs-theme-dark .table tr.table-danger td,  body.airvs-theme-dark .table tr.table-danger th  { color: #fecaca !important; }
+        body.airvs-theme-dark .table tr.table-success td, body.airvs-theme-dark .table tr.table-success th { color: #bbf7d0 !important; }
+        body.airvs-theme-dark .table tr.table-info td,    body.airvs-theme-dark .table tr.table-info th    { color: #bae6fd !important; }
     </style>
 </head>
 <body>
