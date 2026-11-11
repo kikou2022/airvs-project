@@ -2901,3 +2901,182 @@ def api_azuracast_refresh_folders():
         'count': len(result),
         'rapports': rapports
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ═══ Phase 20.1 : Cache nowplaying (topbar dashboard) ═══════════════════
+# Endpoint lecture seule pour la topbar. Lit airvs_nowplaying_cache (table
+# alimentée par le worker Ubuntu toutes les 10s via /api/nowplaying/{sid}).
+# Aucun appel réseau : AzuraCast n'est pas joignable depuis Windows .39.
+# ═══════════════════════════════════════════════════════════════════════
+
+@azuracast_bp.route('/api/nowplaying/<int:station_id>')
+@login_requis
+def api_nowplaying(station_id):
+    """Lit le cache nowplaying depuis la DB (mis à jour par le worker toutes les 10s).
+
+    Route utilisée par la topbar dashboard (dashboard-header.js) pour afficher
+    en temps réel : titre en cours, artwork, progression, titre suivant,
+    compteur auditeurs, statut live/auto.
+
+    Args:
+        station_id: ID de la station AzuraCast (ex: 6 ou 7)
+
+    Returns:
+        JSON avec les champs :
+          - now_playing  : dict (song, elapsed, remaining, duration, playlist)
+          - playing_next  : dict (song, duration)
+          - listeners     : dict (current, total)
+          - live          : dict (is_live, streamer_name)
+          - station       : dict (id, name)
+          - cache_age_seconds : int (âge du cache, -1 si absent)
+          - cached        : bool (True si une entrée existe en base)
+    """
+    # Sécurité : restreindre aux stations connues (config.json) si l'utilisateur
+    # tente un ID arbitraire. Fallback [7] si config introuvable.
+    stations = _lister_stations()
+    ids_autorises = {s['id'] for s in stations}
+    if not ids_autorises:
+        ids_autorises = {7}
+    if station_id not in ids_autorises:
+        return jsonify({
+            'cached': False,
+            'cache_age_seconds': -1,
+            'now_playing': None,
+            'playing_next': None,
+            'listeners': {'current': 0, 'total': 0},
+            'live': {'is_live': False},
+            'station': {'id': station_id, 'name': 'Station inconnue'},
+            'error': 'Station non autorisée'
+        }), 404
+
+    db = None
+    cursor = None
+    try:
+        db = get_db_connection()
+        if not db:
+            return jsonify({
+                'cached': False,
+                'cache_age_seconds': -1,
+                'now_playing': None,
+                'playing_next': None,
+                'listeners': {'current': 0, 'total': 0},
+                'live': {'is_live': False},
+                'station': {'id': station_id, 'name': 'Station ' + str(station_id)},
+                'error': 'Connexion DB impossible'
+            }), 500
+
+        cursor = db.cursor()
+        # S'assurer que la table existe (au cas où le worker n'a pas encore tourné).
+        # Idempotent — ne plante pas si la table existe déjà.
+        try:
+            cursor.execute(
+                "CREATE TABLE IF NOT EXISTS airvs_nowplaying_cache ("
+                "  station_id INT PRIMARY KEY,"
+                "  data JSON NOT NULL,"
+                "  fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP "
+                "    ON UPDATE CURRENT_TIMESTAMP"
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            )
+            db.commit()
+        except Exception:
+            pass  # La table existe déjà (ou un ancien schéma) — on tente le SELECT
+
+        cursor.execute(
+            "SELECT data, "
+            "  TIMESTAMPDIFF(SECOND, fetched_at, NOW()) AS age "
+            "FROM airvs_nowplaying_cache "
+            "WHERE station_id = %s",
+            (station_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            # Cache vide : le worker n'a probablement pas encore tourné
+            return jsonify({
+                'cached': False,
+                'cache_age_seconds': -1,
+                'now_playing': None,
+                'playing_next': None,
+                'listeners': {'current': 0, 'total': 0},
+                'live': {'is_live': False},
+                'station': {'id': station_id, 'name': 'Station ' + str(station_id)},
+            })
+
+        # row peut être un dict (DictCursor) ou un tuple (fallback)
+        if isinstance(row, dict):
+            data_raw = row.get('data')
+            age = row.get('age')
+        else:
+            data_raw = row[0] if len(row) > 0 else None
+            age = row[1] if len(row) > 1 else -1
+
+        # data_raw est une chaîne JSON (col MySQL JSON) — la parser
+        if isinstance(data_raw, (bytes, bytearray)):
+            data_raw = data_raw.decode('utf-8')
+        if isinstance(data_raw, str):
+            try:
+                data = json.loads(data_raw)
+            except (json.JSONDecodeError, ValueError):
+                data = None
+        elif isinstance(data_raw, dict):
+            data = data_raw
+        else:
+            data = None
+
+        if not isinstance(data, dict):
+            return jsonify({
+                'cached': False,
+                'cache_age_seconds': -1,
+                'now_playing': None,
+                'playing_next': None,
+                'listeners': {'current': 0, 'total': 0},
+                'live': {'is_live': False},
+                'station': {'id': station_id, 'name': 'Station ' + str(station_id)},
+                'error': 'Cache illisible'
+            })
+
+        # Normaliser l'âge (-1 si NULL)
+        try:
+            cache_age = int(age) if age is not None else -1
+        except (TypeError, ValueError):
+            cache_age = -1
+
+        # Extraire les blocs standards de la réponse AzuraCast nowplaying
+        now_playing = data.get('now_playing') if isinstance(data.get('now_playing'), dict) else None
+        playing_next = data.get('playing_next') if isinstance(data.get('playing_next'), dict) else None
+        listeners = data.get('listeners') if isinstance(data.get('listeners'), dict) else {'current': 0, 'total': 0}
+        live = data.get('live') if isinstance(data.get('live'), dict) else {'is_live': False}
+        station = data.get('station') if isinstance(data.get('station'), dict) else {'id': station_id, 'name': 'Station ' + str(station_id)}
+
+        return jsonify({
+            'cached': True,
+            'cache_age_seconds': cache_age,
+            'now_playing': now_playing,
+            'playing_next': playing_next,
+            'listeners': listeners,
+            'live': live,
+            'station': station,
+        })
+    except Exception as e:
+        _logger.error(f"[azuracast] /api/nowplaying/{station_id} erreur : {e}")
+        return jsonify({
+            'cached': False,
+            'cache_age_seconds': -1,
+            'now_playing': None,
+            'playing_next': None,
+            'listeners': {'current': 0, 'total': 0},
+            'live': {'is_live': False},
+            'station': {'id': station_id, 'name': 'Station ' + str(station_id)},
+            'error': str(e)
+        }), 500
+    finally:
+        if cursor:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass

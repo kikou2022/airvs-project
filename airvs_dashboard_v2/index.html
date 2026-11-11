@@ -32,9 +32,29 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tableau de bord AIRVS</title>
+    <!-- Anti-FOUC : appliquer le thème AVANT le rendu de la page -->
+    <script>
+    (function() {
+        try {
+            var t = localStorage.getItem('airvs_theme') || 'dark';
+            if (t === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+                document.addEventListener('DOMContentLoaded', function() {
+                    document.body.classList.add('airvs-theme-dark');
+                });
+            }
+        } catch(e) {
+            // localStorage bloqué → défaut sombre quand même
+            document.documentElement.setAttribute('data-theme', 'dark');
+            document.addEventListener('DOMContentLoaded', function() {
+                document.body.classList.add('airvs-theme-dark');
+            });
+        }
+    })();
+    </script>
     <link href="/static/css/bootstrap.min.css" rel="stylesheet">
     <link href="/static/css/bootstrap-icons.min.css" rel="stylesheet">
-    <link href="/static/css/style.css" rel="stylesheet">
+    <link href="/static/css/style.css?v=17" rel="stylesheet">
     <style>
         /* ════════════════════════════════════════════════
            SIDEBAR LAYOUT — AIRVS Dashboard
@@ -75,14 +95,14 @@
         }
 
         .sb-header {
-            padding: 1rem 1rem 0.8rem;
+            padding: 1.2rem 1.2rem 1rem;
             border-bottom: 1px solid var(--sb-border);
             flex-shrink: 0;
         }
         .sb-header h1 {
-            font-size: 1rem;
+            font-size: 1.5rem;
             color: #fff;
-            margin: 0;
+            margin: 0 0 6px 0;
             white-space: nowrap;
         }
         .sb-header .subtitle {
@@ -190,7 +210,8 @@
         /* ── Main content area ── */
         .airvs-main {
             margin-left: var(--sidebar-w);
-            min-height: 100vh;
+            margin-top: 64px;  /* Phase 20.1 : laisse la place à la topbar fixe (hauteur 64px) */
+            min-height: calc(100vh - 64px);
             padding: 1.2rem 1.5rem 1.5rem;
             background: #f1f5f9;
         }
@@ -364,9 +385,133 @@
             padding: 10px 12px;
             margin-top: 12px;
         }
+
+        /* ═══ Phase 20.1 — Overrides thème sombre (priorité sur le <style> inline) ═══ */
+        /* Ces règles écrasent les couleurs en dur ci-dessus quand body.airvs-theme-dark.
+           Placées EN FIN du <style> inline pour avoir la dernière priorité. */
+        body.airvs-theme-dark .airvs-main { background: #0f172a !important; }
+        body.airvs-theme-dark .dynamic-panel { background: #1e293b !important; border-color: rgba(255,255,255,0.08) !important; }
+        body.airvs-theme-dark .anim-dd-item:hover { background: #334155 !important; }
+        body.airvs-theme-dark .main-title { color: #f1f5f9 !important; }
+        body.airvs-theme-dark .main-subtitle { color: #94a3b8 !important; }
+        body.airvs-theme-dark .page-title,
+        body.airvs-theme-dark h2, body.airvs-theme-dark h3,
+        body.airvs-theme-dark h4, body.airvs-theme-dark h5 { color: #f1f5f9 !important; }
+        body.airvs-theme-dark .sb-link { color: #cbd5e1 !important; }
+        body.airvs-theme-dark .sb-link.active { background: #0ea5e9 !important; color: #fff !important; }
+        body.airvs-theme-dark .sb-link:hover { background: #334155 !important; color: #fff !important; }
+        body.airvs-theme-dark .sb-sub .sb-link { color: #94a3b8 !important; }
+        body.airvs-theme-dark .song-item { background: #1e293b !important; color: #e2e8f0 !important; }
+        body.airvs-theme-dark .song-artist { color: #f1f5f9 !important; }
+        body.airvs-theme-dark .song-title { color: #cbd5e1 !important; }
+        body.airvs-theme-dark .song-path { color: #64748b !important; border-top-color: rgba(255,255,255,0.06) !important; }
+        body.airvs-theme-dark .song-year { background: #198754 !important; color: #fff !important; }
+        body.airvs-theme-dark .badge-shazam { background: #1db954 !important; color: #fff !important; }
+        body.airvs-theme-dark .badge-azura { background: #0d6efd !important; color: #fff !important; }
+        body.airvs-theme-dark .table { color: #e2e8f0 !important; }
+        body.airvs-theme-dark .table thead th { background-color: #1e293b !important; color: #94a3b8 !important; border-bottom: 2px solid rgba(255,255,255,0.1) !important; }
+        body.airvs-theme-dark .table tbody td { color: #e2e8f0 !important; border-color: rgba(255,255,255,0.06) !important; }
+        body.airvs-theme-dark .table-hover tbody tr:hover { background-color: rgba(56,189,248,0.08) !important; }
+        body.airvs-theme-dark .card { background-color: #1e293b !important; color: #e2e8f0 !important; border-color: rgba(255,255,255,0.08) !important; }
+        body.airvs-theme-dark .card-header { background-color: #334155 !important; color: #f1f5f9 !important; border-bottom-color: rgba(255,255,255,0.08) !important; }
+        body.airvs-theme-dark .card-body { background-color: #1e293b !important; color: #e2e8f0 !important; }
+        body.airvs-theme-dark .card-footer { background-color: #334155 !important; color: #94a3b8 !important; border-top-color: rgba(255,255,255,0.08) !important; }
+        body.airvs-theme-dark .card-title,
+        body.airvs-theme-dark .card-subtitle,
+        body.airvs-theme-dark .card-text { color: #e2e8f0 !important; }
+        body.airvs-theme-dark .accordion-button { background-color: #1e293b !important; color: #e2e8f0 !important; }
+        body.airvs-theme-dark .accordion-button:not(.collapsed) { background-color: #334155 !important; color: #f1f5f9 !important; }
+        body.airvs-theme-dark .accordion-body { background-color: #1e293b !important; color: #e2e8f0 !important; }
+        body.airvs-theme-dark .accordion-collapse { background-color: #1e293b !important; }
+        body.airvs-theme-dark .form-control,
+        body.airvs-theme-dark .form-select,
+        body.airvs-theme-dark input,
+        body.airvs-theme-dark textarea,
+        body.airvs-theme-dark select { background-color: #1e293b !important; color: #e2e8f0 !important; border-color: rgba(255,255,255,0.12) !important; }
+        body.airvs-theme-dark .form-control:focus,
+        body.airvs-theme-dark input:focus,
+        body.airvs-theme-dark textarea:focus { background-color: #1e293b !important; color: #e2e8f0 !important; border-color: #38bdf8 !important; }
+        body.airvs-theme-dark .form-label,
+        body.airvs-theme-dark label { color: #cbd5e1 !important; }
+        body.airvs-theme-dark .text-muted { color: #64748b !important; }
+        body.airvs-theme-dark .text-dark { color: #e2e8f0 !important; }
+        body.airvs-theme-dark .btn-outline-secondary { color: #94a3b8 !important; border-color: #475569 !important; }
+        body.airvs-theme-dark .btn-outline-secondary:hover { background: #475569 !important; color: #fff !important; }
+        body.airvs-theme-dark .modal-content { background: #1e293b !important; color: #e2e8f0 !important; }
+        body.airvs-theme-dark .modal-header,
+        body.airvs-theme-dark .modal-footer { border-color: rgba(255,255,255,0.08) !important; }
+        body.airvs-theme-dark .dropdown-menu { background: #1e293b !important; border-color: rgba(255,255,255,0.1) !important; }
+        body.airvs-theme-dark .dropdown-item { color: #e2e8f0 !important; }
+        body.airvs-theme-dark .dropdown-item:hover { background: #334155 !important; color: #fff !important; }
+        body.airvs-theme-dark .nav-tabs .nav-link { color: #94a3b8 !important; }
+        body.airvs-theme-dark .nav-tabs .nav-link.active { background: #1e293b !important; color: #38bdf8 !important; }
+        body.airvs-theme-dark .alert-info { background: #0c4a6e !important; color: #bae6fd !important; border-color: #0891b2 !important; }
+        body.airvs-theme-dark .alert-warning { background: #78350f !important; color: #fde68a !important; border-color: #d97706 !important; }
+        body.airvs-theme-dark .alert-danger { background: #7f1d1d !important; color: #fecaca !important; border-color: #dc2626 !important; }
+        body.airvs-theme-dark .alert-success { background: #14532d !important; color: #bbf7d0 !important; border-color: #16a34a !important; }
+        body.airvs-theme-dark .terminal-box,
+        body.airvs-theme-dark pre { background: #020617 !important; color: #d4d4d4 !important; }
+        body.airvs-theme-dark .sticky-action-bar { background: #1e293b !important; }
+        body.airvs-theme-dark .border { border-color: rgba(255,255,255,0.08) !important; }
+        body.airvs-theme-dark hr { border-color: rgba(255,255,255,0.08) !important; }
+        body.airvs-theme-dark a { color: #38bdf8 !important; }
+        body.airvs-theme-dark small { color: #94a3b8 !important; }
+        body.airvs-theme-dark .list-group-item { background: #1e293b !important; color: #e2e8f0 !important; }
+        body.airvs-theme-dark .progress { background: #334155 !important; }
+        body.airvs-theme-dark code { background: #0f172a !important; color: #e2e8f0 !important; }
     </style>
 </head>
 <body>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<!-- Phase 20.1 : TOPBAR ANTENNE LIVE (fixe, persistante) -->
+<!-- Affiche en temps réel : titre en cours, progression, -->
+<!-- titre suivant, auditeurs, statut live/auto, horloge.  -->
+<!-- Données : cache DB (worker → /api/nowplaying/<sid>).  -->
+<!-- ═══════════════════════════════════════════════════ -->
+<header class="airvs-topbar">
+    <!-- Bloc "On Air" : artwork + titre + progression -->
+    <div class="topbar-now-playing">
+        <img id="tb-artwork" class="topbar-artwork" src="" alt=""
+             style="visibility:hidden" referrerpolicy="no-referrer">
+        <div class="topbar-np-text">
+            <div class="topbar-np-title" id="tb-title">(chargement…)</div>
+            <div class="topbar-np-artist" id="tb-artist"></div>
+            <div class="topbar-np-meta">
+                <span class="topbar-progress-wrap">
+                    <span class="topbar-progress-bar"><span id="tb-progress" class="topbar-progress-fill"></span></span>
+                </span>
+                <span class="topbar-time"><span id="tb-elapsed">--:--</span> / <span id="tb-duration">--:--</span></span>
+                <span class="topbar-playlist" id="tb-playlist"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bloc titre suivant -->
+    <div class="topbar-next">
+        <span class="topbar-next-label">Suivant ▸</span>
+        <span class="topbar-next-title" id="tb-next-title">—</span>
+    </div>
+
+    <!-- Bloc auditeurs -->
+    <div class="topbar-listeners" title="Auditeurs connectés">
+        <span class="topbar-listeners-icon">👥</span>
+        <span id="tb-listeners">—</span>
+    </div>
+
+    <!-- Statut live / auto -->
+    <div class="topbar-live badge-auto" id="tb-live-badge" title="Diffusion automatique (playlist)">AUTO</div>
+
+    <!-- Sélecteur de station -->
+    <select id="tb-station-selector" class="topbar-station-selector"
+            title="Station AzuraCast à surveiller">
+        <option value="6">Station 6</option>
+        <option value="7" selected>Station 7</option>
+    </select>
+
+    <!-- Toggle thème clair/sombre -->
+    <button id="tb-theme-toggle" class="topbar-theme-toggle" title="Basculer le thème">🌙</button>
+</header>
 
 <!-- Mobile toggle -->
 <button class="sb-toggle" id="sbToggle">☰</button>
@@ -376,9 +521,10 @@
 <!-- SIDEBAR                                            -->
 <!-- ═══════════════════════════════════════════════════ -->
 <nav class="airvs-sidebar" id="airvsSidebar">
-    <div class="sb-header">
+    <div class="sb-header" id="sb-header" onclick="window.location.href='/'" style="cursor:pointer" title="Retour à l'accueil">
         <h1>🎙️ AIRVS</h1>
-        <div class="subtitle">Pont de commande — Machine Windows</div>
+        <div class="sb-clock" id="sb-clock-time">--:--:--</div>
+        <div class="sb-clock-date" id="sb-clock-date">--</div>
     </div>
 
     <ul class="sb-nav" id="sbNav">
@@ -5036,15 +5182,17 @@
 <!-- PHASE 3 - Étape 3/5 : pont-player (player, archives, flux, spectrum, lecteur) -->
 <script src="/static/js/modules/stats-audience.js?v=1"></script>
 <!-- PHASE 3 - Étape 4/5 : stats-audience (onglet Audience, stats agrégées) -->
-<script src="/static/js/modules/sync-azuracast.js?v=10"></script>
+<script src="/static/js/modules/sync-azuracast.js?v=17"></script>
 <!-- PHASE 3 - Étape 4c : sync-azuracast (sync, action panel, push, bulk schedule) — v6 : scrollToPushPlaylists() + btn_push_envoyer masqué -->
-<script src="/static/js/modules/couleur.js?v=1"></script>
+<script src="/static/js/modules/couleur.js?v=2"></script>
 <!-- PHASE 3 - Étape 4c : couleur (programmation couleur, grille, dry-run, historique, stats) -->
 <script src="/static/js/modules/pool-tiers.js?v=1"></script>
 <!-- PHASE 3 - Étape 5a : pool-tiers (validation, stats, auto-check, sheets monitoring) -->
 <script src="/static/js/modules/piges-podcasts.js?v=1"></script>
 <!-- PHASE 3 - Étape 5b : piges-podcasts (piges, lectures, promotion podcast) -->
-<!-- Modules extraits : utils.js, grille-editoriale.js, navigation.js, shazam-animateurs.js, pont-player.js, stats-audience.js, sync-azuracast.js, couleur.js, pool-tiers.js, piges-podcasts.js -->
+<!-- Phase 20.1 : Topbar antenne live (poll /api/nowplaying/<sid>, horloge, thème) -->
+<script src="/static/js/modules/dashboard-header.js?v=3"></script>
+<!-- Modules extraits : utils.js, grille-editoriale.js, navigation.js, shazam-animateurs.js, pont-player.js, stats-audience.js, sync-azuracast.js, couleur.js, pool-tiers.js, piges-podcasts.js, dashboard-header.js -->
 <!-- ══════════════════════════════════════════════════ -->
 <script>
 window.onerror = function(msg, url, line, col, err) {
@@ -7836,7 +7984,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <script src="/static/js/bootstrap.bundle.min.js"></script>
 
-<script src="/static/js/modules/azura_flags.js"></script>
+<script src="/static/js/modules/azura_flags.js?v=2"></script>
 
 <script>
 // Synchroniser les sélecteurs de station (haut ↔ sticky)

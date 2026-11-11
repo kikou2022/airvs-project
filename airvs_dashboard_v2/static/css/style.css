@@ -289,3 +289,684 @@ body {
     background-color: #0dcaf0;
     color: #000;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   ═══ Phase 20.1 — TOPBAR ANTENNE LIVE (persistante sur toutes pages) ═══
+   Topbar fixe en haut du dashboard, à droite de la sidebar.
+   Affiche en temps réel : artwork, titre en cours, progression, titre
+   suivant, auditeurs, statut live/auto, sélecteur de station, toggle thème.
+   Données : cache DB (worker → /api/nowplaying/<sid>), poll JS 5s.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+    --topbar-h: 64px;
+    --topbar-bg: #0f172a;          /* slate-900 (cohérent avec sidebar) */
+    --topbar-bg-2: #1e293b;        /* slate-800 */
+    --topbar-border: rgba(255, 255, 255, 0.08);
+    --topbar-text: #e2e8f0;        /* slate-200 */
+    --topbar-text-mute: #94a3b8;   /* slate-400 */
+    --topbar-accent: #38bdf8;      /* sky-400 */
+    --topbar-live: #ef4444;        /* red-500 */
+    --topbar-auto: #64748b;        /* slate-500 */
+    --topbar-progress-bg: rgba(255, 255, 255, 0.12);
+}
+
+/* ── Conteneur topbar (fixed, pleine largeur après sidebar) ── */
+.airvs-topbar {
+    position: fixed;
+    top: 0;
+    left: 250px;                   /* var(--sidebar-w) = 250px (défini dans index.html) */
+    right: 0;
+    height: var(--topbar-h);
+    background: linear-gradient(180deg, var(--topbar-bg) 0%, var(--topbar-bg-2) 100%);
+    border-bottom: 1px solid var(--topbar-border);
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0 1rem;
+    z-index: 1030;
+    color: var(--topbar-text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    overflow: hidden;
+}
+
+/* ── Contenu principal : marge-top pour ne pas être masqué par la topbar ──
+   Redéclaré ici (en plus de l'inline dans index.html) pour la robustesse. */
+.airvs-main {
+    margin-top: var(--topbar-h);
+}
+
+/* ── Bloc "On Air" : artwork + titre + progression ── */
+.topbar-now-playing {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    flex: 1 1 auto;
+    min-width: 0;            /* permet l'ellipsis du texte */
+}
+
+.topbar-artwork {
+    width: 44px;
+    height: 44px;
+    border-radius: 6px;
+    object-fit: cover;
+    background: var(--topbar-bg-2);
+    border: 1px solid var(--topbar-border);
+    flex-shrink: 0;
+}
+
+.topbar-np-text {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.topbar-np-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.2;
+    max-width: 320px;
+}
+
+.topbar-np-artist {
+    font-size: 0.75rem;
+    color: var(--topbar-text-mute);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 320px;
+    line-height: 1.2;
+}
+
+.topbar-np-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 2px;
+    font-size: 0.7rem;
+    color: var(--topbar-text-mute);
+}
+
+.topbar-progress-wrap {
+    display: inline-flex;
+    align-items: center;
+    width: 140px;
+}
+
+.topbar-progress-bar {
+    display: block;
+    width: 100%;
+    height: 4px;
+    background: var(--topbar-progress-bg);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.topbar-progress-fill {
+    display: block;
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--topbar-accent), #818cf8);
+    border-radius: 2px;
+    transition: width 0.4s ease;
+}
+
+.topbar-time {
+    font-variant-numeric: tabular-nums;
+    color: var(--topbar-text-mute);
+    white-space: nowrap;
+}
+
+.topbar-playlist {
+    font-size: 0.68rem;
+    color: var(--topbar-accent);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+}
+
+/* ── Bloc titre suivant ── */
+.topbar-next {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    max-width: 240px;
+    flex: 0 1 auto;
+    border-left: 1px solid var(--topbar-border);
+    padding-left: 1rem;
+}
+
+.topbar-next-label {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--topbar-text-mute);
+    line-height: 1;
+}
+
+.topbar-next-title {
+    font-size: 0.78rem;
+    color: var(--topbar-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.2;
+    margin-top: 2px;
+}
+
+/* ── Compteur auditeurs ── */
+.topbar-listeners {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--topbar-text);
+    background: rgba(56, 189, 248, 0.1);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    border-radius: 999px;
+    padding: 0.25rem 0.7rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.topbar-listeners-icon {
+    font-size: 0.85rem;
+}
+
+/* ── Badge statut live / auto ── */
+.topbar-live {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 0.25rem 0.6rem;
+    border-radius: 4px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.topbar-live.badge-live {
+    background: var(--topbar-live);
+    color: #fff;
+    animation: topbar-live-pulse 2s ease-in-out infinite;
+}
+
+.topbar-live.badge-auto {
+    background: var(--topbar-auto);
+    color: #fff;
+}
+
+@keyframes topbar-live-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.65; }
+}
+
+/* ── Sélecteur de station ── */
+.topbar-station-selector {
+    background: var(--topbar-bg-2);
+    color: var(--topbar-text);
+    border: 1px solid var(--topbar-border);
+    border-radius: 4px;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    flex-shrink: 0;
+    outline: none;
+}
+
+.topbar-station-selector:hover {
+    border-color: var(--topbar-accent);
+}
+
+.topbar-station-selector:focus {
+    border-color: var(--topbar-accent);
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25);
+}
+
+/* ── Toggle thème ── */
+.topbar-theme-toggle {
+    background: var(--topbar-bg-2);
+    color: var(--topbar-text);
+    border: 1px solid var(--topbar-border);
+    border-radius: 4px;
+    width: 34px;
+    height: 34px;
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.topbar-theme-toggle:hover {
+    background: var(--topbar-bg);
+    border-color: var(--topbar-accent);
+}
+
+/* ── Horloge sidebar (remplace "Pont de commande — Machine Windows") ── */
+.sb-clock {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--topbar-accent, #38bdf8);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.5px;
+    line-height: 1.2;
+    margin-top: 4px;
+}
+
+.sb-clock-date {
+    font-size: 0.85rem;
+    color: var(--sb-text, #94a3b8);
+    text-transform: capitalize;
+    line-height: 1.2;
+    margin-top: 2px;
+}
+
+/* ─── Thème sombre complet (appliqué via body.airvs-theme-dark) ─── */
+/* Couvre tous les éléments majeurs du dashboard pour un rendu cohérent
+   sans Dark Reader. Activation : bouton 🌙/☀ dans la topbar.
+   Persistance : localStorage 'airvs_theme'. */
+
+/* Backgrounds globaux */
+body.airvs-theme-dark {
+    background: #0f172a !important;
+    color: #e2e8f0 !important;
+}
+body.airvs-theme-dark .airvs-main,
+body.airvs-theme-dark main,
+body.airvs-theme-dark .tab-content,
+body.airvs-theme-dark .tab-pane {
+    background: #0f172a !important;
+    color: #e2e8f0 !important;
+}
+
+/* Cartes / cards */
+body.airvs-theme-dark .card,
+body.airvs-theme-dark .dashboard-card {
+    background: #1e293b !important;
+    border-color: rgba(255, 255, 255, 0.08) !important;
+    color: #e2e8f0 !important;
+}
+body.airvs-theme-dark .card-header,
+body.airvs-theme-dark .dashboard-card .card-header {
+    background-color: #334155 !important;
+    color: #f1f5f9 !important;
+    border-bottom-color: rgba(255, 255, 255, 0.08) !important;
+}
+body.airvs-theme-dark .card-body,
+body.airvs-theme-dark .dashboard-card .card-body {
+    color: #e2e8f0 !important;
+}
+
+/* Tables */
+body.airvs-theme-dark .table {
+    color: #e2e8f0 !important;
+    border-color: rgba(255, 255, 255, 0.08) !important;
+}
+body.airvs-theme-dark .table thead th {
+    background-color: #1e293b !important;
+    color: #94a3b8 !important;
+    border-bottom-color: rgba(255, 255, 255, 0.1) !important;
+}
+body.airvs-theme-dark .table tbody td {
+    border-color: rgba(255, 255, 255, 0.06) !important;
+    color: #e2e8f0 !important;
+}
+body.airvs-theme-dark .table-hover tbody tr:hover {
+    background-color: rgba(56, 189, 248, 0.08) !important;
+}
+body.airvs-theme-dark .table-striped tbody tr:nth-of-type(odd) {
+    background-color: rgba(255, 255, 255, 0.03) !important;
+}
+body.airvs-theme-dark .table-secondary,
+body.airvs-theme-dark .table-secondary td {
+    background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Formulaires */
+body.airvs-theme-dark .form-control,
+body.airvs-theme-dark .form-select,
+body.airvs-theme-dark input[type="text"],
+body.airvs-theme-dark input[type="number"],
+body.airvs-theme-dark input[type="search"],
+body.airvs-theme-dark input[type="date"],
+body.airvs-theme-dark input[type="time"],
+body.airvs-theme-dark input[type="url"],
+body.airvs-theme-dark input[type="password"],
+body.airvs-theme-dark textarea,
+body.airvs-theme-dark select {
+    background-color: #1e293b !important;
+    border-color: rgba(255, 255, 255, 0.12) !important;
+    color: #e2e8f0 !important;
+}
+body.airvs-theme-dark .form-control:focus,
+body.airvs-theme-dark .form-select:focus,
+body.airvs-theme-dark input:focus,
+body.airvs-theme-dark textarea:focus,
+body.airvs-theme-dark select:focus {
+    background-color: #1e293b !important;
+    color: #e2e8f0 !important;
+    border-color: #38bdf8 !important;
+    box-shadow: 0 0 0 0.2rem rgba(56, 189, 248, 0.2) !important;
+}
+body.airvs-theme-dark .form-control::placeholder,
+body.airvs-theme-dark input::placeholder,
+body.airvs-theme-dark textarea::placeholder {
+    color: #64748b !important;
+}
+body.airvs-theme-dark .form-label,
+body.airvs-theme-dark label {
+    color: #cbd5e1 !important;
+}
+body.airvs-theme-dark .input-group-text {
+    background-color: #334155 !important;
+    border-color: rgba(255, 255, 255, 0.12) !important;
+    color: #94a3b8 !important;
+}
+
+/* Text colors */
+body.airvs-theme-dark .text-muted,
+body.airvs-theme-dark .text-secondary {
+    color: #64748b !important;
+}
+body.airvs-theme-dark .text-dark {
+    color: #e2e8f0 !important;
+}
+body.airvs-theme-dark .text-primary {
+    color: #38bdf8 !important;
+}
+body.airvs-theme-dark h1, body.airvs-theme-dark h2, body.airvs-theme-dark h3,
+body.airvs-theme-dark h4, body.airvs-theme-dark h5, body.airvs-theme-dark h6 {
+    color: #f1f5f9 !important;
+}
+body.airvs-theme-dark a {
+    color: #38bdf8 !important;
+}
+body.airvs-theme-dark a:hover {
+    color: #7dd3fc !important;
+}
+body.airvs-theme-dark small,
+body.airvs-theme-dark .small {
+    color: #94a3b8 !important;
+}
+
+/* Modals */
+body.airvs-theme-dark .modal-content {
+    background-color: #1e293b !important;
+    color: #e2e8f0 !important;
+    border-color: rgba(255, 255, 255, 0.1) !important;
+}
+body.airvs-theme-dark .modal-header,
+body.airvs-theme-dark .modal-footer {
+    border-color: rgba(255, 255, 255, 0.08) !important;
+}
+body.airvs-theme-dark .modal-title {
+    color: #f1f5f9 !important;
+}
+body.airvs-theme-dark .modal-backdrop.show {
+    opacity: 0.7;
+}
+
+/* Terminal / console */
+body.airvs-theme-dark .terminal-box,
+body.airvs-theme-dark .console,
+body.airvs-theme-dark pre {
+    background-color: #020617 !important;
+    color: #d4d4d4 !important;
+    border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Alerts (gardent leurs couleurs Bootstrap mais fond assombri) */
+body.airvs-theme-dark .alert-info {
+    background-color: #0c4a6e !important;
+    border-color: #0891b2 !important;
+    color: #bae6fd !important;
+}
+body.airvs-theme-dark .alert-warning {
+    background-color: #78350f !important;
+    border-color: #d97706 !important;
+    color: #fde68a !important;
+}
+body.airvs-theme-dark .alert-danger {
+    background-color: #7f1d1d !important;
+    border-color: #dc2626 !important;
+    color: #fecaca !important;
+}
+body.airvs-theme-dark .alert-success {
+    background-color: #14532d !important;
+    border-color: #16a34a !important;
+    color: #bbf7d0 !important;
+}
+
+/* Dropdowns */
+body.airvs-theme-dark .dropdown-menu {
+    background-color: #1e293b !important;
+    border-color: rgba(255, 255, 255, 0.1) !important;
+}
+body.airvs-theme-dark .dropdown-item {
+    color: #e2e8f0 !important;
+}
+body.airvs-theme-dark .dropdown-item:hover,
+body.airvs-theme-dark .dropdown-item:focus {
+    background-color: #334155 !important;
+    color: #fff !important;
+}
+body.airvs-theme-dark .dropdown-divider {
+    border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Nav tabs */
+body.airvs-theme-dark .nav-tabs .nav-link {
+    color: #94a3b8 !important;
+    border-color: rgba(255, 255, 255, 0.08) !important;
+}
+body.airvs-theme-dark .nav-tabs .nav-link.active {
+    background-color: #1e293b !important;
+    color: #38bdf8 !important;
+    border-bottom-color: #1e293b !important;
+}
+body.airvs-theme-dark .nav-pills .nav-link {
+    color: #94a3b8 !important;
+}
+body.airvs-theme-dark .nav-pills .nav-link.active {
+    background-color: #0ea5e9 !important;
+    color: #fff !important;
+}
+
+/* Song items (Explorateur) */
+body.airvs-theme-dark .song-item {
+    background: #1e293b !important;
+    color: #e2e8f0 !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3) !important;
+}
+body.airvs-theme-dark .song-artist {
+    color: #f1f5f9 !important;
+}
+body.airvs-theme-dark .song-title {
+    color: #cbd5e1 !important;
+}
+body.airvs-theme-dark .song-path {
+    color: #64748b !important;
+    border-top-color: rgba(255, 255, 255, 0.06) !important;
+}
+body.airvs-theme-dark .song-year {
+    background: #198754 !important;
+    color: #fff !important;
+}
+
+/* Badges — garder couleurs Bootstrap (déjà !important) */
+/* Les .badge-azura-* ont déjà !important, pas besoin de les surcharger */
+
+/* Buttons — garder couleurs Bootstrap, juste ajuster les variants outline */
+body.airvs-theme-dark .btn-outline-secondary {
+    color: #94a3b8 !important;
+    border-color: #475569 !important;
+}
+body.airvs-theme-dark .btn-outline-secondary:hover {
+    background-color: #475569 !important;
+    color: #fff !important;
+}
+
+/* Sticky action bar */
+body.airvs-theme-dark .sticky-action-bar {
+    background: #1e293b !important;
+}
+
+/* Explorer action panel */
+body.airvs-theme-dark #explorer_action_panel {
+    background: #1e293b !important;
+}
+
+/* Tooltips Bootstrap */
+body.airvs-theme-dark .tooltip-inner {
+    background-color: #334155 !important;
+    color: #e2e8f0 !important;
+}
+body.airvs-theme-dark .tooltip .tooltip-arrow::before {
+    border-top-color: #334155 !important;
+}
+
+/* Progress bars */
+body.airvs-theme-dark .progress {
+    background-color: #334155 !important;
+}
+
+/* List groups */
+body.airvs-theme-dark .list-group-item {
+    background-color: #1e293b !important;
+    color: #e2e8f0 !important;
+    border-color: rgba(255, 255, 255, 0.06) !important;
+}
+body.airvs-theme-dark .list-group-item:hover {
+    background-color: #334155 !important;
+}
+
+/* Code blocks */
+body.airvs-theme-dark code,
+body.airvs-theme-dark .code {
+    background-color: #0f172a !important;
+    color: #e2e8f0 !important;
+}
+
+/* Borders */
+body.airvs-theme-dark .border,
+body.airvs-theme-dark .border-top,
+body.airvs-theme-dark .border-bottom,
+body.airvs-theme-dark .border-start,
+body.airvs-theme-dark .border-end {
+    border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* hr */
+body.airvs-theme-dark hr {
+    border-color: rgba(255, 255, 255, 0.08) !important;
+    opacity: 0.5;
+}
+
+/* ── Responsive : topbar pleine largeur sous 992px ── */
+@media (max-width: 991px) {
+    .airvs-topbar {
+        left: 0;
+    }
+    .topbar-next {
+        display: none;       /* trop étroit sur mobile */
+    }
+    .topbar-np-title {
+        max-width: 160px;
+    }
+    .topbar-np-artist {
+        max-width: 160px;
+    }
+    .topbar-progress-wrap {
+        width: 80px;
+    }
+}
+
+@media (max-width: 575px) {
+    .topbar-playlist {
+        display: none;
+    }
+    .topbar-listeners {
+        padding: 0.2rem 0.5rem;
+        font-size: 0.75rem;
+    }
+    .topbar-station-selector {
+        font-size: 0.7rem;
+    }
+}/* ─── Phase 19.1 — B1 : Badges AzuraCast (système de flags AZURA_*_S*) ─── */
+/* Émis par static/js/modules/azura_flags.js (Phase 15) — utilisés partout où
+   un titre est marqué IN_AZURACAST/AZURA_PUSHED_S6_S7/AZURA_ACTIVE_*/etc.
+   Compatibilité : ancien format 'IN_AZURACAST' (legacy, classe .badge-azura
+   simple) et nouveau format AZURA_*_S* (5 variantes).
+   
+   ⚠️ Les couleurs utilisent des teintes Bootstrap « solides » (pas pâles)
+   pour rester lisibles dans les deux contextes :
+   - Thème clair natif du dashboard (fond #f4f6f9 + table #f8f9fa)
+   - Thème sombre via Dark Reader (extension navigateur)
+   Les !important empêchent Dark Reader de modifier ces couleurs (il garde
+   ses variables --darkreader-* sur le reste de la page, mais les badges
+   restent visibles et colorés quoi qu'il arrive). */
+
+.badge-azura {
+    display: inline-block !important;
+    padding: 2px 8px !important;
+    border-radius: 12px !important;
+    font-size: 0.72em !important;
+    font-weight: 600 !important;
+    white-space: nowrap !important;
+    vertical-align: middle !important;
+    background: #0d6efd !important;          /* Bootstrap primary (bleu) */
+    color: #fff !important;
+    line-height: 1.4 !important;
+    border: 1px solid rgba(0,0,0,0.1) !important;
+}
+
+.badge-azura-push {                           /* Poussé vers AzuraCast (bleu) */
+    background: #0d6efd !important;          /* Bootstrap primary */
+    color: #fff !important;
+    border: 1px solid #0a58ca !important;
+}
+
+.badge-azura-active {                         /* Actif en playlist (vert) */
+    background: #198754 !important;          /* Bootstrap success */
+    color: #fff !important;
+    border: 1px solid #136f40 !important;
+}
+
+.badge-azura-retired {                        /* Retiré des playlists (orange) */
+    background: #fd7e14 !important;          /* Bootstrap warning */
+    color: #fff !important;
+    border: 1px solid #ca5a00 !important;
+}
+
+.badge-azura-removed {                        /* Supprimé d'AzuraCast (rouge) */
+    background: #dc3545 !important;          /* Bootstrap danger */
+    color: #fff !important;
+    border: 1px solid #b02a37 !important;
+    text-decoration: line-through !important;
+    text-decoration-thickness: 1px !important;
+}
+
+.badge-azura:hover,
+.badge-azura-push:hover,
+.badge-azura-active:hover,
+.badge-azura-retired:hover,
+.badge-azura-removed:hover {
+    filter: brightness(1.1) !important;
+    cursor: help !important;
+}
+/* ──────────────────────────────────────────────────────────────────────── */
