@@ -200,6 +200,27 @@
             margin: 0.35rem 0.8rem;
         }
 
+        /* ── Phase 20.3 : labels de section + pastille d'état worker ── */
+        .sb-section-label {
+            padding: 0.9rem 1rem 0.3rem;
+            font-size: 0.66rem;
+            font-weight: 700;
+            letter-spacing: 1.2px;
+            text-transform: uppercase;
+            color: #64748b;
+        }
+        .sb-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-left: auto;
+            background: #64748b;
+            flex-shrink: 0;
+        }
+        .sb-dot.ok { background: #22c55e; }
+        .sb-dot.ko { background: #ef4444; }
+
         /* ── Worker badge in sidebar footer ── */
         .sb-footer {
             padding: 0.6rem 1rem;
@@ -581,11 +602,14 @@
 
     <ul class="sb-nav" id="sbNav">
         <li>
-            <button class="sb-link active" id="nav-explorateur-tab"
-                    data-target="#nav-explorateur" type="button">
-                🎧 Explorateur
+            <button class="sb-link active" id="nav-accueil-tab"
+                    data-target="#nav-accueil" type="button">
+                🏠 Accueil
             </button>
         </li>
+
+        <li class="sb-section-label">Antenne</li>
+
         <li>
             <button class="sb-link" id="nav-atelier-tab"
                     data-target="#nav-atelier" type="button"
@@ -610,24 +634,9 @@
             </button>
         </li>
         <li>
-            <button class="sb-link" id="nav-pool-tab"
-                    data-target="#nav-pool" type="button">
-                🗂️ Pool Intervenants
-            </button>
-        </li>
-
-        <li class="sb-divider"></li>
-
-        <li>
             <button class="sb-link" id="nav-grille-editoriale-tab"
                     data-target="#nav-grille-editoriale" type="button">
                 🗓️ Grille éditoriale
-            </button>
-        </li>
-        <li>
-            <button class="sb-link" id="nav-audience-tab"
-                    data-target="#nav-audience" type="button">
-                📊 Audience
             </button>
         </li>
         <li>
@@ -637,13 +646,34 @@
             </button>
         </li>
 
-        <li class="sb-divider"></li>
+        <li class="sb-section-label">Bibliothèque</li>
 
+        <li>
+            <button class="sb-link" id="nav-explorateur-tab"
+                    data-target="#nav-explorateur" type="button">
+                🎧 Explorateur
+            </button>
+        </li>
+        <li>
+            <button class="sb-link" id="nav-pool-tab"
+                    data-target="#nav-pool" type="button">
+                🗂️ Pool Intervenants
+            </button>
+        </li>
+
+        <li class="sb-section-label">Système</li>
+
+        <li>
+            <button class="sb-link" id="nav-audience-tab"
+                    data-target="#nav-audience" type="button">
+                📊 Audience
+            </button>
+        </li>
         <li>
             <button class="sb-link" id="nav-maintenance-tab"
                     data-target="#nav-maintenance" type="button"
                     data-submenu="maintenanceSub">
-                ⚙️ Maintenance <span class="arrow">▸</span>
+                ⚙️ Maintenance <span class="sb-dot" id="sb-dot-worker" title="Worker Ubuntu — état de connexion"></span> <span class="arrow">▸</span>
             </button>
             <ul class="sb-sub" id="maintenanceSub">
                 <li><button class="sb-link" type="button" data-scroll="maintenance-card-recherche-copie" data-parent="#nav-maintenance">🔍 Recherche & Copie</button></li>
@@ -673,9 +703,87 @@
     <div class="tab-content" id="mainTabContent">
 
         <!-- ════════════════════════════════════ -->
+        <!-- ACCUEIL (Phase 20.3) — vue d'ensemble -->
+        <!-- ════════════════════════════════════ -->
+        <div class="tab-pane fade show active" id="nav-accueil" role="tabpanel"
+             aria-labelledby="nav-accueil-tab">
+
+            <div class="row g-3 mb-3">
+                <div class="col-6 col-lg-3">
+                    <div class="card dashboard-card h-100">
+                        <div class="card-body">
+                            <div class="text-muted small fw-bold mb-1">📡 EN ANTENNE</div>
+                            <div class="fw-bold text-truncate" id="acc-now-title">—</div>
+                            <div class="text-muted small text-truncate" id="acc-now-artist">chargement…</div>
+                            <div class="small mt-2">
+                                <span class="badge bg-info text-dark" id="acc-now-listeners">—</span>
+                                <span class="text-muted">auditeurs · Station 7</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-lg-3">
+                    <div class="card dashboard-card h-100">
+                        <div class="card-body">
+                            <div class="text-muted small fw-bold mb-1">🚫 MANQUANTS EN ATTENTE</div>
+                            <div class="fw-bold" style="font-size:1.8rem" id="acc-manquants">—</div>
+                            <button class="btn btn-sm btn-outline-warning mt-2"
+                                    data-goto-nav="nav-atelier-tab" data-goto-pill="push-manquants-tab">
+                                Traiter →
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-lg-3">
+                    <div class="card dashboard-card h-100">
+                        <div class="card-body">
+                            <div class="text-muted small fw-bold mb-1">📥 IMPORTÉS (7 JOURS)</div>
+                            <div class="fw-bold" style="font-size:1.8rem" id="acc-importes">—</div>
+                            <div class="text-muted small mt-2">via Titres Manquants</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-6 col-lg-3">
+                    <div class="card dashboard-card h-100">
+                        <div class="card-body">
+                            <div class="text-muted small fw-bold mb-1">🤖 WORKER UBUNTU</div>
+                            <div class="fw-bold text-truncate" style="font-size:1.1rem" id="acc-worker">—</div>
+                            <div class="small mt-2">
+                                <span class="badge bg-secondary" id="acc-worker-status">vérification…</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-3">
+                <div class="col-lg-7">
+                    <div class="card dashboard-card h-100">
+                        <div class="card-body">
+                            <div class="fw-bold mb-2">📥 Derniers titres synchronisés</div>
+                            <div id="acc-latest-list" class="small">chargement…</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-5">
+                    <div class="card dashboard-card h-100">
+                        <div class="card-body">
+                            <div class="fw-bold mb-2">⚡ Raccourcis</div>
+                            <button class="btn btn-outline-primary btn-sm w-100 text-start mb-2" data-goto-nav="nav-explorateur-tab">🎧 Explorateur — bibliothèque RadioDJ</button>
+                            <button class="btn btn-outline-primary btn-sm w-100 text-start mb-2" data-goto-nav="nav-atelier-tab">🛠️ Programmation — push vers AzuraCast</button>
+                            <button class="btn btn-outline-primary btn-sm w-100 text-start mb-2" data-goto-nav="nav-grille-editoriale-tab">🗓️ Grille éditoriale</button>
+                            <button class="btn btn-outline-primary btn-sm w-100 text-start mb-2" data-goto-nav="nav-audience-tab">📊 Audience</button>
+                            <button class="btn btn-outline-primary btn-sm w-100 text-start" data-goto-nav="nav-maintenance-tab">⚙️ Maintenance</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ════════════════════════════════════ -->
         <!-- EXPLORATEUR                    -->
         <!-- ════════════════════════════════════ -->
-            <div class="tab-pane fade show active" id="nav-explorateur" role="tabpanel"
+            <div class="tab-pane fade" id="nav-explorateur" role="tabpanel"
                  aria-labelledby="nav-explorateur-tab">
     
                 <div class="card dashboard-card accent-search">
@@ -5223,7 +5331,7 @@
 <!-- SIDEBAR JS (manual navigation — Bootstrap Tab can't cross DOM branches) -->
 <!-- ═══════════════════════════════════════════════════ -->
 <!-- Navigation sidebar (module externe) -->
-<script src="/static/js/modules/navigation.js?v=1"></script>
+<script src="/static/js/modules/navigation.js?v=2"></script>
 
 
 <!-- ══════════════════════════════════════════════════ -->
@@ -5244,6 +5352,7 @@
 <!-- PHASE 3 - Étape 5b : piges-podcasts (piges, lectures, promotion podcast) -->
 <!-- Phase 20.1 : Topbar antenne live (poll /api/nowplaying/<sid>, horloge, thème) -->
 <script src="/static/js/modules/dashboard-header.js?v=3"></script>
+<script src="/static/js/modules/accueil.js?v=1"></script>
 <!-- Modules extraits : utils.js, grille-editoriale.js, navigation.js, shazam-animateurs.js, pont-player.js, stats-audience.js, sync-azuracast.js, couleur.js, pool-tiers.js, piges-podcasts.js, dashboard-header.js -->
 <!-- ══════════════════════════════════════════════════ -->
 <script>

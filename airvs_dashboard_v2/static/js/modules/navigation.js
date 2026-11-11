@@ -14,7 +14,9 @@
     var tabContent = document.getElementById('mainTabContent');
 
     // ── Core: manually show/hide a section pane ──
+    // Phase 20.3 : ajout de 'nav-accueil' (vue d'ensemble, onglet par défaut)
     var MAIN_PANE_IDS = [
+        'nav-accueil',
         'nav-explorateur','nav-pool','nav-atelier','nav-import',
         'nav-couleur','nav-grille-editoriale','nav-maintenance',
         'nav-audience','nav-piges'
@@ -224,10 +226,10 @@
     var animInput = document.getElementById('animateurs_csv_file');
     if (animInput) animInput.addEventListener('change', shazamFileHandler('animateurs'));
 
-    // ── Init: hide all panes except Explorateur on load ──
+    // ── Init: hide all panes except Accueil on load (Phase 20.3 : Accueil = onglet par défaut) ──
     for (var k = 0; k < MAIN_PANE_IDS.length; k++) {
         var p = document.getElementById(MAIN_PANE_IDS[k]);
-        if (p && MAIN_PANE_IDS[k] !== 'nav-explorateur') {
+        if (p && MAIN_PANE_IDS[k] !== 'nav-accueil') {
             p.style.display = 'none';
         }
     }
