@@ -669,8 +669,9 @@ function lancerCouleurDryRun(id, skipAntiRep) {
             } else {
                 let html = '';
                 data.titres.forEach(function(t, i) {
+                    // Phase 19.1 — B1 : badge enrichi via AzuraFlags (gère legacy + AZURA_*_S*)
                     let badge = t.in_azura
-                        ? '<span class="badge-azura">IN_AZURA</span>'
+                        ? AzuraFlags.getBadgeHTML(t.comments || 'IN_AZURACAST')
                         : '<span class="badge bg-secondary">à copier</span>';
                     html += '<tr>'
                         + '<td>' + (i + 1) + '</td>'

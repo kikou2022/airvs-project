@@ -117,14 +117,54 @@ window.AzuraFlags = (function() {
         var st = getState(comments);
         if (!st.flag) return '';
         if (st.legacy) {
-            return '<span class="badge-azura" title="Présent dans AzuraCast (format legacy)">IN_AZURACAST</span>';
+            // Phase 19.1 — B1.2 : styles inline pour résister à Dark Reader
+            // (Dark Reader réécrit le CSS externe mais laisse les styles inline intacts)
+            return '<span class="badge-azura" ' +
+                'style="display:inline-block;padding:2px 8px;border-radius:12px;' +
+                'font-size:0.72em;font-weight:600;white-space:nowrap;vertical-align:middle;' +
+                'background:#0d6efd !important;color:#fff !important;' +
+                'border:1px solid rgba(0,0,0,0.15) !important;line-height:1.4;" ' +
+                'title="Présent dans AzuraCast (format legacy)">IN_AZURACAST</span>';
         }
 
+        // Phase 19.1 — B1.2 : styles inline (couleurs Bootstrap solides)
+        // pour résister à Dark Reader. Les classes CSS sont conservées pour
+        // les éventuels overrides futurs, mais les couleurs sont forcées
+        // via !important en inline.
         var labels = {
-            'PUSHED':  { text: 'POUSSÉ',   cls: 'badge-azura badge-azura-push',    desc: 'Poussé vers AzuraCast — pas encore en playlist' },
-            'ACTIVE':  { text: 'ACTIF',    cls: 'badge-azura badge-azura-active',  desc: 'Actif en playlist AzuraCast' },
-            'RETIRED': { text: 'RETRAIT',  cls: 'badge-azura badge-azura-retired', desc: 'Retiré des playlists AzuraCast — fichier conservé' },
-            'REMOVED': { text: 'SUPPRIMÉ', cls: 'badge-azura badge-azura-removed', desc: 'Supprimé d\'AzuraCast' }
+            'PUSHED':  {
+                text: 'POUSSÉ',
+                cls: 'badge-azura badge-azura-push',
+                desc: 'Poussé vers AzuraCast — pas encore en playlist',
+                bg: '#0d6efd',     // Bootstrap primary (bleu)
+                fg: '#ffffff',
+                border: '#0a58ca'
+            },
+            'ACTIVE':  {
+                text: 'ACTIF',
+                cls: 'badge-azura badge-azura-active',
+                desc: 'Actif en playlist AzuraCast',
+                bg: '#198754',     // Bootstrap success (vert)
+                fg: '#ffffff',
+                border: '#136f40'
+            },
+            'RETIRED': {
+                text: 'RETRAIT',
+                cls: 'badge-azura badge-azura-retired',
+                desc: 'Retiré des playlists AzuraCast — fichier conservé',
+                bg: '#fd7e14',     // Bootstrap warning (orange)
+                fg: '#ffffff',
+                border: '#ca5a00'
+            },
+            'REMOVED': {
+                text: 'SUPPRIMÉ',
+                cls: 'badge-azura badge-azura-removed',
+                desc: 'Supprimé d\'AzuraCast',
+                bg: '#dc3545',     // Bootstrap danger (rouge)
+                fg: '#ffffff',
+                border: '#b02a37',
+                textDecoration: 'line-through'
+            }
         };
 
         var info = labels[st.state];
@@ -136,7 +176,23 @@ window.AzuraFlags = (function() {
             : 'station ' + st.stations[0];
         var titleText = info.desc + ' (' + stationsLabel + ')';
         
-        return '<span class="' + info.cls + '" title="' + _escapeHtml(titleText) + '">' +
+        // Construction du style inline (résiste à Dark Reader)
+        var styleAttr = 'style="display:inline-block !important;' +
+            'padding:2px 8px !important;' +
+            'border-radius:12px !important;' +
+            'font-size:0.72em !important;' +
+            'font-weight:600 !important;' +
+            'white-space:nowrap !important;' +
+            'vertical-align:middle !important;' +
+            'background:' + info.bg + ' !important;' +
+            'color:' + info.fg + ' !important;' +
+            'border:1px solid ' + info.border + ' !important;' +
+            'line-height:1.4 !important;' +
+            (info.textDecoration ? 'text-decoration:' + info.textDecoration + ' !important;' : '') +
+            '"';
+        
+        return '<span class="' + info.cls + '" ' + styleAttr +
+               ' title="' + _escapeHtml(titleText) + '">' +
                info.text + ' ' + stationsTxt + '</span>';
     }
 
