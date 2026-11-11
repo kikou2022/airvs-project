@@ -4875,6 +4875,8 @@ def executer_import_m3u_playlist(tache_id, parametres):
     try:
         # Soit on a du M3U brut, soit on le génère à partir des fichiers
         m3u_content = parametres.get('m3u_content')
+        m3u_content_param_brut = bool(m3u_content)  # Phase 19.1 — A1
+        fichiers = parametres.get('fichiers', [])    # Phase 19.1 — A1 : portée élargie pour bloc retry
 
         if not m3u_content:
             fichiers = parametres.get('fichiers', [])
@@ -5002,6 +5004,50 @@ def executer_import_m3u_playlist(tache_id, parametres):
         # Mettre à jour le cache
         _synchroniser_cache_playlists(station_id)
 
+        # ── Phase 19.1 — A1 : retry différé si fichiers non résolus ──
+        # Si l'indexation AzuraCast a été lente et que des fichiers n'ont pas
+        # pu être résolus (chemin_reel_azuracast manquant), créer une tâche
+        # IMPORT_M3U_RETRY programmée 60s plus tard pour refaire un import M3U
+        # avec ces fichiers seulement (l'indexation aura eu le temps de finir).
+        fichiers_non_resolus = []
+        if not m3u_content_param_brut:  # seulement si on a généré le M3U nous-mêmes
+            for f in fichiers:
+                if not f.get('chemin_reel_azuracast'):
+                    fichiers_non_resolus.append({
+                        'path': f.get('path', ''),
+                        'artist': f.get('artist', ''),
+                        'title': f.get('title', ''),
+                        'in_azura': f.get('in_azura', False),
+                    })
+        if fichiers_non_resolus:
+            try:
+                retry_params = {
+                    'playlist_id': playlist_id,
+                    'playlist_name': playlist_name,
+                    'station_id': station_id,
+                    'dossier_cible': parametres.get('dossier_cible', 'imports_push'),
+                    'fichiers': fichiers_non_resolus,
+                    'push_task_id': _push_task_id,
+                    'retry_origin_task_id': tache_id,
+                    'auto_scheduled': True,
+                }
+                db_retry = pymysql.connect(**DB_CONFIG)
+                cur_retry = db_retry.cursor()
+                cur_retry.execute(
+                    "INSERT INTO taches_planifiees "
+                    "(type_action, statut, parametres, date_creation, date_planifiee) "
+                    "VALUES ('IMPORT_M3U_RETRY', 'en_attente', %s, NOW(), DATE_ADD(NOW(), INTERVAL 60 SECOND))",
+                    (json.dumps(retry_params),)
+                )
+                retry_task_id = cur_retry.lastrowid
+                db_retry.commit()
+                cur_retry.close()
+                db_retry.close()
+                logger(tache_id, f"📋 Tâche IMPORT_M3U_RETRY #{retry_task_id} créée (programmée dans 60s) "
+                                 f"pour {len(fichiers_non_resolus)} fichier(s) non résolu(s).")
+            except Exception as e_retry:
+                logger(tache_id, f"⚠ Impossible de créer la tâche IMPORT_M3U_RETRY : {e_retry}")
+
         if nb_fichiers_compare > 0 and nb_fichiers_ok == 0:
             logger(tache_id, "=== TERMINÉ IMPORT M3U (ÉCHEC) ===")
         else:
@@ -5013,6 +5059,124 @@ def executer_import_m3u_playlist(tache_id, parametres):
     except Exception as e:
         logger(tache_id, f"ERREUR INATTENDUE : {e}")
         logger(tache_id, "=== TERMINÉ IMPORT M3U (ERREUR) ===")
+
+
+def executer_import_m3u_retry(tache_id, parametres):
+    """Phase 19.1 — A1 : retry différé d'import M3U pour les fichiers non résolus
+    lors d'un import M3U précédent (indexation AzuraCast trop lente).
+
+    Cette tâche est créée automatiquement par executer_import_m3u_playlist
+    quand des fichiers n'ont pas pu être résolus (chemin_reel_azuracast manquant).
+    Elle est programmée 60s plus tard pour laisser le temps à AzuraCast de finir
+    son indexation.
+
+    Le handler refait une résolution des chemins pour les fichiers restants,
+    puis un import M3U dans la même playlist cible. Si certains fichiers sont
+    encore non résolus après ce retry, on logge en warning sans créer de
+    retry supplémentaire (limite à 1 retry pour éviter une cascade).
+    """
+    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    try:
+        station_id = int(station_id)
+    except (ValueError, TypeError):
+        station_id = _DEFAULT_STATION_ID
+
+    api = get_azura_api(station_id)
+    if not api:
+        logger(tache_id, "ERREUR FATALE: Module azuracast_api non disponible.")
+        logger(tache_id, "=== TERMINÉ IMPORT M3U RETRY ===")
+        return
+
+    playlist_id = parametres.get('playlist_id')
+    playlist_name = parametres.get('playlist_name', f"ID {playlist_id}")
+    fichiers = parametres.get('fichiers', [])
+    origin_task_id = parametres.get('retry_origin_task_id')
+
+    if not playlist_id or not fichiers:
+        logger(tache_id, "ERREUR: playlist_id ou fichiers manquants dans IMPORT_M3U_RETRY.")
+        logger(tache_id, "=== TERMINÉ IMPORT M3U RETRY (ERREUR) ===")
+        return
+
+    logger(tache_id, f"DÉBUT IMPORT M3U RETRY — playlist {playlist_name} — {len(fichiers)} fichier(s) à re-résoudre")
+    if origin_task_id:
+        logger(tache_id, f"  (origine : tâche #{origin_task_id})")
+
+    try:
+        # Résolution des chemins (1 seule tentative, l'indexation a eu 60s pour finir)
+        dict_chemins = _construire_dictionnaire_chemins_azuracast(station_id)
+        logger(tache_id, f"  {len(dict_chemins)} entrée(s) dans l'API AzuraCast.")
+
+        fichiers_resolus = 0
+        fichiers_encore_non_resolus = []
+        for f in fichiers:
+            artist = str(f.get('artist', '')).strip()
+            title = str(f.get('title', '')).strip()
+            cle = normaliser_pour_recherche(f"{artist} - {title}")
+            chemin_reel = dict_chemins.get(cle)
+            if chemin_reel:
+                f['chemin_reel_azuracast'] = chemin_reel
+                fichiers_resolus += 1
+            else:
+                fichiers_encore_non_resolus.append(f)
+
+        logger(tache_id, f"  {fichiers_resolus} fichier(s) résolu(s), {len(fichiers_encore_non_resolus)} encore non résolu(s).")
+
+        if fichiers_resolus == 0:
+            logger(tache_id, "⚠ Aucun fichier résolu après retry — abandon (pas de retry supplémentaire).")
+            logger(tache_id, "=== TERMINÉ IMPORT M3U RETRY (RIEN À IMPORTER) ===")
+            return
+
+        # Générer le M3U pour les fichiers résolus
+        m3u_content = ""
+        for f in fichiers:
+            chemin_reel = f.get('chemin_reel_azuracast')
+            if chemin_reel:
+                m3u_content += f"{chemin_reel}\n"
+
+        if not m3u_content.strip():
+            logger(tache_id, "⚠ M3U vide après retry — abandon.")
+            logger(tache_id, "=== TERMINÉ IMPORT M3U RETRY (M3U VIDE) ===")
+            return
+
+        nb_lignes = len(m3u_content.split('\n'))
+        logger(tache_id, f"Import M3U retry : {nb_lignes} ligne(s)...")
+
+        import_result = api.import_m3u(playlist_id, m3u_content)
+        msg = import_result.get('message', import_result.get('formatted_message', ''))
+        nb_fichiers_ok = 0
+        nb_fichiers_compare = 0
+        if msg:
+            import re as _re
+            match = _re.search(r'(\d+)\s+fichier[s]?\s+sur\s+(\d+)', msg)
+            if match:
+                nb_fichiers_ok = int(match.group(1))
+                nb_fichiers_compare = int(match.group(2))
+
+        if nb_fichiers_compare > 0 and nb_fichiers_ok < nb_fichiers_compare:
+            logger(tache_id, f"⚠ IMPORT M3U RETRY PARTIEL : {nb_fichiers_ok}/{nb_fichiers_compare} fichier(s) intégré(s).")
+            if msg:
+                logger(tache_id, f"   Détail AzuraCast : {msg}")
+        else:
+            logger(tache_id, f"✅ Import M3U retry réussi dans la playlist {playlist_name}.")
+            if msg:
+                logger(tache_id, f"   {msg}")
+
+        if fichiers_encore_non_resolus:
+            n = len(fichiers_encore_non_resolus)
+            logger(tache_id, f"⚠ {n} fichier(s) encore non résolu(s) après retry (pas de retry supplémentaire) :")
+            for f in fichiers_encore_non_resolus[:5]:
+                logger(tache_id, f"   • {f.get('artist', '?')} - {f.get('title', '?')}")
+
+        # Mettre à jour le cache
+        _synchroniser_cache_playlists(station_id)
+        logger(tache_id, "=== TERMINÉ IMPORT M3U RETRY ===")
+
+    except AzuraCastAPIError as e:
+        logger(tache_id, f"ERREUR API : {e}")
+        logger(tache_id, "=== TERMINÉ IMPORT M3U RETRY (ERREUR) ===")
+    except Exception as e:
+        logger(tache_id, f"ERREUR INATTENDUE : {e}")
+        logger(tache_id, "=== TERMINÉ IMPORT M3U RETRY (ERREUR) ===")
 
 
 def executer_sync_playlists_cache(tache_id, parametres):
@@ -5604,9 +5768,68 @@ def executer_audience_get_data(tache_id, parametres):
     _tache_store_json_result(tache_id, sortie)
 
 
+def _composer_flag_azura_multi_station(etat, station_ids):
+    """Phase 19.2 — Compose un flag AZURA_<ETAT>_S{id1}_S{id2}... à partir
+    d'un état et d'une liste de station_ids triées et uniques.
+
+    Args:
+        etat: 'ACTIVE' | 'RETIRED' | 'PUSHED' | 'REMOVED'
+        station_ids: liste de station_ids (ex: [6, 7])
+
+    Returns: 'AZURA_ACTIVE_S6_S7' (par exemple)
+    """
+    # Trier et dédoublonner
+    sorted_stations = sorted(set(station_ids))
+    parts = ['AZURA', etat] + [f'S{sid}' for sid in sorted_stations]
+    return '_'.join(parts)
+
+
+def _get_station_state_from_flag(flag, sid):
+    """Phase 19.2 — Extrait l'état (ACTIVE/RETIRED/PUSHED/REMOVED) d'une station
+    donnée à partir d'un flag AZURA_*_S*.
+
+    Args:
+        flag: 'AZURA_ACTIVE_S6_S7' (ou 'IN_AZURACAST', NULL, etc.)
+        sid: station_id (ex: 6 ou 7)
+
+    Returns: 'ACTIVE' | 'RETIRED' | 'PUSHED' | 'REMOVED' | None
+        None si la station n'est pas dans le flag ou si le flag n'est pas au
+        format AZURA_*_S*.
+    """
+    if not flag or not isinstance(flag, str):
+        return None
+    flag = flag.strip()
+    if not flag.startswith('AZURA_'):
+        return None
+    parts = flag.split('_')
+    # Format : ['AZURA', 'STATE', 'S6', 'S7', ...]
+    if len(parts) < 3:
+        return None
+    state = parts[1]
+    station_token = f'S{sid}'
+    if station_token in parts[2:]:
+        return state
+    return None
+
+
 def executer_sync_azura_status(tache_id, parametres):
-    """Compare les fichiers AzuraCast avec RadioDJ, met à jour comments = 'AZURA_PUSHED_S6_S7'
-    (badge global = présent dans au moins une station), et rafraîchit le cache des dossiers.
+    """Compare les fichiers AzuraCast avec RadioDJ, met à jour comments avec le flag
+    AZURA_*_S{station_id} correspondant à l'état réel observé via l'API.
+
+    Phase 19.2 — fix bug historique (depuis Phase 15) :
+      AVANT : tous les fichiers présents dans AzuraCast recevaient 'AZURA_PUSHED_S6_S7'
+              sans tenir compte de leur appartenance à une playlist.
+      APRÈS : pour chaque station, on regarde le champ 'playlists' du média :
+              - playlists non vide → AZURA_ACTIVE_S{station_id}
+              - playlists vide + fichier présent → AZURA_RETIRED_S{station_id}
+                 (si le titre n'a jamais été actif, on garde AZURA_PUSHED — non détectable
+                  sans historique ; on l'utilise par défaut pour les nouveaux poussés)
+              - fichier absent d'AzuraCast → AZURA_REMOVED_S{station_id}
+              Le flag final est composé en fusionnant l'état par station :
+              - actif en S6+S7 → AZURA_ACTIVE_S6_S7
+              - actif en S7, retiré en S6 → AZURA_ACTIVE_S7 (état le plus élevé l'emporte)
+              - retiré des deux → AZURA_RETIRED_S6_S7
+              - absent des deux → AZURA_REMOVED_S6_S7
 
     Parametres :
       - station_ids: liste d'IDs de stations à interroger (ex: [6, 7]).
@@ -5628,13 +5851,19 @@ def executer_sync_azura_status(tache_id, parametres):
     if not station_ids:
         station_ids = [_DEFAULT_STATION_ID]
 
-    logger(tache_id, f"Synchronisation IN_AZURACAST démarrée pour station(s) {station_ids} (badge global)")
+    logger(tache_id, f"Synchronisation IN_AZURACAST démarrée pour station(s) {station_ids} (badge global, Phase 19.2 — ACTIVE/RETIRED/PUSHED/REMOVED)")
 
     # 1. Récupérer tous les fichiers d'AzuraCast via l'API (POUR TOUTES LES STATIONS)
-    all_azura_files = set()
+    # Phase 19.2 : structure enrichie — pour chaque clé (basename OU artist-title),
+    # on conserve un dict {station_id: 'ACTIVE' | 'RETIRED' | 'PRESENT'} pour pouvoir
+    # composer le flag final précis.
+    # 'PRESENT' = fichier dans AzuraCast mais playlists vide → on détermine ACTIVE vs PUSHED
+    # plus tard (PUSHED si le flag RadioDJ n'a jamais été ACTIVE/RETIRED, sinon RETIRED).
+    all_azura_states = {}  # clé → {station_id: 'ACTIVE' | 'RETIRED' | 'PRESENT'}
     all_folders = set()  # Dossiers agrégés (les 2 stations partagent sshfs_root)
     total_rows = 0
     api_ok_count = 0  # Nombre de stations dont l'API a répondu avec succès
+    stations_with_api = set()  # stations ayant répondu (pour marquer REMOVED sur les autres)
 
     for sid in station_ids:
         try:
@@ -5651,14 +5880,27 @@ def executer_sync_azura_status(tache_id, parametres):
             logger(tache_id, f"[station {sid}] {len(rows)} fichier(s) récupéré(s)")
             total_rows += len(rows)
             api_ok_count += 1
+            stations_with_api.add(sid)
 
             for morceau in rows:
                 if not isinstance(morceau, dict):
                     continue
                 fname = morceau.get("path", "")
+                # Déterminer l'état : ACTIVE si playlists non vide, sinon RETIRED
+                # (le fichier est présent mais pas en playlist).
+                playlists = morceau.get("playlists", [])
+                has_playlists = bool(playlists) and len(playlists) > 0
+                etat = 'ACTIVE' if has_playlists else 'RETIRED'
+                # Note : RETIRED ici signifie "présent mais pas en playlist".
+                # Si le titre n'a jamais été actif (cas d'un push récent sans ajout
+                # playlist), le flag devrait être PUSHED — mais on ne peut pas le
+                # savoir sans lire l'état actuel de comments RadioDJ. La logique
+                # de résolution PUSHED vs RETIRED est faite plus tard (section 3).
+
                 if fname:
                     basename = fname.rsplit('/', 1)[-1] if '/' in fname else fname
-                    all_azura_files.add(basename.lower().strip())
+                    cle_basename = basename.lower().strip()
+                    all_azura_states.setdefault(cle_basename, {})[sid] = etat
                     if '/' in fname:
                         parts = fname.split('/')
                         for i in range(1, len(parts)):
@@ -5667,7 +5909,7 @@ def executer_sync_azura_status(tache_id, parametres):
                 title = str(morceau.get("title", "") or "").strip()
                 if artist and title:
                     chaine = normaliser_pour_recherche(f"{artist} - {title}")
-                    all_azura_files.add(chaine)
+                    all_azura_states.setdefault(chaine, {})[sid] = etat
         except Exception as e:
             logger(tache_id, f"[station {sid}] ERREUR API: {e}")
             continue
@@ -5839,53 +6081,155 @@ def executer_sync_azura_status(tache_id, parametres):
     except Exception as e:
         logger(tache_id, f"ERREUR cache dossiers: {e}")
 
-    # 3. Comparer avec la base RadioDJ et marquer IN_AZURACAST (badge global)
+    # 3. Comparer avec la base RadioDJ et mettre à jour comments avec le flag
+    #    AZURA_*_S* précis (Phase 19.2 — ACTIVE/RETIRED/PUSHED/REMOVED).
     try:
         db = pymysql.connect(**DB_CONFIG)
         cursor = db.cursor(pymysql.cursors.DictCursor)
-        cursor.execute("SELECT ID, `path`, artist, title FROM radiodb.songs WHERE song_type = 0")
+        # Phase 19.2 : on lit aussi le comments actuel pour résoudre
+        # PUSHED vs RETIRED quand playlists est vide côté AzuraCast.
+        # Si comments actuel contient déjà ACTIVE/RETIRED/PUSHED et que le fichier
+        # est présent sans playlist → on garde l'historique (PUSHED si nouveau).
+        # Si comments actuel est NULL/vide/IN_AZURACAST → on initialise à PUSHED.
+        cursor.execute("SELECT ID, `path`, artist, title, comments FROM radiodb.songs WHERE song_type = 0")
         all_songs = cursor.fetchall()
 
-        ids_a_marquer = []
+        # Phase 19.2 : pour chaque song, on détermine son nouvel état par station.
+        # On construit un dict {song_id: nouveau_flag} — un seul UPDATE par song.
+        updates_par_flag = {}  # {nouveau_flag: [song_id1, song_id2, ...]}
+        nb_match = 0
+        nb_no_match = 0
+
         for song in all_songs:
             song_path = song.get('path', '')
             song_id = song.get('ID')
+            current_comments = song.get('comments') or ''
             if not song_path:
                 continue
 
             # Comparaison par nom de fichier
             basename = song_path.rsplit('\\', 1)[-1] if '\\' in song_path else song_path.rsplit('/', 1)[-1]
-            if basename.lower().strip() in all_azura_files:
-                ids_a_marquer.append(song_id)
-                continue
+            cle_basename = basename.lower().strip()
 
             # Comparaison par artist - titre (fallback)
             song_artist = str(song.get('artist', '') or '').strip()
             song_title = str(song.get('title', '') or '').strip()
-            if song_artist and song_title:
-                chaine = normaliser_pour_recherche(f"{song_artist} - {song_title}")
-                if chaine in all_azura_files:
-                    ids_a_marquer.append(song_id)
+            chaine_at = normaliser_pour_recherche(f"{song_artist} - {song_title}") if song_artist and song_title else None
 
-        logger(tache_id, f"{len(all_songs)} titre(s) dans RadioDJ, {len(ids_a_marquer)} correspondance(s) trouvée(s)")
+            # Chercher l'état par station dans all_azura_states
+            # (priorité au match basename, fallback artist-title)
+            states_par_station = all_azura_states.get(cle_basename)
+            if not states_par_station and chaine_at:
+                states_par_station = all_azura_states.get(chaine_at)
 
-        # Mettre à jour les badges IN_AZURACAST
+            if not states_par_station:
+                # Fichier absent d'AzuraCast → REMOVED pour toutes les stations
+                # ayant répondu à l'API. On ne touche pas aux stations sans API
+                # (on ne sait pas si le fichier est présent ou non).
+                # Si le comments actuel n'a pas déjà un flag AZURA_*_S*, on ne
+                # touche à rien (titre jamais poussé → on garde NULL/vide).
+                if current_comments and current_comments.startswith('AZURA_') and not current_comments.startswith('AZURA_REMOVED'):
+                    # Titre était présent (PUSHED/ACTIVE/RETIRED) → désormais REMOVED
+                    # sur toutes les stations ayant répondu à l'API.
+                    stations_for_removed = sorted(stations_with_api)
+                    if stations_for_removed:
+                        nouveau_flag = _composer_flag_azura_multi_station('REMOVED', stations_for_removed)
+                        updates_par_flag.setdefault(nouveau_flag, []).append(song_id)
+                nb_no_match += 1
+                continue
+
+            nb_match += 1
+
+            # Pour chaque station, déterminer le nouvel état en tenant compte
+            # de l'historique RadioDJ (current_comments).
+            # Règle :
+            # - Si AzuraCast dit ACTIVE → nouvel état = ACTIVE
+            # - Si AzuraCast dit RETIRED (playlists vide) :
+            #     - Si current_comments avait ACTIVE ou RETIRED → on garde RETIRED
+            #     - Si current_comments était PUSHED ou NULL/IN_AZURACAST → on garde PUSHED
+            #       (le titre a été poussé mais jamais mis en playlist — pas un retrait)
+            # - Si station non répondue (pas dans states_par_station) → on garde l'état
+            #   précédent du comments si AZURA_*_S{station_id} était présent, sinon rien.
+            nouvel_etat_par_station = {}  # {station_id: 'ACTIVE' | 'RETIRED' | 'PUSHED' | 'REMOVED'}
+
+            for sid in station_ids:
+                if sid in states_par_station:
+                    etat_azura = states_par_station[sid]
+                    if etat_azura == 'ACTIVE':
+                        nouvel_etat_par_station[sid] = 'ACTIVE'
+                    else:  # RETIRED (playlists vide)
+                        # Vérifier si le titre avait déjà été actif/retiré sur cette station
+                        # Phase 19.2 : on parse le flag actuel pour extraire l'état
+                        # de cette station précise (au lieu de startwith qui ne gère pas
+                        # le multi-stations correctement).
+                        etat_precedent = _get_station_state_from_flag(current_comments, sid)
+                        if etat_precedent in ('ACTIVE', 'RETIRED'):
+                            nouvel_etat_par_station[sid] = 'RETIRED'
+                        else:
+                            # Jamais été actif → on garde PUSHED (pas un retrait)
+                            nouvel_etat_par_station[sid] = 'PUSHED'
+                elif sid in stations_with_api:
+                    # Station a répondu mais fichier absent → REMOVED
+                    nouvel_etat_par_station[sid] = 'REMOVED'
+                # else: station n'a pas répondu → on ne touche pas (incertitude)
+
+            if not nouvel_etat_par_station:
+                continue  # rien à faire (aucune station répondue)
+
+            # Composer le flag final en fusionnant les états par station.
+            # Priorité des états : ACTIVE > RETIRED > PUSHED > REMOVED
+            # Si un titre est ACTIVE sur S7 et REMOVED sur S6, on garde ACTIVE_S7
+            # (le titre existe bien sur au moins une station, et y est actif).
+            stations_actives = sorted([sid for sid, e in nouvel_etat_par_station.items() if e == 'ACTIVE'])
+            stations_retired = sorted([sid for sid, e in nouvel_etat_par_station.items() if e == 'RETIRED'])
+            stations_pushed = sorted([sid for sid, e in nouvel_etat_par_station.items() if e == 'PUSHED'])
+            stations_removed = sorted([sid for sid, e in nouvel_etat_par_station.items() if e == 'REMOVED'])
+
+            if stations_actives:
+                nouveau_flag = _composer_flag_azura_multi_station('ACTIVE', stations_actives)
+            elif stations_retired:
+                nouveau_flag = _composer_flag_azura_multi_station('RETIRED', stations_retired)
+            elif stations_pushed:
+                nouveau_flag = _composer_flag_azura_multi_station('PUSHED', stations_pushed)
+            elif stations_removed:
+                nouveau_flag = _composer_flag_azura_multi_station('REMOVED', stations_removed)
+            else:
+                continue  # ne devrait pas arriver
+
+            # Ne faire l'UPDATE que si le flag change réellement (évite UPDATE inutiles)
+            if current_comments != nouveau_flag:
+                updates_par_flag.setdefault(nouveau_flag, []).append(song_id)
+
+        logger(tache_id, f"{len(all_songs)} titre(s) dans RadioDJ, {nb_match} correspondance(s) AzuraCast trouvée(s), {nb_no_match} sans match")
+
+        # Mettre à jour les flags RadioDJ — un batch UPDATE par valeur de flag
+        # (pour utiliser IN (?, ?, ...) avec un seul flag par requête).
         updated = 0
-        if ids_a_marquer:
-            for i in range(0, len(ids_a_marquer), 100):
-                batch = ids_a_marquer[i:i+100]
+        for nouveau_flag, song_ids in updates_par_flag.items():
+            for i in range(0, len(song_ids), 100):
+                batch = song_ids[i:i+100]
                 placeholders = ','.join(['%s'] * len(batch))
                 cursor.execute(
-                    f"UPDATE radiodb.songs SET comments = 'AZURA_PUSHED_S6_S7' WHERE ID IN ({placeholders}) AND (comments IS NULL OR comments = '' OR comments = 'IN_AZURACAST')",
-                    batch
+                    f"UPDATE radiodb.songs SET comments = %s WHERE ID IN ({placeholders})",
+                    [nouveau_flag] + batch
                 )
                 updated += cursor.rowcount
+        if updated:
             db.commit()
+
+        # Log de répartition par état (utile pour diagnostic)
+        repartition = {}
+        for flag in updates_par_flag.keys():
+            etat = flag.split('_')[1] if '_' in flag else '?'
+            repartition[etat] = repartition.get(etat, 0) + len(updates_par_flag[flag])
+        if repartition:
+            parts = [f"{etat}: {n}" for etat, n in sorted(repartition.items())]
+            logger(tache_id, f"Répartition des updates : {', '.join(parts)}")
 
         cursor.close()
         db.close()
 
-        logger(tache_id, f"{updated} titre(s) marqué(s) IN_AZURACAST")
+        logger(tache_id, f"{updated} titre(s) mis à jour (flag AZURA_*_S*)")
         logger(tache_id, "=== TERMINÉ SYNC AZURA STATUS ===")
 
     except Exception as e:
@@ -5914,6 +6258,15 @@ VPS_SYNC_URL = "https://programmes.airvs.fr"
 VPS_SYNC_TOKEN = os.getenv("VPS_SYNC_TOKEN", "")  # Token API du VPS
 INTERVALLE_SYNC_VPS = 300  # Vérifie sync VPS toutes les 5 min
 INTERVALLE_CLEANUP_ORPHELINES = 3600  # Nettoyage tâches orphelines toutes les heures
+
+# ── Phase 20.1 : Cache nowplaying AzuraCast (topbar dashboard) ──
+# Le worker (Ubuntu .17, internet OK) fetche /api/nowplaying/{station_id} toutes
+# les 10s pour chaque station configurée et UPSERT le JSON dans la table
+# airvs_nowplaying_cache. Le dashboard Flask (Windows .39, SANS internet) lit
+# cette table via /api/nowplaying/<station_id> (rapide, <10ms, pas d'internet).
+# Stations ciblées : lues dynamiquement depuis config.json (azuracast.stations),
+# fallback [6, 7].
+INTERVALLE_NOWPLAYING_CACHE = 10  # Rafraîchissement cache nowplaying toutes les 10s
 
 # Types d'action qui ne sont jamais traités par le worker mais peuvent être
 # insérés par le dashboard (annulations, etc.)
@@ -7650,10 +8003,169 @@ def _sync_vps_automatique():
         print(f"[VPS SYNC AUTO] Erreur : {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# ═══ Phase 20.1 : Cache nowplaying AzuraCast (topbar dashboard) ═══════
+# Le worker fetch /api/nowplaying/{station_id} toutes les 10s et UPSERT le
+# JSON dans airvs_nowplaying_cache. Le dashboard Flask (sans internet) lit
+# cette table via /api/nowplaying/<station_id> (<10ms, pas d'appel réseau).
+# ═══════════════════════════════════════════════════════════════════════
+
+def _lister_stations_pour_nowplaying():
+    """Retourne la liste des IDs de stations AzuraCast à surveiller pour le
+    cache nowplaying. Lit config.json (azuracast.stations), fallback [6, 7].
+    """
+    try:
+        azura = _charger_azura_config_worker()
+        stations = azura.get("stations") if isinstance(azura, dict) else None
+        if isinstance(stations, list) and stations:
+            ids = []
+            for s in stations:
+                if isinstance(s, dict) and "id" in s:
+                    try:
+                        ids.append(int(s["id"]))
+                    except (TypeError, ValueError):
+                        continue
+            if ids:
+                return ids
+    except Exception as e:
+        print(f"[NOWPLAYING] Erreur lecture stations config : {e}")
+    return [6, 7]  # Fallback historique
+
+
+def _assurer_schema_nowplaying_cache():
+    """Crée la table airvs_nowplaying_cache si elle n'existe pas (idempotent).
+
+    Schema :
+      station_id  INT PRIMARY KEY
+      data        JSON NOT NULL  (payload complet /api/nowplaying)
+      fetched_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    """
+    try:
+        db = pymysql.connect(**DB_CONFIG)
+        cursor = db.cursor()
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS airvs_nowplaying_cache ("
+            "  station_id INT PRIMARY KEY,"
+            "  data JSON NOT NULL,"
+            "  fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "    ON UPDATE CURRENT_TIMESTAMP"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )
+        db.commit()
+        cursor.close()
+        db.close()
+        print("  ✓ Table airvs_nowplaying_cache créée/vérifiée")
+    except Exception as e:
+        print(f"  ⚠ Impossible de créer la table airvs_nowplaying_cache : {e}")
+
+
+def _fetch_nowplaying_cache(station_ids):
+    """Fetch /api/nowplaying/{station_id} pour chaque station et UPSERT dans
+    airvs_nowplaying_cache.
+
+    Args:
+        station_ids: liste d'IDs de stations AzuraCast (ex: [6, 7])
+
+    Notes:
+        - URL: {base_url}/api/nowplaying/{station_id}
+          (base_url depuis config.json, SANS /api ; on l'ajoute)
+        - Header Authorization: Bearer {api_key}
+        - Réutilise _bulk_get_azura_config() pour résoudre (base_url_api, api_key)
+        - Une station en erreur n'interrompt pas les autres
+        - Logge en console le nb de stations mises à jour
+    """
+    if not station_ids:
+        return
+    try:
+        base_url, api_key = _bulk_get_azura_config()
+    except Exception as e:
+        print(f"[NOWPLAYING] Erreur config AzuraCast : {e}")
+        return
+    if not base_url or not api_key:
+        print("[NOWPLAYING] base_url/api_key vides — cache ignoré")
+        return
+
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'X-API-Key': api_key,  # fallback pour certains endpoints
+        'Accept': 'application/json',
+    }
+
+    nb_ok = 0
+    nb_err = 0
+    for sid in station_ids:
+        url = f"{base_url}/nowplaying/{int(sid)}"
+        try:
+            resp = requests.get(url, headers=headers, timeout=8)
+            if resp.status_code != 200:
+                nb_err += 1
+                if resp.status_code != 404:  # 404 = station inexistante, silencieux
+                    print(f"[NOWPLAYING] station {sid} -> HTTP {resp.status_code}")
+                continue
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                nb_err += 1
+                continue
+            # UPSERT dans la table cache
+            try:
+                db = pymysql.connect(**DB_CONFIG)
+                cursor = db.cursor()
+                cursor.execute(
+                    "INSERT INTO airvs_nowplaying_cache (station_id, data, fetched_at) "
+                    "VALUES (%s, %s, NOW()) "
+                    "ON DUPLICATE KEY UPDATE data = VALUES(data), fetched_at = NOW()",
+                    (int(sid), json.dumps(payload))
+                )
+                db.commit()
+                cursor.close()
+                db.close()
+                nb_ok += 1
+            except Exception as dbe:
+                nb_err += 1
+                print(f"[NOWPLAYING] station {sid} DB error : {dbe}")
+        except requests.RequestException as re:
+            nb_err += 1
+            # Erreurs réseau courantes (timeout, DNS) : silencieuses pour éviter
+            # de spammer la console si AzuraCast est temporairement injoignable.
+            print(f"[NOWPLAYING] station {sid} réseau : {re}")
+        except Exception as e:
+            nb_err += 1
+            print(f"[NOWPLAYING] station {sid} erreur : {e}")
+
+    if nb_ok or nb_err:
+        print(f"[NOWPLAYING] {nb_ok} station(s) mises à jour, {nb_err} erreur(s)")
+
+
 def main():
     print(f"Worker Ubuntu démarré (version {WORKER_VERSION}). En attente de tâches SQL...")
     # Créer les tables airvs_* si manquantes (idempotent)
     _assurer_schema_airvs_couleur_worker()
+    # ── Phase 20.1 : table cache nowplaying (topbar dashboard) ──
+    _assurer_schema_nowplaying_cache()
+
+    # ── Phase 19.1 — A1 : Migration colonne date_planifiee sur taches_planifiees ──
+    # Permet de programmer une tâche IMPORT_M3U_RETRY 60s plus tard (retry différé
+    # pour les fichiers non résolus à cause d'une indexation AzuraCast lente).
+    # Idempotent : ne fait rien si la colonne existe déjà.
+    try:
+        db_mig = pymysql.connect(**DB_CONFIG)
+        cur_mig = db_mig.cursor()
+        cur_mig.execute("SHOW COLUMNS FROM taches_planifiees LIKE 'date_planifiee'")
+        if not cur_mig.fetchone():
+            cur_mig.execute(
+                "ALTER TABLE taches_planifiees "
+                "ADD COLUMN date_planifiee DATETIME NULL DEFAULT NULL "
+                "COMMENT 'Phase 19.1 — A1 : délai avant exécution (IMPORT_M3U_RETRY)'"
+            )
+            cur_mig.execute(
+                "CREATE INDEX idx_taches_planifiees_date ON taches_planifiees (date_planifiee)"
+            )
+            db_mig.commit()
+            print("  ✓ Migration : colonne date_planifiee ajoutée à taches_planifiees (Phase 19.1 — A1)")
+        cur_mig.close()
+        db_mig.close()
+    except Exception as e:
+        print(f"  ⚠ Migration date_planifiee ignorée (déjà faite ou erreur non bloquante) : {e}")
 
     # ── Enregistrer la version du worker en base pour vérification dashboard ──
     # On crée une table dédiée si elle n'existe pas, puis on UPSERT la version.
@@ -7882,6 +8394,10 @@ def main():
     dernier_check_sync_vps = 0
     dernier_check_orphelines = 0
     dernier_check_purge_terminees = 0  # 2026.09.28 : purge auto tâches terminées
+    dernier_check_nowplaying = 0  # Phase 20.1 : cache nowplaying topbar (10s)
+    # Cache des IDs de stations à surveiller (config.json, résolu une fois au démarrage)
+    _np_station_ids = _lister_stations_pour_nowplaying()
+    print(f"[NOWPLAYING] Stations surveillées : {_np_station_ids}")
     while True:
         try:
             # ── Vérification périodique des créneaux PROGRAMMATION_COULEUR ──
@@ -7889,6 +8405,16 @@ def main():
             if now_ts - dernier_check_couleur >= INTERVALLE_VERIFICATION_COULEUR:
                 _verifier_creneaux_programmation_couleur()
                 dernier_check_couleur = now_ts
+
+            # ── Phase 20.1 : Cache nowplaying AzuraCast (topbar dashboard) ──
+            # Toutes les 10s : fetch /api/nowplaying/{sid} pour chaque station et
+            # UPSERT dans airvs_nowplaying_cache. Non bloquant (catch-all).
+            if now_ts - dernier_check_nowplaying >= INTERVALLE_NOWPLAYING_CACHE:
+                try:
+                    _fetch_nowplaying_cache(_np_station_ids)
+                except Exception as _npe:
+                    print(f"[NOWPLAYING] Erreur boucle : {_npe}")
+                dernier_check_nowplaying = now_ts
 
             # ── Vérification périodique de l'auto-check Google Sheets ──
             if now_ts - dernier_check_auto >= INTERVALLE_AUTO_CHECK:
@@ -7976,7 +8502,12 @@ def main():
                 "    'GET_MEDIA_PLAYLISTS', "  # Phase 1 améliorée — dropdown playlists
                 "    'GET_BATCH_MEDIA_PLAYLISTS', "  # Phase 1.5 — affichage playlists push preview
                 "    'AZURA_DELETE_MEDIA', "  # Phase 3 — suppression définitive d'un média
-                "    'AZURA_DELETE_MEDIA_BATCH') "  # Phase 17 — suppression définitive batch
+                "    'AZURA_DELETE_MEDIA_BATCH', "  # Phase 17 — suppression définitive batch
+                "    'IMPORT_M3U_RETRY') "  # Phase 19.1 — A1 : retry différé import M3U
+                # Phase 19.1 — A1 : respecter date_planifiee pour les tâches différées
+                # (IMPORT_M3U_RETRY programmé 60s plus tard). Les tâches sans date_planifiee
+                # sont immédiatement éligibles (comportement historique préservé).
+                "AND (date_planifiee IS NULL OR date_planifiee <= NOW()) "
                 "ORDER BY id ASC LIMIT 1"
             )
             cursor.execute(query)
@@ -8007,6 +8538,9 @@ def main():
                         executer_creer_playlist_azura(tache_id, parametres)
                     elif type_action == 'IMPORT_M3U_PLAYLIST':
                         executer_import_m3u_playlist(tache_id, parametres)
+                    elif type_action == 'IMPORT_M3U_RETRY':
+                        # Phase 19.1 — A1 : retry différé pour fichiers non résolus
+                        executer_import_m3u_retry(tache_id, parametres)
                     elif type_action == 'SYNC_PLAYLISTS_CACHE':
                         executer_sync_playlists_cache(tache_id, parametres)
                     elif type_action == 'SYNC_AZURA_STATUS':
