@@ -454,3 +454,118 @@ def api_worker_version():
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 20.3-complément — GF8 : indicateurs de fraîcheur des services
+# ═════════════════════════════════════════════════════════════════════════════
+@taches_bp.route('/api/system/freshness')
+@login_requis
+def api_system_freshness():
+    """Fraîcheur des services pour la carte Maintenance (Phase 20.3-complément, GF8).
+
+    Retourne :
+      - dernier_resync_azura : dernière SYNC_AZURA_STATUS terminée (date_fin, âge s)
+      - dernier_resync_source : source du dernier resync (auto_scheduled / manual / …)
+      - derniere_tache : dernière tâche traitée tous types confondus
+      - en_file / en_cours : compteurs taches_planifiees
+      - erreurs_24h : tâches en erreur sur les dernières 24 h
+      - dernier_flag_resync : dernière entrée du journal_operations_azura (socle 21.1)
+      - db_time : heure DB (détection de décalage d'horloge)
+    Toutes les lectures sont en try/except séparés : un problème sur une
+    source ne fait pas tomber l'endpoint (dégradation gracieuse)."""
+    reponse = {"status": "ok"}
+    try:
+        db = get_db_connection()
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+
+        # 1. Heure DB (référence pour tous les âges)
+        try:
+            cursor.execute("SELECT NOW() AS t")
+            reponse["db_time"] = str(cursor.fetchone()["t"])
+        except Exception:
+            pass
+
+        def _iso(d):
+            return d.isoformat() if d and hasattr(d, "isoformat") else (str(d) if d else None)
+
+        # 2. Dernier resync Azura (SYNC_AZURA_STATUS terminé)
+        try:
+            cursor.execute(
+                "SELECT type_action, statut, date_creation, date_fin, parametres "
+                "FROM taches_planifiees WHERE type_action = 'SYNC_AZURA_STATUS' "
+                "AND statut = 'termine' ORDER BY date_fin DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            if row:
+                source = None
+                try:
+                    src = json.loads(row.get("parametres") or "{}")
+                    source = src.get("source") or (
+                        "auto_scheduled" if src.get("auto_scheduled") else "manual")
+                except Exception:
+                    source = "?"
+                reponse["dernier_resync_azura"] = {
+                    "date_fin": _iso(row.get("date_fin")),
+                    "age_secondes": (int((datetime.datetime.now() - row["date_fin"]).total_seconds())
+                                     if row.get("date_fin") else None),
+                    "source": source,
+                }
+        except Exception:
+            pass
+
+        # 3. Dernière tâche traitée (tous types)
+        try:
+            cursor.execute(
+                "SELECT type_action, statut, date_fin FROM taches_planifiees "
+                "WHERE statut = 'termine' ORDER BY date_fin DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            if row:
+                reponse["derniere_tache"] = {
+                    "type_action": row.get("type_action"),
+                    "date_fin": _iso(row.get("date_fin")),
+                }
+        except Exception:
+            pass
+
+        # 4. Compteurs file d'attente
+        try:
+            cursor.execute(
+                "SELECT SUM(statut = 'en_attente') AS en_file, "
+                "SUM(statut = 'en_cours') AS en_cours, "
+                "SUM(statut = 'erreur' AND date_fin >= NOW() - INTERVAL 1 DAY) AS erreurs_24h "
+                "FROM taches_planifiees"
+            )
+            c = cursor.fetchone() or {}
+            reponse["en_file"] = int(c.get("en_file") or 0)
+            reponse["en_cours"] = int(c.get("en_cours") or 0)
+            reponse["erreurs_24h"] = int(c.get("erreurs_24h") or 0)
+        except Exception:
+            pass
+
+        # 5. Dernier flag_resync du journal (socle 21.1 — table optionnelle)
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) AS c FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = 'journal_operations_azura'"
+            )
+            if (cursor.fetchone() or {}).get("c", 0) > 0:
+                cursor.execute(
+                    "SELECT date_op, details FROM journal_operations_azura "
+                    "WHERE type_op = 'flag_resync' ORDER BY date_op DESC LIMIT 1"
+                )
+                row = cursor.fetchone()
+                if row:
+                    reponse["dernier_flag_resync"] = {
+                        "date_op": _iso(row.get("date_op")),
+                        "details": row.get("details"),
+                    }
+        except Exception:
+            pass
+
+        cursor.close()
+        db.close()
+        return jsonify(reponse)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500

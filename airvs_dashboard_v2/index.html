@@ -221,6 +221,15 @@
         .sb-dot.ok { background: #22c55e; }
         .sb-dot.ko { background: #ef4444; }
 
+        /* ── Phase 20.3-complément (fix UX scroll sous topbar fixe) ──
+           Les boutons du sous-menu Maintenance (data-scroll → navigation.js)
+           appellent scrollIntoView(block:'start') : la carte cible était collée
+           au haut du viewport et la topbar antenne (fixe, 64px) masquait son
+           titre. scroll-margin-top réserve la hauteur de la topbar + 16px de
+           respiration, SANS modifier navigation.js (scrollIntoView respecte
+           nativement scroll-margin-top). */
+        .dashboard-card[id^="maintenance-card"] { scroll-margin-top: 80px; }
+
         /* ── Worker badge in sidebar footer ── */
         .sb-footer {
             padding: 0.6rem 1rem;
@@ -676,6 +685,7 @@
                 ⚙️ Maintenance <span class="sb-dot" id="sb-dot-worker" title="Worker Ubuntu — état de connexion"></span> <span class="arrow">▸</span>
             </button>
             <ul class="sb-sub" id="maintenanceSub">
+                <li><button class="sb-link" type="button" data-scroll="maintenance-card-fraicheur" data-parent="#nav-maintenance">🫀 Synchronisations services</button></li>
                 <li><button class="sb-link" type="button" data-scroll="maintenance-card-recherche-copie" data-parent="#nav-maintenance">🔍 Recherche & Copie</button></li>
                 <li><button class="sb-link" type="button" data-scroll="maintenance-card-import-masse" data-parent="#nav-maintenance">📥 Import & Validation</button></li>
                 <li class="sb-divider"></li>
@@ -692,6 +702,9 @@
         <span id="worker_version_badge" class="badge bg-secondary"
               title="Cliquez pour vérifier la version du worker Ubuntu"
               style="cursor:pointer;font-size:0.82em">Worker: ?</span>
+        <span class="badge bg-dark" id="dash_version_badge"
+              title="Version du dashboard AIRVS"
+              style="font-size:0.75em">Dash 20.3</span>
     </div>
 </nav>
 
@@ -4464,6 +4477,38 @@
             <div class="tab-pane fade" id="nav-maintenance" role="tabpanel"
                  aria-labelledby="nav-maintenance-tab">
 
+                <!-- Carte : Synchronisations des services (Phase 20.3-complément — GF8) -->
+                <div class="card dashboard-card" id="maintenance-card-fraicheur" style="border-left: 5px solid #22c55e;">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>🫀 Synchronisations des services</span>
+                        <button class="btn btn-outline-secondary btn-sm py-0 px-2" id="btn_fraicheur_refresh" title="Rafraîchir maintenant">⟳</button>
+                    </div>
+                    <div class="card-body py-2">
+                        <div class="row g-2 text-center">
+                            <div class="col-6 col-md">
+                                <div class="text-muted small fw-bold">Dernier resync Azura</div>
+                                <div class="fw-bold" id="fr-resync" style="font-size:0.95rem">—</div>
+                            </div>
+                            <div class="col-6 col-md">
+                                <div class="text-muted small fw-bold">Dernière tâche</div>
+                                <div class="fw-bold text-truncate" id="fr-tache" style="font-size:0.95rem">—</div>
+                            </div>
+                            <div class="col-6 col-md">
+                                <div class="text-muted small fw-bold">File d'attente</div>
+                                <div class="fw-bold" id="fr-file" style="font-size:0.95rem">—</div>
+                            </div>
+                            <div class="col-6 col-md">
+                                <div class="text-muted small fw-bold">Erreurs 24 h</div>
+                                <div class="fw-bold" id="fr-erreurs" style="font-size:0.95rem">—</div>
+                            </div>
+                            <div class="col-6 col-md">
+                                <div class="text-muted small fw-bold">Heure DB</div>
+                                <div class="fw-bold" id="fr-dbtime" style="font-size:0.95rem">—</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Carte : Recherche & Copie -->
                 <div class="card dashboard-card accent-copy" id="maintenance-card-recherche-copie">
                     <div class="card-header">🔍 Recherche & Copie</div>
@@ -7224,6 +7269,73 @@ document.addEventListener('DOMContentLoaded', function() {
     checkWorkerVersion();
     // Recheck toutes les 60s (au cas où le worker redémarre)
     setInterval(checkWorkerVersion, 60000);
+
+    // ── Phase 20.3-complément — GF8 : carte « Synchronisations des services » ──
+    // Endpoint : /api/system/freshness (blueprints/taches.py) — lecture DB
+    // pure (taches_planifiees + journal_operations_azura), sans appel réseau.
+    (function () {
+        function fmtAge(sec) {
+            if (sec === null || sec === undefined || isNaN(sec)) return null;
+            if (sec < 60) return sec + ' s';
+            if (sec < 3600) return Math.floor(sec / 60) + ' min';
+            if (sec < 86400) return Math.floor(sec / 3600) + ' h ' + Math.floor((sec % 3600) / 60) + ' min';
+            return Math.floor(sec / 86400) + ' j';
+        }
+        function nz(v) { return (v === null || v === undefined) ? 0 : v; }
+        function loadFreshness() {
+            fetch('/api/system/freshness?t=' + Date.now())
+                .then(function (r) {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
+                .then(function (d) {
+                    var e = document.getElementById('fr-resync');
+                    if (e) {
+                        var dr = d.dernier_resync_azura;
+                        if (dr && dr.age_secondes !== null && dr.age_secondes !== undefined) {
+                            e.textContent = 'il y a ' + fmtAge(dr.age_secondes);
+                            e.title = (dr.date_fin || '?') + ' — source : ' + (dr.source || '?');
+                            e.style.color = dr.age_secondes > 7200 ? '#ef4444'
+                                          : (dr.age_secondes > 3600 ? '#f59e0b' : '#22c55e');
+                        } else {
+                            e.textContent = 'jamais';
+                            e.title = 'Aucun SYNC_AZURA_STATUS terminé en base';
+                            e.style.color = '#f59e0b';
+                        }
+                    }
+                    e = document.getElementById('fr-tache');
+                    if (e) {
+                        var dt2 = d.derniere_tache;
+                        e.textContent = dt2 ? (dt2.type_action || '—') : '—';
+                        e.title = dt2 ? ('terminée le ' + (dt2.date_fin || '?')) : '';
+                    }
+                    e = document.getElementById('fr-file');
+                    if (e) e.textContent = nz(d.en_file) + ' att. · ' + nz(d.en_cours) + ' cours';
+                    e = document.getElementById('fr-erreurs');
+                    if (e) {
+                        var nbErr = nz(d.erreurs_24h);
+                        e.textContent = nbErr;
+                        e.style.color = nbErr > 0 ? '#ef4444' : '';
+                        e.title = 'Tâches en erreur sur les dernières 24 h';
+                    }
+                    e = document.getElementById('fr-dbtime');
+                    if (e) e.textContent = d.db_time || '—';
+                })
+                .catch(function (err) {
+                    console.warn('[FRAICHEUR] load échoué :', err);
+                    var e = document.getElementById('fr-resync');
+                    if (e) { e.textContent = 'indisponible'; e.style.color = '#ef4444'; }
+                });
+        }
+        var btnFr = document.getElementById('btn_fraicheur_refresh');
+        if (btnFr) btnFr.addEventListener('click', loadFreshness);
+        var mntTab = document.getElementById('nav-maintenance-tab');
+        if (mntTab) mntTab.addEventListener('shown.bs.tab', loadFreshness);
+        setInterval(loadFreshness, 60000);
+        // Chargement initial seulement si le panneau Maintenance est visible
+        var pane = document.getElementById('nav-maintenance');
+        if (pane && pane.classList.contains('show')) loadFreshness();
+    })();
     // Clic sur le badge = alerte détaillée avec diagnostic
     document.getElementById('worker_version_badge').addEventListener('click', function() {
         var badge = document.getElementById('worker_version_badge');
