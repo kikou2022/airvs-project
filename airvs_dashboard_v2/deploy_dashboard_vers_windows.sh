@@ -68,7 +68,7 @@ BLUEPRINT_FILES=(
     "blueprints/taches.py"
     "blueprints/pipeline_import.py"
     # ─── Phase 9+ (Rotation éditoriale) — à décommenter quand implémentée ───
-    # "blueprints/rotation.py"
+    "blueprints/rotation.py"
     # ─── Phase 13+ (Audit doublons) — à décommenter quand implémentée ──────
     # "blueprints/audit_doublons.py"
 )

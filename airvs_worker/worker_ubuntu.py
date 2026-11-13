@@ -44,7 +44,7 @@
 #                 • Réutilisation du moteur de matching flou de executer_prefill_sheets
 #                 • Dépendance : validation_pool_multiformat.py (même dossier)
 # ═══════════════════════════════════════════════════════════════════
-WORKER_VERSION = "2026.11.12-A"  # + Phase 21.1 : GF1 priorité SELECT, GF4 rattrapage démarrage, GF7 config automation, pagination list_media (GF2), socle journal/audit
+WORKER_VERSION = "2026.11.13-C"  # + Phase 21.3 : résolveur mapping_radiodj_azura, moteur rotation (preview/execute, R9-R12), bootstrap mapping, régénération miroir après opération (mémo §5.1). B : hotfix whitelist SQL. C : hotfix cleanup orphelines (date_debut_execution)
 
 import time
 import datetime
@@ -91,6 +91,21 @@ try:
 except ImportError:
     AZURA_API_MODULE_DISPONIBLE = False
     print("[WARN] Module azuracast_api.py introuvable. Tâches playlist désactivées.")
+
+# Phase 21.3 — moteur Rotation éditoriale (résolveur mapping_radiodj_azura +
+# preview/execute + régénération miroir après opération). Doit être déployé
+# dans le même dossier que ce worker.
+try:
+    from rotation_azura import (
+        MoteurRotation, ResolveurMapping, decomposer_flag,
+        lire_config_rotation, journaliser_operation as _journaliser_rotation,
+        demander_regen_miroir, demarrer_thread_miroir,
+    )
+    ROTATION_MODULE_DISPONIBLE = True
+except ImportError as _e_rotation:
+    ROTATION_MODULE_DISPONIBLE = False
+    print(f"[WARN] Module rotation_azura.py introuvable ({_e_rotation}). "
+          f"Tâches ROTATION_*/MAPPING_BOOTSTRAP désactivées.")
 
 # Module multi-format pour le mode Pool de titres validés.
 # Doit être déployé dans le même dossier que ce worker.
@@ -2093,6 +2108,13 @@ def executer_azura_remove_from_playlist(tache_id, parametres):
                 cursor.close()
                 db.close()
                 logger(tache_id, f"[OK] Flag RadioDJ mis à jour : {nouveau_flag} (song ID {song_id_radiodj})")
+                # Phase 21.3 — le flag a changé → miroir à régénérer
+                if ROTATION_MODULE_DISPONIBLE:
+                    try:
+                        demander_regen_miroir(DB_CONFIG,
+                                              f'retrait_playlist_s{station_id}')
+                    except Exception:
+                        pass
             except Exception as e:
                 logger(tache_id, f"[ERREUR] Impossible de mettre à jour le flag RadioDJ : {e}")
 
@@ -2218,6 +2240,19 @@ def executer_azura_delete_media(tache_id, parametres):
         cursor.close()
         db.close()
         logger(tache_id, f"[OK] Flag RadioDJ mis à jour : {nouveau_flag} (song ID {song_id_radiodj})")
+
+        # Phase 21.3 — mapping invalidé (média supprimé) + miroir à régénérer
+        if ROTATION_MODULE_DISPONIBLE:
+            try:
+                ResolveurMapping(DB_CONFIG).invalider_correspondance(
+                    song_id=song_id_radiodj, station_id=station_id,
+                    raison='azura_deleted')
+            except Exception:
+                pass
+            try:
+                demander_regen_miroir(DB_CONFIG, f'delete_media_s{station_id}')
+            except Exception:
+                pass
 
         logger(tache_id, "=== TERMINÉ === (succès)")
 
@@ -2383,6 +2418,21 @@ def executer_azura_delete_media_batch(tache_id, parametres):
                 cursor.close()
                 db.close()
                 logger(tache_id, f"[OK] Flags RadioDJ mis à jour : {nouveau_flag} ({len(ids_flags_ok)} titre(s))")
+                # Phase 21.3 — mapping invalidé + miroir à régénérer
+                if ROTATION_MODULE_DISPONIBLE:
+                    try:
+                        _res_batch = ResolveurMapping(DB_CONFIG)
+                        for _sid_b in ids_flags_ok:
+                            _res_batch.invalider_correspondance(
+                                song_id=_sid_b, station_id=station_id,
+                                raison='azura_deleted')
+                    except Exception:
+                        pass
+                    try:
+                        demander_regen_miroir(DB_CONFIG,
+                                              f'delete_media_batch_s{station_id}')
+                    except Exception:
+                        pass
             except Exception as e:
                 logger(tache_id, f"[WARN] Médias supprimés mais mise à jour des flags RadioDJ échouée : {e}")
 
@@ -2961,6 +3011,13 @@ def executer_azura_remove_from_playlist_batch(tache_id, parametres):
             cursor.close()
             db.close()
             logger(tache_id, f"[OK] {len(updates_flag)} flag(s) RadioDJ mis à jour (batch)")
+            # Phase 21.3 — flags changés → miroir à régénérer
+            if ROTATION_MODULE_DISPONIBLE:
+                try:
+                    demander_regen_miroir(DB_CONFIG,
+                                          f'retrait_playlist_batch_s{station_id}')
+                except Exception:
+                    pass
         except Exception as e:
             logger(tache_id, f"[ERREUR] maj batch flags RadioDJ: {e}")
     else:
@@ -5860,6 +5917,9 @@ def executer_sync_azura_status(tache_id, parametres):
     # 'PRESENT' = fichier dans AzuraCast mais playlists vide → on détermine ACTIVE vs PUSHED
     # plus tard (PUSHED si le flag RadioDJ n'a jamais été ACTIVE/RETIRED, sinon RETIRED).
     all_azura_states = {}  # clé → {station_id: 'ACTIVE' | 'RETIRED' | 'PRESENT'}
+    # Phase 21.3 — parallèle à all_azura_states : conserve le média COMPLET
+    # par station pour alimenter le cache mapping_radiodj_azura.
+    all_azura_media = {}  # clé → {station_id: media_dict}
     all_folders = set()  # Dossiers agrégés (les 2 stations partagent sshfs_root)
     total_rows = 0
     api_ok_count = 0  # Nombre de stations dont l'API a répondu avec succès
@@ -5901,6 +5961,7 @@ def executer_sync_azura_status(tache_id, parametres):
                     basename = fname.rsplit('/', 1)[-1] if '/' in fname else fname
                     cle_basename = basename.lower().strip()
                     all_azura_states.setdefault(cle_basename, {})[sid] = etat
+                    all_azura_media.setdefault(cle_basename, {})[sid] = morceau  # Phase 21.3
                     if '/' in fname:
                         parts = fname.split('/')
                         for i in range(1, len(parts)):
@@ -5910,6 +5971,7 @@ def executer_sync_azura_status(tache_id, parametres):
                 if artist and title:
                     chaine = normaliser_pour_recherche(f"{artist} - {title}")
                     all_azura_states.setdefault(chaine, {})[sid] = etat
+                    all_azura_media.setdefault(chaine, {})[sid] = morceau  # Phase 21.3
         except Exception as e:
             logger(tache_id, f"[station {sid}] ERREUR API: {e}")
             continue
@@ -6231,6 +6293,50 @@ def executer_sync_azura_status(tache_id, parametres):
 
         logger(tache_id, f"{updated} titre(s) mis à jour (flag AZURA_*_S*)")
 
+        # ── Phase 21.3 : alimenter le cache mapping + demander regen miroir ──
+        # (uniquement sur les flags réellement changés — coût nul en régime
+        #  stationnaire, bootstrap incrémental gratuit pour la rotation)
+        if updated and ROTATION_MODULE_DISPONIBLE:
+            try:
+                _songs_par_id = {s['ID']: s for s in all_songs}
+                _resolveur_resync = ResolveurMapping(DB_CONFIG)
+                _paires, _invalid = 0, 0
+                for _flag, _ids in updates_par_flag.items():
+                    for _sid_song in _ids:
+                        _song = _songs_par_id.get(_sid_song)
+                        if not _song:
+                            continue
+                        _etats = decomposer_flag(_flag)
+                        if _etats and all(e == 'REMOVED' for e in _etats.values()):
+                            # Titre disparu de toutes les stations → mapping inactif
+                            for _st in _etats:
+                                _resolveur_resync.invalider_correspondance(
+                                    song_id=_sid_song, station_id=_st,
+                                    raison='azura_not_found_in_resync')
+                            _invalid += 1
+                            continue
+                        _p = _song.get('path') or ''
+                        _bn = (_p.rsplit('\\', 1)[-1] if '\\' in _p
+                               else _p.rsplit('/', 1)[-1]).lower().strip()
+                        _at = normaliser_pour_recherche(
+                            f"{_song.get('artist') or ''} - {_song.get('title') or ''}")
+                        _medias = all_azura_media.get(_bn) or all_azura_media.get(_at) or {}
+                        _meth = ('path_exact' if _bn in all_azura_media
+                                 else 'artist_title_normalized')
+                        for _st, _media in _medias.items():
+                            _resolveur_resync.inserer_cache(_song, _media, _st, _meth)
+                            _paires += 1
+                if _paires or _invalid:
+                    logger(tache_id, f"[MAPPING] cache alimenté: +{_paires}, "
+                                     f"invalidé: {_invalid}")
+            except Exception as _e_map:
+                logger(tache_id, f"[MAPPING] alimentation cache ignorée: {_e_map}")
+            try:
+                if updated:
+                    demander_regen_miroir(DB_CONFIG, 'resync_flags')
+            except Exception:
+                pass
+
         # Phase 21.1 — socle rotation (GF8/21.3) : journaliser le resync réussi
         # dans journal_operations_azura (table créée en idempotent au démarrage).
         try:
@@ -6288,6 +6394,9 @@ TYPES_PRIORITE_HAUTE = (
     'BULK_SCHEDULE', 'GRILLE_EDITORIALE_AZURA', 'IMPORT_MASSE', 'SUSPECT_REJECT',
     'SYNC_GRILLE_WEB', 'SHAZAM_SYNC_SHEET', 'SYNC_VPS_SOUMISSIONS',
     'SYNC_VPS_SHAZAM_EXT', 'PIGE_PROMOTE_PODCAST',
+    # Phase 21.3 — tâches interactives de l'onglet Rotation éditoriale :
+    # l'utilisateur attend devant le dashboard → priorité 1 (GF1).
+    'ROTATION_PREVIEW', 'ROTATION_EXECUTE', 'MAPPING_BOOTSTRAP',
 )
 # Crons lourds / analytics déclenchés automatiquement → traités en dernier.
 # Surchargable via config.json "automation"."priorite_fond" (liste de types).
@@ -8252,10 +8361,11 @@ def _fetch_nowplaying_cache(station_ids):
 
 
 def _assurer_schema_rotation_socle():
-    """Phase 21.1 — socle rotation : crée en idempotent les tables
-    journal_operations_azura (003) et audit_doublons_radiodj (002) de la spec.
-    journal_operations_azura est alimentée dès maintenant par le resync
-    (flag_resync) ; audit_doublons_radiodj sera remplie par le lot 21.5."""
+    """Phase 21.1 + 21.3 — socle rotation : crée en idempotent les tables
+    journal_operations_azura (003), audit_doublons_radiodj (002),
+    mapping_radiodj_azura + rotation_previews + mirror_regen_state (005).
+    journal_operations_azura est alimentée par le resync (flag_resync) et les
+    opérations rotation ; audit_doublons_radiodj sera remplie par le lot 21.5."""
     try:
         db = pymysql.connect(**DB_CONFIG)
         cur = db.cursor()
@@ -8309,10 +8419,85 @@ def _assurer_schema_rotation_socle():
               INDEX idx_song (song_id_radiodj)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
+        # ── Phase 21.3 — script 005 : résolveur mapping + previews + miroir ──
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mapping_radiodj_azura (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              date_creation DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              date_derniere_verif DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              song_id_radiodj INT NOT NULL,
+              artist_radiodj VARCHAR(255) NOT NULL,
+              title_radiodj VARCHAR(255) NOT NULL,
+              album_radiodj VARCHAR(255),
+              path_radiodj VARCHAR(500) NOT NULL,
+              basename_radiodj VARCHAR(255) NOT NULL,
+              media_id_azura INT NOT NULL,
+              station_id INT NOT NULL,
+              song_id_azura VARCHAR(32),
+              path_azura VARCHAR(500),
+              unique_id_azura VARCHAR(64),
+              methode_matching ENUM(
+                'path_exact', 'path_normalized', 'artist_title_exact',
+                'artist_title_normalized', 'song_id_azura', 'manual'
+              ) NOT NULL,
+              confiance FLOAT DEFAULT 1.0,
+              actif BOOLEAN DEFAULT TRUE,
+              raison_inactivation VARCHAR(255),
+              INDEX idx_song_radiodj (song_id_radiodj),
+              INDEX idx_media_azura (media_id_azura, station_id),
+              INDEX idx_station (station_id),
+              INDEX idx_actif (actif),
+              INDEX idx_basename (basename_radiodj),
+              UNIQUE KEY uniq_song_station (song_id_radiodj, station_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rotation_previews (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              date_creation DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              task_id INT,
+              station_id INT NOT NULL,
+              parametres JSON,
+              config_effective JSON,
+              resultats LONGTEXT COMMENT 'JSON des groupes de candidats',
+              nb_candidats INT DEFAULT 0,
+              nb_groupes INT DEFAULT 0,
+              statut ENUM('en_cours', 'pret', 'erreur') DEFAULT 'en_cours',
+              INDEX idx_task (task_id),
+              INDEX idx_station (station_id),
+              INDEX idx_date (date_creation)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mirror_regen_state (
+              id INT PRIMARY KEY DEFAULT 1,
+              pending TINYINT NOT NULL DEFAULT 0,
+              date_demande DATETIME,
+              last_raison VARCHAR(255),
+              last_regen DATETIME,
+              last_statut ENUM('ok', 'erreur_ssh', 'erreur_script', 'non_configure', 'en_cours') DEFAULT NULL,
+              last_message VARCHAR(500),
+              nb_regen_ok INT NOT NULL DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        cur.execute("INSERT IGNORE INTO mirror_regen_state (id, pending) VALUES (1, 0)")
+        # ENUM journal élargi (Phase 21.3 : mapping_bootstrap, mirror_regen,
+        # rotation_preview) — MODIFY idempotent, non bloquant si déjà élargi.
+        try:
+            cur.execute("""
+                ALTER TABLE journal_operations_azura MODIFY type_op ENUM(
+                  'push', 'playlist_add', 'playlist_remove', 'move', 'delete',
+                  'rename', 'empty_playlist', 'rotation_soft', 'rotation_hard',
+                  'auto_purge', 'flag_force', 'flag_resync', 'm3u_push',
+                  'mapping_bootstrap', 'mirror_regen', 'rotation_preview'
+                ) NOT NULL
+            """)
+        except Exception:
+            pass
         db.commit()
         cur.close()
         db.close()
-        print("  ✓ Socle rotation vérifié (journal_operations_azura + audit_doublons_radiodj — Phase 21.1)")
+        print("  ✓ Socle rotation vérifié (journal + audit + mapping_radiodj_azura + rotation_previews + mirror_regen_state — Phase 21.1/21.3)")
     except Exception as e:
         print(f"  ⚠ Socle rotation non créé (non bloquant) : {e}")
 
@@ -8380,6 +8565,143 @@ def _rattrapage_crons_au_demarrage():
         print(f"  ⚠ GF4 rattrapage démarrage ignoré (non bloquant) : {e}")
 
 
+# ═════════════════════════════════════════════════════════════════════
+# Phase 21.3 — Handlers Rotation éditoriale (ROTATION_PREVIEW /
+# ROTATION_EXECUTE / MAPPING_BOOTSTRAP). Nécessitent rotation_azura.py
+# dans le même dossier (ROTATION_MODULE_DISPONIBLE).
+# ═════════════════════════════════════════════════════════════════════
+
+def executer_rotation_preview(tache_id, parametres):
+    """Phase 21.3 — calcule les candidats au retrait (SANS exécuter) et
+    stocke le résultat JSON dans rotation_previews (relu par le dashboard)."""
+    logger(tache_id, "=== DÉBUT ROTATION PREVIEW ===")
+    if not ROTATION_MODULE_DISPONIBLE:
+        logger(tache_id, "ERREUR: module rotation_azura.py indisponible.")
+        logger(tache_id, "=== TERMINÉ === (module indisponible)")
+        return
+    station_id = int(parametres.get('station_id', _DEFAULT_STATION_ID))
+    params = parametres.get('params') or {}
+    try:
+        moteur = MoteurRotation(DB_CONFIG)
+        result = moteur.calculer_candidats_rotation(
+            station_id, params=params, log_fn=lambda m: logger(tache_id, m))
+        stats = result.get('stats', {})
+        db = pymysql.connect(**DB_CONFIG)
+        cur = db.cursor()
+        cur.execute(
+            "INSERT INTO rotation_previews "
+            "(task_id, station_id, parametres, config_effective, resultats, "
+            " nb_candidats, nb_groupes, statut, date_creation) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pret', NOW())",
+            (tache_id, station_id,
+             json.dumps(result.get('parametres'), ensure_ascii=False, default=str),
+             json.dumps(result.get('config_effective'), ensure_ascii=False, default=str),
+             json.dumps(result.get('groupes'), ensure_ascii=False, default=str),
+             stats.get('candidats_affiches', 0), stats.get('nb_groupes', 0))
+        )
+        db.commit()
+        preview_id = cur.lastrowid
+        cur.close()
+        db.close()
+        logger(tache_id, f"[OK] preview #{preview_id} enregistrée — "
+                         f"{stats.get('candidats_affiches')} candidat(s), "
+                         f"{stats.get('nb_groupes')} groupe(s)")
+        logger(tache_id, f"[STATS] {json.dumps(stats, ensure_ascii=False, default=str)}")
+        _journaliser_rotation(DB_CONFIG, 'rotation_preview',
+                              station_id=station_id, triggered_by='manual',
+                              task_id=tache_id,
+                              details={'preview_id': preview_id,
+                                       'stats': stats})
+    except Exception as e:
+        logger(tache_id, f"ERREUR preview: {type(e).__name__}: {e}")
+        try:
+            db = pymysql.connect(**DB_CONFIG)
+            cur = db.cursor()
+            cur.execute(
+                "INSERT INTO rotation_previews "
+                "(task_id, station_id, parametres, resultats, statut, date_creation) "
+                "VALUES (%s, %s, '{}', %s, 'erreur', NOW())",
+                (tache_id, station_id, json.dumps({'erreur': str(e)})))
+            db.commit()
+            cur.close()
+            db.close()
+        except Exception:
+            pass
+    logger(tache_id, "=== TERMINÉ ROTATION PREVIEW ===")
+
+
+def executer_rotation_execute(tache_id, parametres):
+    """Phase 21.3 — exécute la rotation validée par l'utilisateur.
+    Soft par défaut ; hard refusé → fallback soft tant que le cadrage
+    question 6 (exécution hard) n'est pas levé (config worker
+    automation.rotation_hard_autorise). Demande la régénération du miroir
+    si au moins 1 succès (mémo §5.1)."""
+    logger(tache_id, "=== DÉBUT ROTATION EXECUTE ===")
+    if not ROTATION_MODULE_DISPONIBLE:
+        logger(tache_id, "ERREUR: module rotation_azura.py indisponible.")
+        logger(tache_id, "=== TERMINÉ === (module indisponible)")
+        return
+    station_id = int(parametres.get('station_id', _DEFAULT_STATION_ID))
+    song_ids = parametres.get('song_ids') or []
+    mode = str(parametres.get('mode', 'soft'))
+    trigger_source = parametres.get('trigger_source') or 'dashboard'
+    if not song_ids:
+        logger(tache_id, "ERREUR: song_ids vide.")
+        logger(tache_id, "=== TERMINÉ === (paramètres manquants)")
+        return
+    logger(tache_id, f"Station {station_id} — {len(song_ids)} titre(s) — "
+                     f"mode demandé: {mode}")
+    try:
+        moteur = MoteurRotation(DB_CONFIG)
+        res = moteur.executer_rotation(
+            station_id, song_ids, mode=mode, task_id=tache_id,
+            log_fn=lambda m: logger(tache_id, m), trigger_source=trigger_source)
+        resume = {k: v for k, v in res.items() if k != 'details'}
+        logger(tache_id, f"[RÉSULTAT] {json.dumps(resume, ensure_ascii=False, default=str)}")
+        if res.get('success'):
+            try:
+                demander_regen_miroir(
+                    DB_CONFIG,
+                    f'rotation_{res.get("mode_effectif", "soft")}_s{station_id}')
+            except Exception:
+                pass
+        logger(tache_id, "=== TERMINÉ ROTATION EXECUTE ===")
+    except Exception as e:
+        logger(tache_id, f"ERREUR execute: {type(e).__name__}: {e}")
+        logger(tache_id, "=== TERMINÉ ROTATION EXECUTE (ERREUR) ===")
+
+
+def executer_mapping_bootstrap(tache_id, parametres):
+    """Phase 21.3 — bootstrap du cache mapping_radiodj_azura (spec A.11).
+    Remplit les correspondances RadioDJ ↔ AzuraCast pour les stations
+    demandées (défaut : toutes celles de la config)."""
+    logger(tache_id, "=== DÉBUT MAPPING BOOTSTRAP ===")
+    if not ROTATION_MODULE_DISPONIBLE:
+        logger(tache_id, "ERREUR: module rotation_azura.py indisponible.")
+        logger(tache_id, "=== TERMINÉ === (module indisponible)")
+        return
+    station_ids = parametres.get('station_ids')
+    if not station_ids:
+        try:
+            station_ids = [s['id'] for s in lister_stations_config()]
+        except Exception:
+            station_ids = [6, 7]
+    resolveur = ResolveurMapping(DB_CONFIG)
+    resume = {}
+    for sid in station_ids:
+        try:
+            stats = resolveur.bootstrap_station(
+                int(sid), log_fn=lambda m: logger(tache_id, m))
+            resume[str(sid)] = stats
+        except Exception as e:
+            logger(tache_id, f"[station {sid}] ERREUR bootstrap: {e}")
+            resume[str(sid)] = {'erreur': str(e)}
+    _journaliser_rotation(DB_CONFIG, 'mapping_bootstrap', triggered_by='manual',
+                          task_id=tache_id, details={'stations': resume})
+    logger(tache_id, f"[RÉSUMÉ] {json.dumps(resume, ensure_ascii=False, default=str)}")
+    logger(tache_id, "=== TERMINÉ MAPPING BOOTSTRAP ===")
+
+
 def main():
     print(f"Worker Ubuntu démarré (version {WORKER_VERSION}). En attente de tâches SQL...")
     # Créer les tables airvs_* si manquantes (idempotent)
@@ -8411,11 +8733,45 @@ def main():
     except Exception as e:
         print(f"  ⚠ Migration date_planifiee ignorée (déjà faite ou erreur non bloquante) : {e}")
 
+    # ── Hotfix 2026.11.13-C : colonne date_debut_execution sur taches_planifiees ──
+    # Le cleanup orphelines (démarrage + périodique) marquait erreur toute tâche
+    # en_cours dont date_creation datait de plus d'1h. Or une tâche qui a attendu
+    # longtemps en en_attente (ex. worker arrêté, whitelist hotfix B) est dans ce
+    # cas DES SA PRISE EN CHARGE : le premier redémarrage du worker pendant son
+    # exécution la tuait (cas réel tâche 41096 du 13/11). Le critère devient le
+    # début RÉEL d'exécution. Idempotent : ne fait rien si la colonne existe déjà.
+    try:
+        db_mig = pymysql.connect(**DB_CONFIG)
+        cur_mig = db_mig.cursor()
+        cur_mig.execute("SHOW COLUMNS FROM taches_planifiees LIKE 'date_debut_execution'")
+        if not cur_mig.fetchone():
+            cur_mig.execute(
+                "ALTER TABLE taches_planifiees "
+                "ADD COLUMN date_debut_execution DATETIME NULL DEFAULT NULL "
+                "COMMENT 'debut reel d execution (hotfix 2026.11.13-C)'"
+            )
+            db_mig.commit()
+            print("  ✓ Migration : colonne date_debut_execution ajoutée à taches_planifiees (hotfix 2026.11.13-C)")
+        cur_mig.close()
+        db_mig.close()
+    except Exception as e:
+        print(f"  ⚠ Migration date_debut_execution ignorée (déjà faite ou erreur non bloquante) : {e}")
+
     # ── Phase 21.1 : socle rotation (journal_operations_azura + audit_doublons) ──
     _assurer_schema_rotation_socle()
 
     # ── Phase 21.1 — GF4 : rattrapage des crons en retard au démarrage ──
     _rattrapage_crons_au_demarrage()
+
+    # ── Phase 21.3 : thread de fond — régénération miroir après opérations ──
+    # Draine mirror_regen_state toutes les 60 s ; JAMAIS dans la boucle
+    # principale (SSH + export ≈ 1-2 min ne doivent pas retarder les tâches).
+    if ROTATION_MODULE_DISPONIBLE:
+        try:
+            demarrer_thread_miroir(DB_CONFIG)
+            print("  ✓ Thread régénération miroir démarré (Phase 21.3)")
+        except Exception as _e_mir:
+            print(f"  ⚠ Thread miroir non démarré (non bloquant) : {_e_mir}")
 
     # ── Enregistrer la version du worker en base pour vérification dashboard ──
     # On crée une table dédiée si elle n'existe pas, puis on UPSERT la version.
@@ -8447,10 +8803,21 @@ def main():
     try:
         db_orph = pymysql.connect(**DB_CONFIG)
         cur_orph = db_orph.cursor()
-        # Tâches en_cours depuis plus d'1h = le worker précédent a crashé
+        # Tâches en_cours dont l'exécution réelle dure plus d'1h = le worker
+        # précédent a crashé. Hotfix 2026.11.13-C : critère date_debut_execution
+        # (début réel d'exécution) et non date_creation — une tâche créée
+        # longtemps avant sa prise en charge ne doit PAS être tuée. Fallback
+        # date_creation pour les en_cours antérieures à la migration (colonne NULL).
         cur_orph.execute(
-            "UPDATE taches_planifiees SET statut = 'erreur', date_fin = NOW() "
-            "WHERE statut = 'en_cours' AND date_creation < NOW() - INTERVAL 1 HOUR"
+            "UPDATE taches_planifiees SET statut = 'erreur', date_fin = NOW(), "
+            "log_resultat = CONCAT(COALESCE(log_resultat, ''), CHAR(10), "
+            "'--- [CLEANUP] marquée erreur : en_cours depuis plus de 1h "
+            "(worker redémarré pendant l''exécution) ---') "
+            "WHERE statut = 'en_cours' AND ("
+            "(date_debut_execution IS NOT NULL AND "
+            " date_debut_execution < NOW() - INTERVAL 1 HOUR) OR "
+            "(date_debut_execution IS NULL AND "
+            " date_creation < NOW() - INTERVAL 1 HOUR))"
         )
         nb_orph_cours = cur_orph.rowcount
         # Tâches d'annulation orphelines (types jamais traités)
@@ -8691,9 +9058,18 @@ def main():
                 try:
                     _oc = pymysql.connect(**DB_CONFIG)
                     _occ = _oc.cursor()
+                    # Hotfix 2026.11.13-C : même critère que le cleanup de
+                    # démarrage (date_debut_execution, fallback date_creation).
                     _occ.execute(
-                        "UPDATE taches_planifiees SET statut = 'erreur', date_fin = NOW() "
-                        "WHERE statut = 'en_cours' AND date_creation < NOW() - INTERVAL 1 HOUR"
+                        "UPDATE taches_planifiees SET statut = 'erreur', date_fin = NOW(), "
+                        "log_resultat = CONCAT(COALESCE(log_resultat, ''), CHAR(10), "
+                        "'--- [CLEANUP] marquée erreur : en_cours depuis plus de 1h "
+                        "(worker redémarré pendant l''exécution) ---') "
+                        "WHERE statut = 'en_cours' AND ("
+                        "(date_debut_execution IS NOT NULL AND "
+                        " date_debut_execution < NOW() - INTERVAL 1 HOUR) OR "
+                        "(date_debut_execution IS NULL AND "
+                        " date_creation < NOW() - INTERVAL 1 HOUR))"
                     )
                     nb_ec = _occ.rowcount
                     _ph = ','.join(['%s'] * len(TYPES_ORPHELINS_EN_ATTENTE))
@@ -8753,7 +9129,10 @@ def main():
                 "    'GET_BATCH_MEDIA_PLAYLISTS', "  # Phase 1.5 — affichage playlists push preview
                 "    'AZURA_DELETE_MEDIA', "  # Phase 3 — suppression définitive d'un média
                 "    'AZURA_DELETE_MEDIA_BATCH', "  # Phase 17 — suppression définitive batch
-                "    'IMPORT_M3U_RETRY') "  # Phase 19.1 — A1 : retry différé import M3U
+                "    'IMPORT_M3U_RETRY', "  # Phase 19.1 — A1 : retry différé import M3U
+                "    'ROTATION_PREVIEW', "  # Phase 21.3 — candidats au retrait (sans exécuter)
+                "    'ROTATION_EXECUTE', "  # Phase 21.3 — rotation validée (soft par défaut)
+                "    'MAPPING_BOOTSTRAP') "  # Phase 21.3 — remplissage cache mapping_radiodj_azura
                 # Phase 19.1 — A1 : respecter date_planifiee pour les tâches différées
                 # (IMPORT_M3U_RETRY programmé 60s plus tard). Les tâches sans date_planifiee
                 # sont immédiatement éligibles (comportement historique préservé).
@@ -8769,7 +9148,8 @@ def main():
                 parametres = json.loads(tache['parametres']) if tache['parametres'] else {}
 
                 cursor.execute(
-                    "UPDATE taches_planifiees SET statut = 'en_cours' WHERE id = %s",
+                    "UPDATE taches_planifiees SET statut = 'en_cours', "
+                    "date_debut_execution = NOW() WHERE id = %s",
                     (tache_id,)
                 )
                 db.commit()
@@ -8854,6 +9234,15 @@ def main():
                         executer_get_batch_media_playlists(tache_id, parametres)
                     elif type_action == 'SUSPECT_REJECT':
                         executer_suspect_reject(tache_id, parametres)
+                    elif type_action == 'ROTATION_PREVIEW':
+                        # Phase 21.3 — candidats au retrait (sans exécuter)
+                        executer_rotation_preview(tache_id, parametres)
+                    elif type_action == 'ROTATION_EXECUTE':
+                        # Phase 21.3 — rotation validée (soft par défaut)
+                        executer_rotation_execute(tache_id, parametres)
+                    elif type_action == 'MAPPING_BOOTSTRAP':
+                        # Phase 21.3 — remplissage cache mapping_radiodj_azura
+                        executer_mapping_bootstrap(tache_id, parametres)
                     else:
                         executer_copie(tache_id, parametres)
                 except Exception as exc:
