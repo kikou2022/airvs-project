@@ -50,7 +50,7 @@ FICHIER_TEMPORAIRE = "/tmp/airvs_db_export.json"
 # CONFIGURATION NIVEAU 2 (FLUX TENDU AZURACAST)
 # ==========================================
 AZURACAST_LOCAL_PATH = "/home/sebastien/music_azuracast6_7/"
-MOT_CLE_AZURA = "IN_AZURACAST" # Le mot-clé exact qui sera écrit dans songs.comments
+MOT_CLE_AZURA = "AZURA_PUSHED_S6_S7" # Vocabulaire AZURA_* (Phase 19.0/R0). Écriture DB neutralisée (PATCH_20261012) : valeur utilisée uniquement pour le calcul de statut.
 MOT_CLE_SHAZAM = "VIA_SHAZAM"   # Le mot-clé exact qui sera écrit dans songs.label
 
 AZURA_API_URL = "https://azuracast.2026.airvs.fr/api/station/7/files"

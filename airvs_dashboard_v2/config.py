@@ -267,7 +267,7 @@ PIGES_ARTWORK_WINDOWS_DIR = os.getenv('PIGES_ARTWORK_WINDOWS_DIR', r"U:\airvs_ar
 # Worker
 # ═══════════════════════════════════════════════════════════════════════
 
-WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.09.17-A')  # + piges multi-sources (radio + station6)
+WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.11.12-A')  # + Phase 21.1 : GF1/GF4/GF7/GF2/socle rotation
 
 
 # ═══════════════════════════════════════════════════════════════════════

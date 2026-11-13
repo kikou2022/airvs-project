@@ -44,7 +44,7 @@
 #                 • Réutilisation du moteur de matching flou de executer_prefill_sheets
 #                 • Dépendance : validation_pool_multiformat.py (même dossier)
 # ═══════════════════════════════════════════════════════════════════
-WORKER_VERSION = "2026.09.17-A"  # + piges multi-sources (radio + station6) : executer_pige_list accepte base_path
+WORKER_VERSION = "2026.11.12-A"  # + Phase 21.1 : GF1 priorité SELECT, GF4 rattrapage démarrage, GF7 config automation, pagination list_media (GF2), socle journal/audit
 
 import time
 import datetime
@@ -1951,7 +1951,7 @@ def executer_azura_remove_from_playlist(tache_id, parametres):
         #    Stratégie : d'abord par basename du fichier, puis par artist+title
         # TODO Phase 6: utiliser cache mapping_radiodj_azura (évite le list_media() à ~35s)
         try:
-            all_media = api.list_media()
+            all_media = api.list_media_all()
             rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
             logger(tache_id, f"Recherche dans {len(rows)} médias AzuraCast...")
 
@@ -2165,7 +2165,7 @@ def executer_azura_delete_media(tache_id, parametres):
         logger(tache_id, f"Song RadioDJ: {artist} - {title}")
 
         # 2. Résoudre media_id via list_media (1 appel)
-        all_media = api.list_media()
+        all_media = api.list_media_all()
         rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
         logger(tache_id, f"Recherche dans {len(rows)} médias AzuraCast...")
 
@@ -2236,7 +2236,7 @@ def executer_azura_delete_media_batch(tache_id, parametres):
     Même logique que executer_azura_delete_media (Phase 3), appliquée à une
     liste de song_ids, avec deux optimisations batch :
       • UNE seule requête SQL pour lire tous les songs RadioDJ ;
-      • UN seul appel api.list_media() pour résoudre tous les media_ids
+      • UN seul appel api.list_media_all() pour résoudre tous les media_ids
         (passe 1 : path_exact ; passe 2 : artist_title normalisé).
 
     Parametres attendus :
@@ -2307,7 +2307,7 @@ def executer_azura_delete_media_batch(tache_id, parametres):
         db.close()
 
         # ── 2. Charger la liste des médias AzuraCast UNE seule fois ──
-        all_media = api.list_media()
+        all_media = api.list_media_all()
         rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
         logger(tache_id, f"Recherche dans {len(rows)} médias AzuraCast...")
 
@@ -2460,7 +2460,7 @@ def executer_get_media_playlists(tache_id, parametres):
         logger(tache_id, f"Song RadioDJ: {artist} - {title}")
 
         # 2. Lister tous les médias AzuraCast et chercher un match
-        all_media = api.list_media()
+        all_media = api.list_media_all()
         rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
         logger(tache_id, f"Recherche dans {len(rows)} médias AzuraCast...")
 
@@ -2561,7 +2561,7 @@ def _store_task_result(tache_id, result_json):
 def executer_get_batch_media_playlists(tache_id, parametres):
     """
     Phase 1.5 — Récupère les playlists AzuraCast pour MULTIPLE titres en une seule fois.
-    Optimisation : 1 seul appel api.list_media() pour tous les titres.
+    Optimisation : 1 seul appel api.list_media_all() pour tous les titres.
     """
     song_ids = parametres.get('song_ids', [])
     station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
@@ -2610,8 +2610,8 @@ def executer_get_batch_media_playlists(tache_id, parametres):
             logger(tache_id, "=== TERMINÉ === (aucun song trouvé)")
             return
 
-        # 2. Appeler api.list_media() UNE SEULE FOIS
-        all_media = api.list_media()
+        # 2. Appeler api.list_media_all() UNE SEULE FOIS
+        all_media = api.list_media_all()
         rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
         logger(tache_id, f"Médias AzuraCast récupérés: {len(rows)}")
 
@@ -2710,7 +2710,7 @@ def executer_azura_remove_from_playlist_batch(tache_id, parametres):
 
     Optimisation vs Phase 1 (1 tâche par retrait) :
       - 1 seule lecture DB pour tous les songs RadioDJ (WHERE ID IN (...))
-      - 1 seul appel api.list_media() partagé pour la résolution media_id
+      - 1 seul appel api.list_media_all() partagé pour la résolution media_id
 
     Parametres attendus :
       - song_ids: liste d'IDs RadioDJ (obligatoire, non vide)
@@ -2719,7 +2719,7 @@ def executer_azura_remove_from_playlist_batch(tache_id, parametres):
 
     Workflow :
       1. Lecture groupée des songs RadioDJ (WHERE ID IN (...))
-      2. Appel unique à api.list_media() puis construction d'un index
+      2. Appel unique à api.list_media_all() puis construction d'un index
          {basename_lower: media} pour lookup O(1)
       3. Pour chaque song_id :
          a. Résoudre media_id (path_exact puis artist_title_normalized)
@@ -2810,7 +2810,7 @@ def executer_azura_remove_from_playlist_batch(tache_id, parametres):
 
     # ── 2. Appel UNIQUE à list_media() + construction de l'index ──
     try:
-        all_media = api.list_media()
+        all_media = api.list_media_all()
         rows_media = all_media if isinstance(all_media, list) else all_media.get('rows', [])
         logger(tache_id, f"list_media() — {len(rows_media)} média(s) AzuraCast récupérés")
     except AzuraCastAPIError as e:
@@ -6230,6 +6230,29 @@ def executer_sync_azura_status(tache_id, parametres):
         db.close()
 
         logger(tache_id, f"{updated} titre(s) mis à jour (flag AZURA_*_S*)")
+
+        # Phase 21.1 — socle rotation (GF8/21.3) : journaliser le resync réussi
+        # dans journal_operations_azura (table créée en idempotent au démarrage).
+        try:
+            db_j = pymysql.connect(**DB_CONFIG)
+            cur_j = db_j.cursor()
+            cur_j.execute(
+                "INSERT INTO journal_operations_azura "
+                "(type_op, station_id, triggered_by, trigger_source, details) "
+                "VALUES ('flag_resync', NULL, 'cron', 'cron:auto_scheduled', %s)",
+                (json.dumps({
+                    'songs': len(all_songs),
+                    'matches': nb_match,
+                    'no_match': nb_no_match,
+                    'updated': updated,
+                }),)
+            )
+            db_j.commit()
+            cur_j.close()
+            db_j.close()
+        except Exception:
+            pass  # Table absente (déploiement partiel) → non bloquant
+
         logger(tache_id, "=== TERMINÉ SYNC AZURA STATUS ===")
 
     except Exception as e:
@@ -6250,8 +6273,95 @@ INTERVALLE_VERIFICATION_COULEUR = 60
 INTERVALLE_AUTO_CHECK = 300  # Vérifie auto-check config toutes les 5 min
 INTERVALLE_AUTO_VALIDATION = 300  # Vérifie auto-validation pool toutes les 5 min
 INTERVALLE_SYNC_AZURA_AUTO = 3600  # Vérifie sync auto AzuraCast toutes les heures
-SYNC_AZURA_AUTO_HEURE_DEBUT = 8   # Plage horaire : 8h
-SYNC_AZURA_AUTO_HEURE_FIN = 20    # Plage horaire : 20h
+SYNC_AZURA_AUTO_HEURE_DEBUT = 8   # Plage horaire : 8h  (fallback si config.json absent — GF7)
+SYNC_AZURA_AUTO_HEURE_FIN = 20    # Plage horaire : 20h (fallback si config.json absent — GF7)
+
+# ── Phase 21.1 — GF1 : priorité des tâches dans le SELECT du worker ──
+# Les tâches interactives (l'utilisateur attend devant le dashboard) sont
+# prises AVANT les crons lourds lancés automatiquement (garde-fou GF1 du mémo).
+TYPES_PRIORITE_HAUTE = (
+    'COPIE_FICHIERS', 'COPIE_SHEETS', 'PREFILL_SHEETS', 'CREER_PLAYLIST_AZURA',
+    'IMPORT_M3U_PLAYLIST', 'IMPORT_M3U_RETRY', 'AZURA_REMOVE_FROM_PLAYLIST',
+    'AZURA_REMOVE_FROM_PLAYLIST_BATCH', 'GET_MEDIA_PLAYLISTS',
+    'GET_BATCH_MEDIA_PLAYLISTS', 'AZURA_DELETE_MEDIA', 'AZURA_DELETE_MEDIA_BATCH',
+    'PROGRAMMATION_COULEUR', 'IMPORT_SHEETS_COULEUR', 'VALIDATION_POOL_SHEETS',
+    'BULK_SCHEDULE', 'GRILLE_EDITORIALE_AZURA', 'IMPORT_MASSE', 'SUSPECT_REJECT',
+    'SYNC_GRILLE_WEB', 'SHAZAM_SYNC_SHEET', 'SYNC_VPS_SOUMISSIONS',
+    'SYNC_VPS_SHAZAM_EXT', 'PIGE_PROMOTE_PODCAST',
+)
+# Crons lourds / analytics déclenchés automatiquement → traités en dernier.
+# Surchargable via config.json "automation"."priorite_fond" (liste de types).
+TYPES_PRIORITE_FOND = (
+    'SYNC_AZURA_STATUS', 'SYNC_PLAYLISTS_CACHE', 'AUTO_CHECK_SHEETS',
+    'AUDIENCE_GET_DATA', 'PIGE_LIST', 'PIGE_EXTRACT',
+    'PODCASTS_LIST', 'PODCASTS_EPISODES',
+)
+
+
+def _ordre_priorite_sql(priorite_fond=None):
+    """Phase 21.1 — GF1 : construit le ORDER BY priorisé du SELECT principal.
+    1 = interactif (utilisateur qui attend), 2 = autre, 3 = crons de fond.
+    À priorité égale, la plus ancienne d'abord (id ASC — comportement historique)."""
+    if priorite_fond is None:
+        priorite_fond = list(TYPES_PRIORITE_FOND)
+    priorite_fond = [str(t) for t in priorite_fond]
+    haute = "','".join(t for t in TYPES_PRIORITE_HAUTE if t not in priorite_fond)
+    basse = "','".join(priorite_fond)
+    return (
+        "ORDER BY CASE "
+        f"WHEN type_action IN ('{haute}') THEN 1 "
+        f"WHEN type_action IN ('{basse}') THEN 3 "
+        "ELSE 2 END ASC, id ASC LIMIT 1"
+    )
+
+
+# ── Phase 21.1 — GF7 : configuration 'automation' dans config.json ──
+SYNC_AZURA_AUTO_INTERVALLE_MIN = 60  # Intervalle entre 2 syncs auto, en minutes (fallback)
+
+_auto_config_cache = {'ts': 0.0, 'data': None}
+
+
+def _lire_config_automation(force=False):
+    """Phase 21.1 — GF7 : lit la section 'automation' de config.json (côté worker).
+
+    Clés reconnues :
+      - sync_azura_heure_debut    : début de la plage auto-sync (défaut 8)
+      - sync_azura_heure_fin      : fin de la plage auto-sync (défaut 20)
+      - sync_azura_intervalle_min : intervalle entre 2 syncs auto en minutes (défaut 60)
+      - priorite_fond             : liste de type_action en priorité basse (GF1)
+
+    Cache 5 min pour éviter une lecture disque à chaque boucle du worker.
+    Retourne un dict avec les valeurs effectives (fallback constantes si absent)."""
+    import time as _time
+    now_ts = _time.time()
+    if (not force and _auto_config_cache['data'] is not None
+            and now_ts - _auto_config_cache['ts'] < 300):
+        return _auto_config_cache['data']
+    eff = {
+        'sync_azura_heure_debut': SYNC_AZURA_AUTO_HEURE_DEBUT,
+        'sync_azura_heure_fin': SYNC_AZURA_AUTO_HEURE_FIN,
+        'sync_azura_intervalle_min': SYNC_AZURA_AUTO_INTERVALLE_MIN,
+        'priorite_fond': list(TYPES_PRIORITE_FOND),
+    }
+    try:
+        if os.path.exists(CONFIG_JSON):
+            with open(CONFIG_JSON, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+            auto = cfg.get('automation') if isinstance(cfg, dict) else None
+            if isinstance(auto, dict):
+                for cle in ('sync_azura_heure_debut', 'sync_azura_heure_fin',
+                            'sync_azura_intervalle_min'):
+                    v = auto.get(cle)
+                    if isinstance(v, (int, float)) and v >= 0:
+                        eff[cle] = int(v)
+                pf = auto.get('priorite_fond')
+                if isinstance(pf, list) and pf:
+                    eff['priorite_fond'] = [str(x) for x in pf]
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[CONFIG GF7] Erreur lecture section automation de {CONFIG_JSON} : {e}")
+    _auto_config_cache['ts'] = now_ts
+    _auto_config_cache['data'] = eff
+    return eff
 
 # ── Sync VPS OVH 1 (programmes.airvs.fr) ──
 VPS_SYNC_URL = "https://programmes.airvs.fr"
@@ -7512,9 +7622,11 @@ def executer_shazam_sync_sheet(tache_id, parametres):
 
 def _sync_azura_automatique():
     """Insère les tâches SYNC_AZURA_STATUS + SYNC_PLAYLISTS_CACHE si :
-      - on est dans la plage 8h-20h (timezone Europe/Paris)
+      - on est dans la plage horaire configurée (GF7 : config.json 'automation',
+        fallback 8h-20h — timezone Europe/Paris)
       - aucune tâche du même type n'est déjà en attente/en_cours
-      - la dernière exécution auto remonte à plus d'une heure."""
+      - la dernière exécution auto remonte à plus de l'intervalle configuré
+        (GF7 : sync_azura_intervalle_min, fallback 60 min)."""
     try:
         from datetime import datetime as dt
         # Heure actuelle en Europe/Paris
@@ -7525,9 +7637,10 @@ def _sync_azura_automatique():
         except ImportError:
             now_local = dt.now()  # Fallback sans timezone
 
+        cfg_auto = _lire_config_automation()
         heure = now_local.hour
-        if heure < SYNC_AZURA_AUTO_HEURE_DEBUT or heure >= SYNC_AZURA_AUTO_HEURE_FIN:
-            return  # Hors plage horaire
+        if heure < cfg_auto['sync_azura_heure_debut'] or heure >= cfg_auto['sync_azura_heure_fin']:
+            return  # Hors plage horaire (GF7)
 
         db = pymysql.connect(**DB_CONFIG)
         cursor = db.cursor(pymysql.cursors.DictCursor)
@@ -7554,9 +7667,11 @@ def _sync_azura_automatique():
         )
         derniere = cursor.fetchone()
         if derniere and derniere['date_creation']:
-            # Si la dernière date est dans la dernière heure, ne pas relancer
+            # Si la dernière date est plus récente que l'intervalle configuré
+            # (GF7 : sync_azura_intervalle_min), ne pas relancer
             from datetime import timedelta
-            if dt.now() - derniere['date_creation'] < timedelta(hours=1):
+            intervalle_sec = max(1, int(cfg_auto['sync_azura_intervalle_min'])) * 60
+            if dt.now() - derniere['date_creation'] < timedelta(seconds=intervalle_sec):
                 cursor.close()
                 db.close()
                 return
@@ -8136,6 +8251,135 @@ def _fetch_nowplaying_cache(station_ids):
         print(f"[NOWPLAYING] {nb_ok} station(s) mises à jour, {nb_err} erreur(s)")
 
 
+def _assurer_schema_rotation_socle():
+    """Phase 21.1 — socle rotation : crée en idempotent les tables
+    journal_operations_azura (003) et audit_doublons_radiodj (002) de la spec.
+    journal_operations_azura est alimentée dès maintenant par le resync
+    (flag_resync) ; audit_doublons_radiodj sera remplie par le lot 21.5."""
+    try:
+        db = pymysql.connect(**DB_CONFIG)
+        cur = db.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS journal_operations_azura (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              date_op DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              type_op ENUM(
+                'push', 'playlist_add', 'playlist_remove', 'move', 'delete',
+                'rename', 'empty_playlist', 'rotation_soft', 'rotation_hard',
+                'auto_purge', 'flag_force', 'flag_resync', 'm3u_push'
+              ) NOT NULL,
+              station_id INT COMMENT '6 ou 7, NULL si global',
+              media_id_azura INT COMMENT 'ID média côté AzuraCast',
+              song_id_radiodj INT COMMENT 'ID song côté RadioDJ (radiodb.songs.ID)',
+              triggered_by ENUM(
+                'manual', 'cron', 'auto_purge', 'preview_accept', 'event_hook'
+              ) NOT NULL,
+              task_id INT COMMENT 'Lien vers taches_planifiees.id',
+              trigger_source VARCHAR(255) COMMENT 'dashboard:sebastien, cron:monthly, etc.',
+              details JSON COMMENT 'Contexte spécifique (rotation_id, playlist_id, raisons, etc.)',
+              reversible BOOLEAN DEFAULT TRUE,
+              reversed_by INT COMMENT 'ID de l''opération inverse',
+              reversed_at DATETIME,
+              INDEX idx_date (date_op),
+              INDEX idx_type (type_op),
+              INDEX idx_station (station_id),
+              INDEX idx_song (song_id_radiodj),
+              INDEX idx_task (task_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS audit_doublons_radiodj (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              date_audit DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              cle_groupe VARCHAR(255) NOT NULL COMMENT 'Normalisation "artist - title"',
+              artist VARCHAR(255) NOT NULL,
+              title VARCHAR(255) NOT NULL,
+              album VARCHAR(255),
+              song_id_radiodj INT NOT NULL COMMENT 'ID dans radiodb.songs',
+              path VARCHAR(500),
+              file_size INT,
+              duration FLOAT,
+              id3_complete BOOLEAN DEFAULT FALSE,
+              flag_azura VARCHAR(50) COMMENT 'AZURA_*_S6_S7 ou NULL',
+              type_doublon ENUM('strict', 'large') NOT NULL COMMENT 'strict = artist+title+album, large = artist+title',
+              action_recommandee ENUM('conserver', 'nettoyer', 'auditer', 'marque_pour_nettoyage') DEFAULT 'auditer',
+              INDEX idx_groupe (cle_groupe),
+              INDEX idx_type (type_doublon),
+              INDEX idx_action (action_recommandee),
+              INDEX idx_song (song_id_radiodj)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+        db.commit()
+        cur.close()
+        db.close()
+        print("  ✓ Socle rotation vérifié (journal_operations_azura + audit_doublons_radiodj — Phase 21.1)")
+    except Exception as e:
+        print(f"  ⚠ Socle rotation non créé (non bloquant) : {e}")
+
+
+def _rattrapage_crons_au_demarrage():
+    """Phase 21.1 — GF4 : rattrapage au démarrage du worker.
+
+    Si la dernière SYNC_AZURA_STATUS TERMINÉE date de plus que l'intervalle
+    configuré (worker arrêté, ou créneau nocturne sans sync), on réinsère
+    immédiatement une tâche de resync — même hors plage horaire — afin que
+    les suppressions/ajouts effectués hors plage ne restent pas invisibles
+    jusqu'à la prochaine fenêtre (GF4 du mémo : « les suppressions manuelles
+    nocturnes ne sont détectées qu'au prochain cycle 8h-20h »)."""
+    try:
+        cfg_auto = _lire_config_automation(force=True)
+        intervalle_min = max(1, int(cfg_auto.get('sync_azura_intervalle_min', 60)))
+        db = pymysql.connect(**DB_CONFIG)
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        # Garde-fou : pas de rattrapage si une sync est déjà en file
+        cursor.execute(
+            "SELECT id FROM taches_planifiees "
+            "WHERE type_action IN ('SYNC_AZURA_STATUS', 'SYNC_PLAYLISTS_CACHE') "
+            "AND statut IN ('en_attente', 'en_cours') LIMIT 1"
+        )
+        if cursor.fetchone():
+            cursor.close()
+            db.close()
+            return
+        cursor.execute(
+            "SELECT date_fin FROM taches_planifiees "
+            "WHERE type_action = 'SYNC_AZURA_STATUS' AND statut = 'termine' "
+            "ORDER BY date_fin DESC LIMIT 1"
+        )
+        derniere = cursor.fetchone()
+        en_retard = False
+        if not derniere or not derniere['date_fin']:
+            en_retard = True  # jamais exécutée
+        else:
+            from datetime import datetime as dt
+            from datetime import timedelta
+            if dt.now() - derniere['date_fin'] > timedelta(minutes=intervalle_min):
+                en_retard = True
+        if en_retard:
+            try:
+                station_ids = [s['id'] for s in lister_stations_config()]
+            except Exception:
+                station_ids = []
+            if station_ids:
+                cursor.execute(
+                    "INSERT INTO taches_planifiees (type_action, parametres, statut) "
+                    "VALUES ('SYNC_AZURA_STATUS', %s, 'en_attente')",
+                    (json.dumps({
+                        'station_ids': station_ids,
+                        'badge_global': True,
+                        'auto_scheduled': True,
+                        'source': 'rattrapage_demarrage',
+                    }),)
+                )
+                db.commit()
+                print("  ✓ GF4 : rattrapage SYNC_AZURA_STATUS réinséré au démarrage "
+                      "(dernière exécution trop ancienne)")
+        cursor.close()
+        db.close()
+    except Exception as e:
+        print(f"  ⚠ GF4 rattrapage démarrage ignoré (non bloquant) : {e}")
+
+
 def main():
     print(f"Worker Ubuntu démarré (version {WORKER_VERSION}). En attente de tâches SQL...")
     # Créer les tables airvs_* si manquantes (idempotent)
@@ -8166,6 +8410,12 @@ def main():
         db_mig.close()
     except Exception as e:
         print(f"  ⚠ Migration date_planifiee ignorée (déjà faite ou erreur non bloquante) : {e}")
+
+    # ── Phase 21.1 : socle rotation (journal_operations_azura + audit_doublons) ──
+    _assurer_schema_rotation_socle()
+
+    # ── Phase 21.1 — GF4 : rattrapage des crons en retard au démarrage ──
+    _rattrapage_crons_au_demarrage()
 
     # ── Enregistrer la version du worker en base pour vérification dashboard ──
     # On crée une table dédiée si elle n'existe pas, puis on UPSERT la version.
@@ -8508,7 +8758,8 @@ def main():
                 # (IMPORT_M3U_RETRY programmé 60s plus tard). Les tâches sans date_planifiee
                 # sont immédiatement éligibles (comportement historique préservé).
                 "AND (date_planifiee IS NULL OR date_planifiee <= NOW()) "
-                "ORDER BY id ASC LIMIT 1"
+                # Phase 21.1 — GF1 : priorité interactifs > autres > crons de fond
+                + _ordre_priorite_sql(_lire_config_automation().get('priorite_fond'))
             )
             cursor.execute(query)
             tache = cursor.fetchone()

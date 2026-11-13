@@ -329,6 +329,49 @@ class AzuraCastAPI:
         )
         return self._handle_response(response, "Lister les médias")
 
+    def list_media_all(self, page_size=10000, max_pages=20):
+        """
+        Phase 21.1 — GF2 : liste TOUS les médias de la station en paginant.
+
+        AzuraCast limite le nombre de résultats par appel. Avec l'ancien appel
+        unique list_media(limit=10000), une station dépassant 10 000 médias
+        renvoyait des résultats TRONQUÉS → risque de faux AZURA_REMOVED au
+        resync des flags (un titre présent mais non listé était considéré
+        comme supprimé côté AzuraCast).
+
+        Args:
+            page_size: Nombre de résultats par page (max pratique de l'API)
+            max_pages: Garde-fou anti-boucle infinie (20 pages × 10 000 = 200 000)
+
+        Returns:
+            dict: même forme que list_media() → {'rows': [...], 'total': N,
+                  'paginated': True} — les appelants existants ne changent pas.
+        """
+        rows = []
+        total_api = None
+        page = 1
+        while page <= max_pages:
+            data = self.list_media(limit=page_size, page=page)
+            if not isinstance(data, dict):
+                # Réponse inattendue (list ou None) → renvoyer tel quel,
+                # les appelants gèrent déjà ce cas.
+                return data
+            batch = data.get('rows') or []
+            if total_api is None:
+                total_api = data.get('total')
+            rows.extend(batch)
+            if len(batch) < page_size:
+                break  # dernière page atteinte
+            page += 1
+        if page > max_pages:
+            print(f"[GF2] ⚠ list_media_all: max_pages={max_pages} atteint — "
+                  f"résultats potentiellement tronqués ({len(rows)} médias récupérés)")
+        return {
+            'rows': rows,
+            'total': len(rows) if total_api is None else total_api,
+            'paginated': True,
+        }
+
     def list_directories(self):
         """
         Liste tous les répertoires de la station via l'API AzuraCast.
