@@ -39,6 +39,7 @@ from blueprints.shazam import shazam_bp, _assurer_schema_shazam
 from blueprints.programmation import programmation_bp
 from blueprints.taches import taches_bp
 from blueprints.pipeline_import import pipeline_import_bp, _assurer_schema_browse_roots
+from blueprints.rotation import rotation_bp  # Phase 21.3 — onglet Rotation éditoriale
 
 
 app = Flask(__name__)
@@ -107,6 +108,7 @@ app.register_blueprint(shazam_bp)
 app.register_blueprint(programmation_bp)
 app.register_blueprint(taches_bp)
 app.register_blueprint(pipeline_import_bp)
+app.register_blueprint(rotation_bp)  # Phase 21.3 — Rotation éditoriale
 
 
 # ─── Thread worker (sync MP3 en arrière-plan) ─────────────────────────

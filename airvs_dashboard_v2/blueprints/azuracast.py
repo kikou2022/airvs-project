@@ -87,6 +87,28 @@ from decimal import Decimal
 import pymysql
 from flask import Blueprint, request, jsonify, Response
 
+from utils import get_db_connection
+
+
+def _miroir_demander_regen(raison):
+    """Phase 21.3 (mémo §5.1) — marque le miroir db.json à régénérer après
+    une écriture de flags dans radiodb.songs. Le thread de fond du worker .17
+    draine la demande (SSH BatchMode → export_db_mirror_V4.py sur .30).
+    Non bloquant : table absente (worker 21.3 pas encore déployé) → ignore."""
+    try:
+        db = get_db_connection()
+        cursor = db.cursor()
+        cursor.execute(
+            "UPDATE mirror_regen_state SET pending = 1, date_demande = NOW(), "
+            "last_raison = %s WHERE id = 1",
+            (str(raison)[:255],)
+        )
+        db.commit()
+        cursor.close()
+        db.close()
+    except Exception:
+        pass  # miroir 21.3 non déployé → aucune conséquence
+
 from config import (
     CONFIG_JSON_PATH,
     API_TOKEN,
@@ -857,6 +879,7 @@ def lancer_push_azura():
                 if _upd_deja:
                     db.commit()
                     _logger.info(f"[v2.7] {_upd_deja} fichier(s) déjà AzuraCast marqué(s) IN_AZURACAST (radiodb.songs)")
+                    _miroir_demander_regen('push_deja_azura')  # Phase 21.3
                 _ids_deja = _ids_songs_par_chemins(cursor, _paths_deja)
                 if _ids_deja:
                     _qualifier_sources_pousse_azura(cursor, db, _ids_deja)
@@ -1018,6 +1041,7 @@ def lire_log_push():
                         paths_marques.append(fpath)
                 if updated > 0:
                     db.commit()
+                    _miroir_demander_regen('push_copie_fichiers')  # Phase 21.3
                 marquage = {'status': 'ok', 'updated': updated, 'paths': paths_marques}
                 if updated:
                     _logger.info(f"[v2.7] {updated} titre(s) marqué(s) IN_AZURACAST dans radiodb.songs (COPIE_FICHIERS)")
@@ -1211,6 +1235,8 @@ def api_marquer_in_azuracast():
                 (sid,)
             )
             updated += cursor.rowcount
+        if updated:
+            _miroir_demander_regen('marquer_in_azuracast')  # Phase 21.3
 
         # v2.5 — qualification des lignes sources (cycle éditorial complet)
         try:

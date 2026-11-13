@@ -649,6 +649,12 @@
             </button>
         </li>
         <li>
+            <button class="sb-link" id="nav-rotation-tab"
+                    data-target="#nav-rotation" type="button">
+                🔄 Rotation éditoriale
+            </button>
+        </li>
+        <li>
             <button class="sb-link" id="nav-piges-tab"
                     data-target="#nav-piges" type="button">
                 🎙️ Piges & Podcasts
@@ -4472,6 +4478,158 @@
                 <script src="/static/js/modules/grille-editoriale.js?v=3"></script>
 
         <!-- ════════════════════════════════════ -->
+        <!-- ROTATION EDITORIALE (Phase 21.3)   -->
+        <!-- Contenu construit par rotation.js  -->
+        <!-- ════════════════════════════════════ -->
+            <div class="tab-pane fade" id="nav-rotation" role="tabpanel"
+                 aria-labelledby="nav-rotation-tab">
+                <style>
+                    /* ── Phase 21.3 — styles locaux Rotation éditoriale ──
+                       Portée #nav-rotation, compatible thème clair/sombre via
+                       body.airvs-theme-dark (pattern 20.2). */
+                    #nav-rotation .rot-kpi { border-left: 5px solid #64748b; }
+                    #nav-rotation .rot-kpi.rot-info { border-left-color: #0dcaf0; }
+                    #nav-rotation .rot-kpi.rot-success { border-left-color: #22c55e; }
+                    #nav-rotation .rot-kpi .rot-value { font-size: 1.5rem; font-weight: 700; }
+                    #nav-rotation .rot-reason { display: inline-block; font-size: 0.72rem;
+                        padding: 2px 8px; border-radius: 10px; margin: 1px 2px;
+                        background: #fee2e2; color: #991b1b; }
+                    #nav-rotation .rot-reason.rot-ok { background: #dcfce7; color: #166534; }
+                    #nav-rotation .score-high { color: #dc3545; font-weight: 700; }
+                    #nav-rotation .score-mid { color: #fd7e14; font-weight: 700; }
+                    #nav-rotation .score-low { color: #6c757d; }
+                    #nav-rotation .rot-group-head td { background: rgba(148,163,184,0.12); font-weight: 600; }
+                    #nav-rotation .rot-log { max-height: 260px; overflow-y: auto;
+                        background: #020617; color: #d4d4d4; font-family: monospace;
+                        font-size: 0.78rem; padding: 10px; border-radius: 6px; white-space: pre-wrap; }
+                    body.airvs-theme-dark #nav-rotation .rot-reason { background: #450a0a; color: #fecaca; }
+                    body.airvs-theme-dark #nav-rotation .rot-reason.rot-ok { background: #14532d; color: #bbf7d0; }
+                    body.airvs-theme-dark #nav-rotation .rot-group-head td { background: #334155; }
+                </style>
+
+                <h4>🔄 Rotation éditoriale — pilotée par RadioDJ</h4>
+                <p class="text-muted small">
+                    AzuraCast suit la rotation définie dans RadioDJ. Toutes les opérations sont
+                    débrayables ; le mode <code>soft</code> (retrait des playlists, fichier conservé)
+                    est le seul actif tant que l'exécution « hard » n'est pas validée (cadrage Q6).
+                </p>
+
+                <!-- KPIs -->
+                <div class="row g-3 mb-3" id="rot-kpis">
+                    <div class="col-6 col-lg-3"><div class="card dashboard-card h-100 rot-kpi"><div class="card-body">
+                        <div class="text-muted small fw-bold">🎧 MÉDIAS AZURACAST (STATION)</div>
+                        <div class="rot-value" id="rot-kpi-medias">—</div>
+                        <div class="text-muted small" id="rot-kpi-medias-sub">station sélectionnée</div>
+                    </div></div></div>
+                    <div class="col-6 col-lg-3"><div class="card dashboard-card h-100 rot-kpi rot-info"><div class="card-body">
+                        <div class="text-muted small fw-bold">📋 CANDIDATS AU RETRAIT</div>
+                        <div class="rot-value" id="rot-kpi-candidats">—</div>
+                        <div class="text-muted small" id="rot-kpi-candidats-sub">dernière preview</div>
+                    </div></div></div>
+                    <div class="col-6 col-lg-3"><div class="card dashboard-card h-100 rot-kpi"><div class="card-body">
+                        <div class="text-muted small fw-bold">🗺️ COUVERTURE MAPPING</div>
+                        <div class="rot-value" id="rot-kpi-mapping">—</div>
+                        <div class="text-muted small" id="rot-kpi-mapping-sub">songs ↔ médias AzuraCast</div>
+                    </div></div></div>
+                    <div class="col-6 col-lg-3"><div class="card dashboard-card h-100 rot-kpi rot-success"><div class="card-body">
+                        <div class="text-muted small fw-bold">🖥️ MIROIR db.json</div>
+                        <div class="rot-value" id="rot-kpi-miroir">—</div>
+                        <div class="text-muted small" id="rot-kpi-miroir-sub">dernière régénération</div>
+                    </div></div></div>
+                </div>
+
+                <!-- Barre d'action + preview -->
+                <div class="card dashboard-card">
+                    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <span>📋 Preview rotation — candidats au retrait</span>
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <select id="rot-station" class="form-select form-select-sm" style="width:auto">
+                                <option value="7" selected>Station 7</option>
+                                <option value="6">Station 6</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline-secondary" id="rot-btn-config">⚙️ Paramètres</button>
+                            <button class="btn btn-sm btn-outline-primary" id="rot-btn-preview">🔍 Calculer la preview</button>
+                        </div>
+                    </div>
+                    <div class="card-body" id="rot-preview-zone">
+                        <div id="rot-config-box" class="border rounded p-2 mb-3 d-none small">
+                            <!-- formulaire paramètres (rempli par rotation.js) -->
+                        </div>
+                        <div id="rot-preview-status" class="small text-muted mb-2"></div>
+                        <div id="rot-preview-table" style="max-height: 520px; overflow-y: auto;"></div>
+                    </div>
+                    <div class="card-footer d-flex justify-content-between align-items-center flex-wrap gap-2" id="rot-actionbar">
+                        <div class="small">
+                            <strong>Mode :</strong>
+                            <label class="ms-2"><input type="radio" name="rot-mode" value="soft" checked> 🟢 Soft (retirer playlists)</label>
+                            <label class="ms-2" id="rot-mode-hard-label" title="Refusé tant que le cadrage Q6 (exécution hard) n'est pas validé">
+                                <input type="radio" name="rot-mode" value="hard" disabled> 🔴 Hard
+                            </label>
+                        </div>
+                        <div class="d-flex gap-2">
+                            <span class="text-muted small align-self-center" id="rot-selection-info">0 sélectionné</span>
+                            <button class="btn btn-sm btn-azura btn-primary" id="rot-btn-execute" disabled>▶️ Exécuter la rotation</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Outils du résolveur + miroir -->
+                <div class="row g-3 mt-1">
+                    <div class="col-lg-6">
+                        <div class="card dashboard-card h-100">
+                            <div class="card-header"><span>🗺️ Résolveur mapping RadioDJ ↔ AzuraCast</span></div>
+                            <div class="card-body small">
+                                <div id="rot-mapping-stats">chargement…</div>
+                                <button class="btn btn-sm btn-outline-secondary mt-2" id="rot-btn-bootstrap">
+                                    🔧 Remplir le mapping (bootstrap complet)
+                                </button>
+                                <div id="rot-bootstrap-status" class="small text-muted mt-1"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-6">
+                        <div class="card dashboard-card h-100">
+                            <div class="card-header"><span>🖥️ Régénération du miroir public</span></div>
+                            <div class="card-body small">
+                                <div id="rot-mirror-state">chargement…</div>
+                                <div class="text-muted mt-2">
+                                    Après toute opération modifiant les flags (rotation, retrait,
+                                    suppression, resync, push), le worker .17 déclenche
+                                    export_db_mirror_V4.py sur .30 via SSH (canal BatchMode existant).
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Journal des opérations -->
+                <div class="card dashboard-card mt-3">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>📜 Journal des opérations</span>
+                        <button class="btn btn-sm btn-outline-secondary" id="rot-btn-history">⟳ Actualiser</button>
+                    </div>
+                    <div class="card-body" style="padding: 0;">
+                        <div id="rot-history" style="max-height: 320px; overflow-y: auto;">
+                            <div class="p-3 small text-muted">chargement…</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card dashboard-card mt-3">
+                    <div class="card-header"><span>🎨 Légende des états AZURA</span></div>
+                    <div class="card-body small d-flex flex-wrap gap-3" id="rot-legende"></div>
+                </div>
+
+                <!-- Log de la dernière tâche (preview / execute / bootstrap) -->
+                <div class="card dashboard-card mt-3">
+                    <div class="card-header"><span>🧾 Log de la dernière tâche worker</span></div>
+                    <div class="card-body">
+                        <div class="rot-log" id="rot-log">—</div>
+                    </div>
+                </div>
+            </div>
+
+        <!-- ════════════════════════════════════ -->
         <!-- MAINTENANCE                    -->
         <!-- ════════════════════════════════════ -->
             <div class="tab-pane fade" id="nav-maintenance" role="tabpanel"
@@ -5376,7 +5534,7 @@
 <!-- SIDEBAR JS (manual navigation — Bootstrap Tab can't cross DOM branches) -->
 <!-- ═══════════════════════════════════════════════════ -->
 <!-- Navigation sidebar (module externe) -->
-<script src="/static/js/modules/navigation.js?v=2"></script>
+<script src="/static/js/modules/navigation.js?v=3"></script>
 
 
 <!-- ══════════════════════════════════════════════════ -->
@@ -5397,6 +5555,7 @@
 <!-- PHASE 3 - Étape 5b : piges-podcasts (piges, lectures, promotion podcast) -->
 <!-- Phase 20.1 : Topbar antenne live (poll /api/nowplaying/<sid>, horloge, thème) -->
 <script src="/static/js/modules/dashboard-header.js?v=3"></script>
+<script src="/static/js/modules/rotation.js?v=2"></script>
 <script src="/static/js/modules/accueil.js?v=1"></script>
 <!-- Modules extraits : utils.js, grille-editoriale.js, navigation.js, shazam-animateurs.js, pont-player.js, stats-audience.js, sync-azuracast.js, couleur.js, pool-tiers.js, piges-podcasts.js, dashboard-header.js -->
 <!-- ══════════════════════════════════════════════════ -->

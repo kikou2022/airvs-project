@@ -15,11 +15,12 @@
 
     // ── Core: manually show/hide a section pane ──
     // Phase 20.3 : ajout de 'nav-accueil' (vue d'ensemble, onglet par défaut)
+    // Phase 21.3 : ajout de 'nav-rotation' (onglet Rotation éditoriale)
     var MAIN_PANE_IDS = [
         'nav-accueil',
         'nav-explorateur','nav-pool','nav-atelier','nav-import',
         'nav-couleur','nav-grille-editoriale','nav-maintenance',
-        'nav-audience','nav-piges'
+        'nav-audience','nav-piges','nav-rotation'
     ];
     function activateSection(targetSelector, triggerBtnId) {
         // Hide ALL 9 main panes by ID — works regardless of DOM nesting

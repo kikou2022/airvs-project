@@ -267,7 +267,7 @@ PIGES_ARTWORK_WINDOWS_DIR = os.getenv('PIGES_ARTWORK_WINDOWS_DIR', r"U:\airvs_ar
 # Worker
 # ═══════════════════════════════════════════════════════════════════════
 
-WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.11.12-A')  # + Phase 21.1 : GF1/GF4/GF7/GF2/socle rotation
+WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.11.13-C')  # + Phase 21.3 : rotation éditoriale (mapping + preview/execute) + regen miroir. C : hotfix cleanup orphelines
 
 
 # ═══════════════════════════════════════════════════════════════════════
