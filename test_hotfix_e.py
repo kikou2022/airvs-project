@@ -7,16 +7,22 @@ Teste en local (sans MySQL ni réseau) :
   3. la détection _detecter_colonnes_songs_radio (cache module, branche "trouvé")
   4. la compilation du module
 """
+import os
 import sys
 import types
 import py_compile
 
-MODULE_DIR = '/home/z/my-project/download/phase21_3_rotation_editoriale/deploy/ubuntu_17_worker'
+_ICI = os.path.dirname(os.path.abspath(__file__))
+MODULE_DIR = os.path.join(_ICI, 'airvs_worker')
+print('MODULE_DIR résolu :', MODULE_DIR)
+if not os.path.isfile(os.path.join(MODULE_DIR, 'rotation_azura.py')):
+    sys.exit('rotation_azura.py introuvable dans ' + MODULE_DIR)
 sys.path.insert(0, MODULE_DIR)
 
 # 0. Compilation (syntaxe) — n'exécute pas les imports
-py_compile.compile(MODULE_DIR + '/rotation_azura.py', doraise=True)
-print('OK  py_compile rotation_azura.py')
+_SRC = open(os.path.join(MODULE_DIR, 'rotation_azura.py'), encoding='utf-8').read()
+compile(_SRC, os.path.join(MODULE_DIR, 'rotation_azura.py'), 'exec')
+print('OK  compilation en mémoire rotation_azura.py')
 
 # 1. Import avec pymysql disponible ou simulé
 try:
