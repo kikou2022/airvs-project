@@ -1,6 +1,7 @@
 <!-- ██████ AIRVS PATCH PROGRAMMATION v2.2 — 2026-10-08 — ZONE DOWNLOAD AI ██████ -->
 <!-- Corrélation auto multi-passes après import (suspects + pipeline, ciblée titres importés) -->
 <!-- + suivi temps réel de la corrélation dans le terminal Import & Validation -->
+<!-- Hotfix 2026.11.16-B — thème sombre : cartes restées claires (.pls-section, .anim-dd, #pushTabs, .btn-light, body) -->
 <!-- ============================================================================== -->
 <!-- FICHIER DE DEPLOIEMENT - AIRVS Dashboard v2                                     -->
 <!-- Date     : 2026-09-29 14:20 UTC                                                -->
@@ -541,6 +542,32 @@
         body.airvs-theme-dark .table tr.table-danger td,  body.airvs-theme-dark .table tr.table-danger th  { color: #fecaca !important; }
         body.airvs-theme-dark .table tr.table-success td, body.airvs-theme-dark .table tr.table-success th { color: #bbf7d0 !important; }
         body.airvs-theme-dark .table tr.table-info td,    body.airvs-theme-dark .table tr.table-info th    { color: #bae6fd !important; }
+        /* ── Hotfix 2026.11.16-B : éléments restés clairs en thème sombre ──
+           Ré-applique les correctifs du hotfix 2026.11.16-A (absents de la base
+           production md5 7122dc7c) et étend aux boutons .btn-light.
+           - body : arrière-plan de page (bord d'overscroll) restait clair
+             (#f1f5f9 en dur ligne 80).
+           - .pls-section : sous-carte « Et ajouter aux playlists » du panneau
+             Copier/Ajouter PLS restait blanche — fond #f8fafc en dur (ligne 412),
+             capture du 16/11 13:56. Fond sombre + bordure pointillée visible.
+           - .anim-dd : popup du badge animateur restait blanche (#fff, ligne 292) ;
+             le :hover des items était déjà couvert (bloc 20.1), pas la couleur.
+           - #pushTabs : pills Assisté/SQL libre/… peintes #555 !important (règle
+             ID ligne 308) → spécificité ID supérieure aux overrides .nav-tabs du
+             bloc 20.1, et c'est un nav-pills. :not(.active) pour garder le pill
+             actif bleu.
+           - .btn-light : 14 boutons (↻ refresh, Import Sheets, CSV, Fermer…)
+           restaient #f8f9fa sur fond sombre (console 16/11 : BUTTON.btn →
+           rgb(248,249,250)). */
+        body.airvs-theme-dark { background: #0f172a !important; }
+        body.airvs-theme-dark .pls-section { background: #0f172a !important; border-color: rgba(255,255,255,0.18) !important; }
+        body.airvs-theme-dark .anim-dd { background: #1e293b !important; border-color: rgba(255,255,255,0.12) !important; box-shadow: 0 4px 16px rgba(0,0,0,0.55) !important; }
+        body.airvs-theme-dark .anim-dd-item { color: #e2e8f0 !important; }
+        body.airvs-theme-dark .anim-dd-item:hover { background: #334155 !important; color: #fff !important; }
+        body.airvs-theme-dark #pushTabs .nav-link:not(.active) { color: #94a3b8 !important; }
+        body.airvs-theme-dark #pushTabs .nav-link:not(.active):hover { color: #cbd5e1 !important; border-bottom-color: #475569 !important; }
+        body.airvs-theme-dark .btn-light { background-color: #334155 !important; border-color: #475569 !important; color: #e2e8f0 !important; }
+        body.airvs-theme-dark .btn-light:hover { background-color: #475569 !important; border-color: #64748b !important; color: #fff !important; }
     </style>
 </head>
 <body>
