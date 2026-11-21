@@ -1285,7 +1285,14 @@ def api_remove_media_from_playlist(media_id, playlist_id):
     """
     try:
         data = request.get_json(silent=True) or {}
-        station_id = int(data.get('station_id', 7))
+        # Hotfix 2026.11.21-C — station explicite obligatoire (plus de défaut 7)
+        raw_station_id = data.get('station_id')
+        if raw_station_id is None:
+            return jsonify({'status': 'error', 'message': 'station_id manquant — sélectionnez une station cible'}), 400
+        try:
+            station_id = int(raw_station_id)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'station_id invalide'}), 400
         song_id_radiodj = data.get('song_id_radiodj')
 
         db = get_db_connection()
@@ -1341,7 +1348,14 @@ def api_delete_media(song_id_radiodj):
     """
     try:
         data = request.get_json(silent=True) or {}
-        station_id = int(data.get('station_id', 7))
+        # Hotfix 2026.11.21-C — station explicite obligatoire (plus de défaut 7)
+        raw_station_id = data.get('station_id')
+        if raw_station_id is None:
+            return jsonify({'status': 'error', 'message': 'station_id manquant — sélectionnez une station cible'}), 400
+        try:
+            station_id = int(raw_station_id)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'station_id invalide'}), 400
 
         db = get_db_connection()
         if not db:
@@ -1405,7 +1419,14 @@ def api_batch_delete_media():
     try:
         data = request.get_json(silent=True) or {}
         song_ids = data.get('song_ids')
-        station_id = int(data.get('station_id', 7))
+        # Hotfix 2026.11.21-C — station explicite obligatoire (plus de défaut 7)
+        raw_station_id = data.get('station_id')
+        if raw_station_id is None:
+            return jsonify({'status': 'error', 'message': 'station_id manquant — sélectionnez une station cible'}), 400
+        try:
+            station_id = int(raw_station_id)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'station_id invalide'}), 400
 
         # Validation song_ids (même pattern que api_batch_remove_from_playlist)
         if not isinstance(song_ids, list):
@@ -1487,7 +1508,14 @@ def api_get_batch_media_playlists():
     try:
         data = request.get_json(force=True)
         song_ids = data.get('song_ids', [])
-        station_id = int(data.get('station_id', 7))
+        # Hotfix 2026.11.21-C — station explicite obligatoire (plus de défaut 7)
+        raw_station_id = data.get('station_id')
+        if raw_station_id is None:
+            return jsonify({'status': 'error', 'message': 'station_id manquant — sélectionnez une station cible'}), 400
+        try:
+            station_id = int(raw_station_id)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'station_id invalide'}), 400
 
         # Valider song_ids
         if not song_ids or not isinstance(song_ids, list):
@@ -1557,7 +1585,14 @@ def api_batch_remove_from_playlist():
         data = request.get_json(silent=True) or {}
         song_ids = data.get('song_ids')
         playlist_id = data.get('playlist_id')
-        station_id = int(data.get('station_id', 7))
+        # Hotfix 2026.11.21-C — station explicite obligatoire (plus de défaut 7)
+        raw_station_id = data.get('station_id')
+        if raw_station_id is None:
+            return jsonify({'status': 'error', 'message': 'station_id manquant — sélectionnez une station cible'}), 400
+        try:
+            station_id = int(raw_station_id)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'station_id invalide'}), 400
 
         # Validation song_ids
         if not isinstance(song_ids, list):
@@ -1678,7 +1713,14 @@ def api_get_media_playlists(song_id_radiodj):
     # une tâche que le worker traitera. Le dashboard pollera le résultat.
     # C'est le même pattern que SYNC_AZURA_STATUS / BULK_SCHEDULE.
 
-    station_id = int(request.args.get('station_id', 7))
+    # Hotfix 2026.11.21-C — station explicite obligatoire (plus de défaut 7)
+    raw_station_id = request.args.get('station_id')
+    if raw_station_id is None:
+        return jsonify({'status': 'error', 'message': 'station_id manquant — sélectionnez une station cible'}), 400
+    try:
+        station_id = int(raw_station_id)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'station_id invalide'}), 400
 
     db = get_db_connection()
     if not db:

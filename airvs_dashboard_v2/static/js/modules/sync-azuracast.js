@@ -627,6 +627,7 @@ function retirerTitrePlaylistAzura() {
     }
 
     var stationId = getActionStationId();
+    if (!stationValideOuMessage(stationId, '➖ Retirer de la playlist', 'terminal_action_output')) return; // Hotfix 2026.11.21-C
     var songId = actionTrack.ID;
 
     // Afficher le chargement dans la zone dropdown (pas le terminal)
@@ -858,6 +859,7 @@ function supprimerTitreAzuraCast() {
     }
 
     var stationId = getActionStationId();
+    if (!stationValideOuMessage(stationId, '🗑️ Supprimer d\'AzuraCast', 'terminal_action_output')) return; // Hotfix 2026.11.21-C
     var songId = actionTrack.ID;
 
     // Hotfix 2026.11.21-B — journal contextuel : vidage à chaque opération
@@ -962,6 +964,7 @@ function retirerSelectionPlaylistAzura() {
 
     // 3. Afficher un panneau multi-playlists (même logique que "Ajouter à une playlist")
     var stationId = getPushStationId();
+    if (!stationValideOuMessage(stationId, '➖ Retirer des playlists (sélection)', 'terminal_push_output')) return; // Hotfix 2026.11.21-C
     
     // Refactoring UI unifié V3 : le contenu du retrait batch est injecté dans #panel-retirer-content
     // (sous-élément de #panel-retirer, lui-même enfant de #dynamic_action_panel).
@@ -1264,6 +1267,7 @@ function supprimerSelectionAzuraCast() {
     }
 
     var stationId = getPushStationId();
+    if (!stationValideOuMessage(stationId, '🗑️ Supprimer d\'AzuraCast (sélection)', 'terminal_push_output')) return; // Hotfix 2026.11.21-C
     var resultArea = document.getElementById('push_supprimer_result');
     if (resultArea) {
         resultArea.innerHTML = '<div class="alert alert-info py-2 small">⏳ Création de la tâche de suppression batch (' +
@@ -1485,6 +1489,19 @@ function showActionPanel(name) {
     var panel = document.getElementById('action-panel-' + name);
     if (panel) panel.classList.add('active');
 
+    // Hotfix 2026.11.21-C — réaligner la station du panneau sur celle du Pont à
+    // l'ouverture : l'état de départ est toujours sain et la divergence devient
+    // un choix délibéré (besoin validé : push S6 en monitorant S7 dans le Pont).
+    var _pushSel = document.getElementById('push_station_cible');
+    var _actionSel = document.getElementById('action_station_cible');
+    if (_pushSel && _actionSel && _pushSel.value && _pushSel.value !== _actionSel.value) {
+        _actionSel.value = _pushSel.value;
+        reloadActionPanelForStation();
+    }
+
+    // Hotfix 2026.11.21-C — indicateur de cible (badge panneau ↔ Pont)
+    majIndicateurCibleAction();
+
     // Hotfix 2026.11.21-B — journal contextuel : vidage à chaque changement d'opération
     viderJournaux('');
 }
@@ -1535,24 +1552,77 @@ function scrollToPushPlaylists() {
 window.scrollToPushPlaylists = scrollToPushPlaylists;
 
 // Charger les dossiers AzuraCast dans les select
-// Récupère l'ID de station actuellement sélectionné dans le header du Pont
+// Récupère l'ID de station actuellement sélectionné dans le header du Pont.
+// Hotfix 2026.11.21-C — plus de fallback silencieux vers la station 7 : renvoie
+// null si la station n'est pas résolue ; les points d'entrée refusent alors
+// l'action avec un message explicite (le masquage rendait une divergence
+// involontaire indétectable — incident média 13650 du 20/11).
 function getPushStationId() {
     let sel = document.getElementById('push_station_cible');
-    if (!sel) return 7;  // Fallback
-    return parseInt(sel.value) || 7;
+    if (!sel) return null;
+    let v = parseInt(sel.value);
+    return isNaN(v) ? null : v;
 }
 
 // Récupère l'ID de station sélectionné dans le panneau "Action AzuraCast" (explorateur).
 // Indépendant du sélecteur du Pont RadioDJ → l'utilisateur peut cibler une station
-// différente dans chaque section (explorateur vs pont).
+// différente dans chaque section (explorateur vs pont). Besoin validé le 21/11 :
+// pousser vers la station 6 tout en monitorant la station 7 dans le Pont.
+// Hotfix 2026.11.21-C — plus de fallback silencieux (vers Pont ou station 7) :
+// renvoie null si la station n'est pas résolue.
 function getActionStationId() {
     let sel = document.getElementById('action_station_cible');
-    if (!sel) return getPushStationId();  // Fallback : utiliser la station du Pont
-    return parseInt(sel.value) || 7;
+    if (!sel) return null;
+    let v = parseInt(sel.value);
+    return isNaN(v) ? null : v;
 }
+
+// ── Hotfix 2026.11.21-C — station explicite obligatoire à l'entrée des actions ──
+// Refuse l'action avec un message net si la station cible n'est pas résolue,
+// au lieu de basculer silencieusement en station 7.
+function stationValideOuMessage(stationId, libelleAction, zoneJournalId) {
+    if (stationId !== null && stationId !== undefined && !isNaN(stationId)) return true;
+    var message = '⚠ ' + libelleAction + ' : aucune station cible valide. Sélectionnez une station dans la liste déroulante.';
+    var zone = zoneJournalId ? document.getElementById(zoneJournalId) : null;
+    if (zone) {
+        zone.innerHTML = '<div class="alert alert-warning py-2 small">' + message + '</div>';
+    } else {
+        alert(message);
+    }
+    console.warn('[station] ' + message);
+    return false;
+}
+
+// ── Hotfix 2026.11.21-C — indicateur de cible du panneau Assisté ──
+// Affiche en permanence la station ciblée par le panneau et signale la divergence
+// volontaire avec la station du Pont (badge ambre « Cible … ≠ Pont … »).
+function majIndicateurCibleAction() {
+    var badge = document.getElementById('badge_cible_action');
+    if (!badge) return;
+    var aSel = document.getElementById('action_station_cible');
+    var pSel = document.getElementById('push_station_cible');
+    var aId = getActionStationId();
+    var pId = getPushStationId();
+    if (aId === null) {
+        badge.textContent = '⚠ Aucune station cible';
+        badge.className = 'badge bg-danger ms-2 align-middle';
+        return;
+    }
+    var nomA = (aSel && aSel.selectedIndex >= 0 && aSel.options[aSel.selectedIndex]) ? aSel.options[aSel.selectedIndex].text : ('Station ' + aId);
+    if (pId !== null && aId !== pId) {
+        var nomP = (pSel && pSel.selectedIndex >= 0 && pSel.options[pSel.selectedIndex]) ? pSel.options[pSel.selectedIndex].text : ('Station ' + pId);
+        badge.textContent = 'Cible : ' + nomA + '  ≠  Pont : ' + nomP;
+        badge.className = 'badge bg-warning text-dark ms-2 align-middle';
+    } else {
+        badge.textContent = 'Cible : ' + nomA;
+        badge.className = 'badge bg-secondary ms-2 align-middle';
+    }
+}
+window.majIndicateurCibleAction = majIndicateurCibleAction;
 
 function loadActionFolders() {
     let sid = getActionStationId();
+    if (sid === null) return; // Hotfix 2026.11.21-C — station non résolue, pas de fetch
     fetch('/api/azuracast/folders?station_id=' + sid)
         .then(function(r) { return r.json(); })
         .then(function(folders) {
@@ -1601,6 +1671,7 @@ function loadActionFolders() {
 // Met à jour uniquement push_dossier_cible en utilisant la station du Pont.
 function loadPushFolders() {
     let sid = getPushStationId();
+    if (sid === null) return; // Hotfix 2026.11.21-C — station non résolue, pas de fetch
     fetch('/api/azuracast/folders?station_id=' + sid)
         .then(function(r) { return r.json(); })
         .then(function(folders) {
@@ -1682,6 +1753,7 @@ function getDossierCible(selectId, inputId) {
 function loadActionPlaylists() {
     if (window.actionPlaylistsLoaded) return;
     let sid = getActionStationId();
+    if (sid === null) return; // Hotfix 2026.11.21-C — station non résolue, pas de fetch
     console.log('[loadActionPlaylists] Fetching playlists for station_id=' + sid);
     fetch('/api/azuracast/playlists?t=' + Date.now() + '&station_id=' + sid)
         .then(function(r) { return r.json(); })
@@ -1718,6 +1790,7 @@ document.getElementById('btn_action_copier').addEventListener('click', function(
     if (!actionTrack) return;
     viderJournaux('action'); // Hotfix 2026.11.21-B — journal contextuel
     journalLabel('action', 'Journal · 🚀 Copier vers AzuraCast :'); // Hotfix 2026.11.21-B2
+    if (!stationValideOuMessage(getActionStationId(), '🚀 Copier vers AzuraCast', 'terminal_action_output')) return; // Hotfix 2026.11.21-C
     let dossier = getDossierCible('action_dossier_cible', 'action_new_folder_name') || 'imports_push';
     // Si déjà IN_AZURACAST, pas besoin de copier
     if (actionTrack.inAzura) {
@@ -1750,6 +1823,7 @@ document.getElementById('btn_action_ajouter_playlist').addEventListener('click',
     if (!actionTrack) return;
     viderJournaux('action'); // Hotfix 2026.11.21-B — journal contextuel
     journalLabel('action', 'Journal · ➕ Ajouter aux playlists :'); // Hotfix 2026.11.21-B2
+    if (!stationValideOuMessage(getActionStationId(), '➕ Ajouter aux playlists', 'terminal_action_output')) return; // Hotfix 2026.11.21-C
     let playlistIds = getActionPlaylistIds();
     // Lecture null-safe (l'élément a été supprimé puis réintroduit en v2.7)
     let npEl = document.getElementById('action_new_playlist_name');
@@ -1828,6 +1902,7 @@ document.getElementById('btn_action_ajouter_playlist').addEventListener('click',
 document.getElementById('btn_action_copier_et_playlist').addEventListener('click', function() {
     if (!actionTrack) return;
     viderJournaux('action'); // Hotfix 2026.11.21-B — journal contextuel
+    if (!stationValideOuMessage(getActionStationId(), '🚀 Copier + ➕ Playlists', 'terminal_action_output')) return; // Hotfix 2026.11.21-C
     journalLabel('action', 'Journal · 🚀 Copier + ➕ Playlists :'); // Hotfix 2026.11.21-B2
     let playlistIds = getActionPlaylistIds();
     // Lecture null-safe (l'élément a été supprimé puis réintroduit en v2.7)
@@ -2110,9 +2185,17 @@ function loadStationsList() {
             // Construire le HTML des options une seule fois
             let optionsHtml = '';
             if (!data.stations || data.stations.length === 0) {
-                optionsHtml = '<option value="7">Station 7 (fallback)</option>';
+                // Hotfix 2026.11.21-C — plus d'option fantôme station 7 : liste vide
+                // explicite → les actions seront refusées jusqu'à sélection valide.
+                optionsHtml = '<option value="">— Aucune station —</option>';
             } else {
-                let defaultId = data.default_station_id || 7;
+                // Hotfix 2026.11.21-C — défaut = default_station_id de la config,
+                // sinon la première station de la liste (plus de 7 implicite).
+                let defaultId = data.default_station_id;
+                if (!defaultId) {
+                    defaultId = data.stations[0].id;
+                    console.warn('[stations] default_station_id absent de la config — présélection de la première station (' + defaultId + ')');
+                }
                 data.stations.forEach(function(s) {
                     let selected = (s.id === defaultId) ? ' selected' : '';
                     optionsHtml += '<option value="' + s.id + '"' + selected + '>'
@@ -2129,13 +2212,15 @@ function loadStationsList() {
             if (stickySel) stickySel.innerHTML = optionsHtml;
             // Déclencher le rechargement des playlists/dossiers pour la station par défaut
             reloadPlaylistsAndFoldersForStation();
+            majIndicateurCibleAction(); // Hotfix 2026.11.21-C — badge de divergence
         })
         .catch(function(err) {
             console.error('loadStationsList:', err);
             ['push_station_cible', 'action_station_cible'].forEach(function(id) {
                 var el = document.getElementById(id);
-                if (el) el.innerHTML = '<option value="7">Erreur chargement stations</option>';
+                if (el) el.innerHTML = '<option value="">— Erreur chargement stations —</option>';
             });
+            console.error('[stations] chargement impossible — les actions seront refusées tant qu\'aucune station n\'est résolue'); // Hotfix 2026.11.21-C
         });
 }
 
@@ -2187,6 +2272,7 @@ function reloadPushPanelForStation() {
             cell.removeAttribute('data-pl-enriched');
         });
         fetchBatchMediaPlaylists();
+        majIndicateurCibleAction(); // Hotfix 2026.11.21-C — badge de divergence
     });
 })();
 
@@ -2198,6 +2284,7 @@ function reloadPushPanelForStation() {
     sel.addEventListener('change', function() {
         console.log('[action_station_cible] Change event fired, new value=' + this.value);
         reloadActionPanelForStation();
+        majIndicateurCibleAction(); // Hotfix 2026.11.21-C — badge de divergence
     });
 })();
 
@@ -2261,6 +2348,7 @@ var azuraCacheDate = document.getElementById('azura_playlists_cache_date');
 
 function chargerPlaylistsCache() {
     let sid = getPushStationId();
+    if (sid === null) return; // Hotfix 2026.11.21-C — station non résolue, pas de fetch
     fetch('/api/azuracast/playlists?t=' + Date.now() + '&station_id=' + sid)
         .then(function(r) {
             if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -2373,6 +2461,7 @@ var _actionPlaylistCounter = 0;
 
 function loadPushPlaylists() {
     let sid = getPushStationId();
+    if (sid === null) return; // Hotfix 2026.11.21-C — station non résolue, pas de fetch
     console.log('[loadPushPlaylists] Fetching playlists for station_id=' + sid);
     fetch('/api/azuracast/playlists?t=' + Date.now() + '&station_id=' + sid)
         .then(function(r) { return r.json(); })
@@ -2712,6 +2801,7 @@ function fetchBatchMediaPlaylists() {
     if (songIds.length === 0) return;
 
     var stationId = getPushStationId();
+    if (stationId === null) return; // Hotfix 2026.11.21-C — station non résolue, pas de fetch
 
     // Lancer la tâche batch
     fetch('/api/azura/batch/media_playlists', {
@@ -3425,6 +3515,7 @@ btnEnvoyer.addEventListener('click', function() {
 
     var selectedFiles = activeBuffer ? activeBuffer.selectedFiles : window.pushSelectedFiles;
     if (selectedFiles.length === 0) return alert("Aucun fichier sélectionné dans cet onglet !");
+    if (!stationValideOuMessage(getPushStationId(), '🚀 Envoi vers AzuraCast', 'terminal_push_output')) return; // Hotfix 2026.11.21-C
 
     var dossierCible = getDossierCible('push_dossier_cible', 'push_new_folder_name');
     var playlistIds = getPushPlaylistIds();
