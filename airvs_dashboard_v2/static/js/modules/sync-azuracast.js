@@ -986,7 +986,7 @@ function retirerSelectionPlaylistAzura() {
     }
 
     // Récupérer les playlists du cache (déjà chargé par Phase 1.5)
-    // ou utiliser les options du Pont
+    // ou utiliser les options de la zone d'envoi
     var playlistOptions = (typeof _pushPlaylistOptionsHtml !== 'undefined') 
         ? _pushPlaylistOptionsHtml 
         : '<option value="">-- Aucune playlist chargée --</option>';
@@ -1489,9 +1489,10 @@ function showActionPanel(name) {
     var panel = document.getElementById('action-panel-' + name);
     if (panel) panel.classList.add('active');
 
-    // Hotfix 2026.11.21-C — réaligner la station du panneau sur celle du Pont à
-    // l'ouverture : l'état de départ est toujours sain et la divergence devient
-    // un choix délibéré (besoin validé : push S6 en monitorant S7 dans le Pont).
+    // Hotfix 2026.11.21-C — réaligner la station du panneau sur celle de la zone
+    // d'envoi à l'ouverture : l'état de départ est toujours sain et la divergence
+    // devient un choix délibéré (besoin validé : envoyer vers S6 en écoutant S7
+    // dans le Monitoring antenne). Glossaire 21-D : « Pont » = zone d'envoi.
     var _pushSel = document.getElementById('push_station_cible');
     var _actionSel = document.getElementById('action_station_cible');
     if (_pushSel && _actionSel && _pushSel.value && _pushSel.value !== _actionSel.value) {
@@ -1499,7 +1500,7 @@ function showActionPanel(name) {
         reloadActionPanelForStation();
     }
 
-    // Hotfix 2026.11.21-C — indicateur de cible (badge panneau ↔ Pont)
+    // Hotfix 2026.11.21-C — indicateur de cible (badge panneau ↔ zone d'envoi)
     majIndicateurCibleAction();
 
     // Hotfix 2026.11.21-B — journal contextuel : vidage à chaque changement d'opération
@@ -1510,7 +1511,7 @@ window.showActionPanel = showActionPanel;
 /**
  * scrollToPushPlaylists()
  *
- * Appelée par le bouton "➕ Ajouter playlist" de la barre sticky (Pont RadioDJ → AzuraCast).
+ * Appelée par le bouton "➕ Ajouter playlist" de la barre sticky (zone d'envoi RadioDJ → AzuraCast).
  *
  * Rôle : défiler la page vers la section « Playlists cibles » (push_playlist_container)
  * et la mettre temporairement en évidence (animation .airvs-highlight-flash définie
@@ -1552,7 +1553,7 @@ function scrollToPushPlaylists() {
 window.scrollToPushPlaylists = scrollToPushPlaylists;
 
 // Charger les dossiers AzuraCast dans les select
-// Récupère l'ID de station actuellement sélectionné dans le header du Pont.
+// Récupère l'ID de station actuellement sélectionné dans le header de la zone d'envoi.
 // Hotfix 2026.11.21-C — plus de fallback silencieux vers la station 7 : renvoie
 // null si la station n'est pas résolue ; les points d'entrée refusent alors
 // l'action avec un message explicite (le masquage rendait une divergence
@@ -1565,10 +1566,10 @@ function getPushStationId() {
 }
 
 // Récupère l'ID de station sélectionné dans le panneau "Action AzuraCast" (explorateur).
-// Indépendant du sélecteur du Pont RadioDJ → l'utilisateur peut cibler une station
-// différente dans chaque section (explorateur vs pont). Besoin validé le 21/11 :
-// pousser vers la station 6 tout en monitorant la station 7 dans le Pont.
-// Hotfix 2026.11.21-C — plus de fallback silencieux (vers Pont ou station 7) :
+// Indépendant du sélecteur de la zone d'envoi → l'utilisateur peut cibler une station
+// différente dans chaque section (explorateur vs zone d'envoi). Besoin validé le 21/11 :
+// pousser vers la station 6 tout en écoutant la station 7 dans le Monitoring antenne.
+// Hotfix 2026.11.21-C — plus de fallback silencieux (vers zone d'envoi ou station 7) :
 // renvoie null si la station n'est pas résolue.
 function getActionStationId() {
     let sel = document.getElementById('action_station_cible');
@@ -1595,7 +1596,8 @@ function stationValideOuMessage(stationId, libelleAction, zoneJournalId) {
 
 // ── Hotfix 2026.11.21-C — indicateur de cible du panneau Assisté ──
 // Affiche en permanence la station ciblée par le panneau et signale la divergence
-// volontaire avec la station du Pont (badge ambre « Cible … ≠ Pont … »).
+// volontaire avec la station d'envoi (badge ambre « Cible … ≠ Envoi … »).
+// Hotfix 2026.11.21-D — glossaire : « Pont » devient « Envoi ».
 function majIndicateurCibleAction() {
     var badge = document.getElementById('badge_cible_action');
     if (!badge) return;
@@ -1611,7 +1613,7 @@ function majIndicateurCibleAction() {
     var nomA = (aSel && aSel.selectedIndex >= 0 && aSel.options[aSel.selectedIndex]) ? aSel.options[aSel.selectedIndex].text : ('Station ' + aId);
     if (pId !== null && aId !== pId) {
         var nomP = (pSel && pSel.selectedIndex >= 0 && pSel.options[pSel.selectedIndex]) ? pSel.options[pSel.selectedIndex].text : ('Station ' + pId);
-        badge.textContent = 'Cible : ' + nomA + '  ≠  Pont : ' + nomP;
+        badge.textContent = 'Cible : ' + nomA + '  ≠  Envoi : ' + nomP;
         badge.className = 'badge bg-warning text-dark ms-2 align-middle';
     } else {
         badge.textContent = 'Cible : ' + nomA;
@@ -1667,8 +1669,8 @@ function loadActionFolders() {
         });
 }
 
-// Charge les dossiers AzuraCast POUR LE PONT RadioDJ (indépendant du panneau Action).
-// Met à jour uniquement push_dossier_cible en utilisant la station du Pont.
+// Charge les dossiers AzuraCast POUR LA ZONE D'ENVOI RadioDJ (indépendante du panneau Action).
+// Met à jour uniquement push_dossier_cible en utilisant la station d'envoi.
 function loadPushFolders() {
     let sid = getPushStationId();
     if (sid === null) return; // Hotfix 2026.11.21-C — station non résolue, pas de fetch
@@ -2202,7 +2204,7 @@ function loadStationsList() {
                                  + s.nom + '</option>';
                 });
             }
-            // Appliquer aux deux sélecteurs : Pont RadioDJ ET Action AzuraCast (explorateur)
+            // Appliquer aux deux sélecteurs : zone d'envoi ET Action AzuraCast (explorateur)
             let pushSel = document.getElementById('push_station_cible');
             let actionSel = document.getElementById('action_station_cible');
             if (pushSel) pushSel.innerHTML = optionsHtml;
@@ -2238,7 +2240,7 @@ function reloadPlaylistsAndFoldersForStation() {
 }
 
 // Recharge UNIQUEMENT la partie "Action AzuraCast" (explorateur) quand l'utilisateur
-// change la station dans ce panneau. Le Pont RadioDJ reste sur sa propre station.
+// change la station dans ce panneau. La zone d'envoi reste sur sa propre station.
 function reloadActionPanelForStation() {
     console.log('[reloadActionPanelForStation] Station changed to ' + getActionStationId());
     window.actionPlaylistsLoaded = false;
@@ -2246,8 +2248,8 @@ function reloadActionPanelForStation() {
     loadActionPlaylists();
 }
 
-// Recharge UNIQUEMENT la partie "Pont RadioDJ → AzuraCast" quand l'utilisateur
-// change la station dans le Pont. L'Action AzuraCast reste sur sa propre station.
+// Recharge UNIQUEMENT la partie "Envoi RadioDJ → AzuraCast" quand l'utilisateur
+// change la station d'envoi. L'Action AzuraCast reste sur sa propre station.
 function reloadPushPanelForStation() {
     console.log('[reloadPushPanelForStation] Station changed to ' + getPushStationId());
     window.pushPlaylistsLoaded = false;
@@ -2256,8 +2258,8 @@ function reloadPushPanelForStation() {
     if (typeof chargerPlaylistsCache === 'function') chargerPlaylistsCache();
 }
 
-// Écouteur : quand on change de station cible dans le Pont, recharger UNIQUEMENT
-// les playlists + dossiers du Pont (sans perturber l'Action AzuraCast de l'explorateur)
+// Écouteur : quand on change la station d'envoi, recharger UNIQUEMENT
+// les playlists + dossiers de la zone d'envoi (sans perturber l'Action AzuraCast de l'explorateur)
 // + re-fetch des badges PLS + sync avec le sélecteur sticky
 (function bindStationChangeListener() {
     let sel = document.getElementById('push_station_cible');
@@ -2277,7 +2279,7 @@ function reloadPushPanelForStation() {
 })();
 
 // Écouteur : quand on change de station cible dans le panneau Action AzuraCast (explorateur),
-// recharger UNIQUEMENT les dossiers + playlists de ce panneau — sans impacter le Pont.
+// recharger UNIQUEMENT les dossiers + playlists de ce panneau — sans impacter la zone d'envoi.
 (function bindActionStationChangeListener() {
     let sel = document.getElementById('action_station_cible');
     if (!sel) return;
@@ -2660,7 +2662,7 @@ loadActionFolders();
 loadPushPlaylists();
 
 // ══════════════════════════════════════════════════════
-// PONT RADIODJ → AZURACAST (AVEC CRÉATION PLAYLIST)
+// ZONE D'ENVOI RADIODJ → AZURACAST (AVEC CRÉATION PLAYLIST)
 // ══════════════════════════════════════════════════════
 var pushPreviewBody = document.getElementById('push_preview_body');
 var pushPreviewWrapper = document.getElementById('push_preview_wrapper');
@@ -4074,7 +4076,7 @@ function surveillerFinPlaylist() {
         document.getElementById('bulk_preview_btn').addEventListener('click', previewBulk);
         document.getElementById('bulk_apply_btn').addEventListener('click', applyBulk);
 
-        // Gestion des changements d'onglets du Pont RadioDJ
+        // Gestion des changements d'onglets de la zone d'envoi (sous-onglets push)
         document.querySelectorAll('#pushTabs button[data-bs-toggle="pill"]').forEach(function(pill) {
             pill.addEventListener('shown.bs.tab', function(e) {
                 // 1. Sauvegarder le buffer quitté
@@ -4215,7 +4217,7 @@ function surveillerFinPlaylist() {
                 _refreshAzuraFolders(this);
             });
         }
-        // Lier le bouton du panneau Pont (push)
+        // Lier le bouton du panneau d'envoi (push)
         var btnPush = document.getElementById('btn_refresh_push_folders');
         if (btnPush) {
             btnPush.addEventListener('click', function() {
@@ -4225,7 +4227,7 @@ function surveillerFinPlaylist() {
     })();
 
     /** Rafraîchit le cache des dossiers AzuraCast et recharge les selects.
-     *  Appelé par les boutons « Rafraîchir les dossiers » (Action + Pont).
+     *  Appelé par les boutons « Rafraîchir les dossiers » (Action + zone d'envoi).
      *  [PATCH 01/09/2026 v2] Délègue au worker qui scanne API + SSHFS (quelques secondes). */
     function _refreshAzuraFolders(btnEl) {
         var originalText = btnEl.textContent;

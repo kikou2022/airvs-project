@@ -305,7 +305,7 @@
             width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
         }
 
-        /* ── Push pills (inside Pont card, keep working) ── */
+        /* ── Push pills (inside zone d'envoi card, keep working) ── */
         #pushTabs .nav-link {
             color: #555 !important; font-weight: 500; border: none !important;
             border-bottom: 3px solid transparent !important; padding: 0.5rem 0.8rem !important;
@@ -724,7 +724,7 @@
                 <li class="sb-divider"></li>
                 <li><button class="sb-link" type="button" data-scroll="maintenance-card-sync-azura" data-parent="#nav-maintenance">🔄 Sync AzuraCast</button></li>
                 <li><button class="sb-link" type="button" data-scroll="maintenance-card-sync-mp3" data-parent="#nav-maintenance">🎵 Sync MP3 / ID3</button></li>
-                <li><button class="sb-link" type="button" data-scroll="maintenance-card-player" data-parent="#nav-maintenance">📡 Pont & Player</button></li>
+                <li><button class="sb-link" type="button" data-scroll="maintenance-card-player" data-parent="#nav-maintenance">📡 Monitoring & Player</button></li>
                 <li class="sb-divider"></li>
                 <li><button class="sb-link" type="button" data-scroll="maintenance-card-purge" data-parent="#nav-maintenance">🗑️ Purge SQL</button></li>
             </ul>
@@ -1716,7 +1716,7 @@
                             <select class="form-select form-select-sm" id="action_station_cible" style="width: auto;">
                                 <option value="7">Station 7</option>
                             </select>
-                            <span id="badge_cible_action" class="badge bg-secondary ms-2 align-middle">Cible : —</span><!-- Hotfix 2026.11.21-C : indicateur de cible / divergence panneau ↔ Pont -->
+                            <span id="badge_cible_action" class="badge bg-secondary ms-2 align-middle">Cible : —</span><!-- Hotfix 2026.11.21-C : indicateur de cible / divergence panneau ↔ zone d'envoi -->
                             <button class="btn btn-sm btn-outline-dark" id="btn_close_action_panel" title="Fermer">✕</button>
                         </div>
                     </div>
@@ -2387,15 +2387,15 @@
                  aria-labelledby="nav-atelier-tab">
     
                             <!-- ═══════════════════════════════════════════════ -->
-                <!-- Pont RadioDJ → AzuraCast + PLAYLISTS AZURACAST -->
+                <!-- Zone d'envoi : Programmation RadioDJ → AzuraCast + PLAYLISTS AZURACAST -->
                 <!-- ═══════════════════════════════════════════════ -->
                 <div class="card dashboard-card" style="border-left: 5px solid #0dcaf0;">
                     <div class="card-header d-flex justify-content-between align-items-center"
                          style="background-color: #0dcaf0; color: #000;">
-                        <span>🚀 Pont RadioDJ → AzuraCast</span>
-                        <!-- Sélecteur de station cible (multi-station) + bouton Replier playlists -->
+                        <span>🚀 Programmation RadioDJ → AzuraCast</span>
+                        <!-- Sélecteur de station d'envoi (multi-station) + bouton Replier playlists -->
                         <div class="d-flex align-items-center gap-2">
-                            <label class="form-label mb-0 small fw-bold" for="push_station_cible">Station cible :</label>
+                            <label class="form-label mb-0 small fw-bold" for="push_station_cible">Station d'envoi :</label>
                             <select class="form-select form-select-sm" id="push_station_cible" style="width: auto;">
                                 <option value="7">Station 7</option>
                             </select>
@@ -3229,7 +3229,7 @@
                                            style="cursor: pointer;">Tout sélectionner</label>
                                     <span class="sticky-divider" aria-hidden="true"></span>
                                     <label class="form-label mb-0 small fw-bold" for="sticky_station_select" style="color:#cbd5e1;">Station :</label>
-                                    <select class="form-select form-select-sm" id="sticky_station_select" style="width: auto;" title="Station cible (synchronisée avec le sélecteur du haut)">
+                                    <select class="form-select form-select-sm" id="sticky_station_select" style="width: auto;" title="Station d'envoi (synchronisée avec le sélecteur du haut)">
                                         <option value="7">Station 7</option>
                                     </select>
                                     <span class="sticky-divider" aria-hidden="true"></span>
@@ -5053,10 +5053,10 @@
                     </div>
                 </div>
     
-                <!-- Carte : Pont AzuraCast / RadioDJ (Player) -->
+                <!-- Carte : Monitoring antenne (Player) -->
                 <div class="card dashboard-card accent-radio mt-3" id="maintenance-card-player">
                     <div class="card-header d-flex justify-content-between align-items-center">
-                        <span>📡 Pont AzuraCast → RadioDJ (Player)</span>
+                        <span>📡 Monitoring antenne (Player)</span>
                         <div class="d-flex gap-1">
                             <button class="btn btn-sm btn-outline-success" id="btn_player_start" title="Démarrer le service">
                                 ▶ Démarrer
@@ -5576,7 +5576,7 @@
 <!-- PHASE 3 - Étape 3/5 : pont-player (player, archives, flux, spectrum, lecteur) -->
 <script src="/static/js/modules/stats-audience.js?v=1"></script>
 <!-- PHASE 3 - Étape 4/5 : stats-audience (onglet Audience, stats agrégées) -->
-<script src="/static/js/modules/sync-azuracast.js?v=17"></script>
+<script src="/static/js/modules/sync-azuracast.js?v=18"></script>
 <!-- PHASE 3 - Étape 4c : sync-azuracast (sync, action panel, push, bulk schedule) — v6 : scrollToPushPlaylists() + btn_push_envoyer masqué -->
 <script src="/static/js/modules/couleur.js?v=2"></script>
 <!-- PHASE 3 - Étape 4c : couleur (programmation couleur, grille, dry-run, historique, stats) -->
@@ -5833,7 +5833,7 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     // ════════════════════════════════════
-    // PONT : Mode Google Sheet (analyse + prévisualisation)
+    // ZONE D'ENVOI : Mode Google Sheet (analyse + prévisualisation)
     // ════════════════════════════════════
     let sheetPrefillTaskId = null;
     let sheetPrefillInterval = null;
@@ -7361,7 +7361,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 2000);
     }
 
-    // (PONT PLAYER, flux config, spectrum, lecteur audio → module pont-player.js)
+    // (MONITORING ANTENNE, flux config, spectrum, lecteur audio → module pont-player.js)
 
     // ── Évolution mineure : charger la liste des Sheets depuis config.json ──
     // et pré-sélectionner le mois courant dans le <select> Onglet.
@@ -7870,7 +7870,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // ══════════════════════════════════════════════════════
 
     // ══════════════════════════════════════════════════════
-    // PONT RADIODJ → AZURACAST → module sync-azuracast.js
+    // ZONE D'ENVOI RADIODJ → AZURACAST → module sync-azuracast.js
     // ══════════════════════════════════════════════════════
 
     // ════════════════════════════════════════════════════════════════
