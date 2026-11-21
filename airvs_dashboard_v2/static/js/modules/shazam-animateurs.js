@@ -1,5 +1,11 @@
-// ██████ AIRVS PATCH PROGRAMMATION v2.1 — 2026-10-08 — ZONE DOWNLOAD AI ██████
-// Correctif : modal correction Manquants pré-remplie (artiste/titre du manquant) — cache-buster ?v=8
+// ██████ AIRVS PATCH PROGRAMMATION v2.2 — 2026-11-22 — ZONE DOWNLOAD AI ██████
+// Hotfix 2026.11.22-A : gestion de la liste Shazam/Animateurs — cache-buster ?v=9
+//   - Sélection multiple (cases à cocher) + présélection OBLIGATOIRE pour la synchro
+//   - Suppression physique batch / par ligne via modal précis (irréversible)
+//   - Transition « matché → nouveau » : manuelle (↺, réversible) + auto (match perdu)
+//   - Journal des opérations « pour mémoire » (📖 — rétention 365 j côté backend)
+//   - Garde-fou : 500 titres max par run (contrôlé aussi côté backend)
+// Base : v2.1 inchangée (filtres, tris, badges, pagination, rejet/corriger).
 // Vérif déploiement : cette ligne doit être la 1re ligne du fichier sur .39
 // [P3-S3] Phase 3 Étape 3 — Extraction JS shazam-animateurs + pont-player
 /**
@@ -156,29 +162,40 @@ function getStatutBadge(statut, rowId, prefix, statutVps) {
     return '<span class="badge" style="background:#6b7280;color:#fff;font-size:0.65rem;padding:1px 5px;border-radius:3px;" title="Nouveau — pas encore matché">● Nouveau</span>';
 }
 
-// ── Bouton Rejeter/Corriger pour les entrées non matchées (R15) ──
+// ── Boutons d'action par ligne (R15 + 22-A) ──
+// 22-A : 🗑 suppression physique (modal précis, tous statuts — « supprimer des
+// titres déjà gérés ou non retenus ») et ↺ remise en Nouveau (matchés seulement,
+// réversible — jamais sur Diffusé/Rejeté, règles côté backend).
 function getRejetActionsCell(statut, rowId, prefix, artiste, titre) {
     var s = (statut || 'nouveau').toLowerCase();
     var tbl = (prefix === 'animateurs') ? 'animateurs' : 'shazam';
-    // Si déjà rejeté, on ne montre que "Corriger"
-    if (s === 'rejete' || s === 'rejeté' || s === 'rejete_corrigé' || s === 'rejete_corrige') {
-        return '<td class="text-center">' +
-            '<button class="btn btn-sm btn-outline-warning" style="font-size:0.65rem;padding:1px 4px;" ' +
-            'onclick="window._shazamClick.call(this,&#39;corriger&#39;,&#39;' + tbl + '&#39;,' + rowId + ')" ' +
-            'title="Corriger cet entrée">✎ Corriger</button></td>';
-    }
-    // Si matché ou poussé, pas d'action de rejet
-    if (s === 'matche' || s === 'matché' || s === 'pousse_azura' || s === 'poussé_azura' || s === 'pousse' || s === 'poussé') {
-        return '<td class="text-center text-muted" style="font-size:0.65rem;">—</td>';
-    }
-    // Nouveau : on peut rejeter
-    return '<td class="text-center">' +
-        '<button class="btn btn-sm btn-outline-danger" style="font-size:0.65rem;padding:1px 4px;" ' +
-        'onclick="window._shazamClick.call(this,&#39;rejeter&#39;,&#39;' + tbl + '&#39;,' + rowId + ')" ' +
-        'title="Rejeter ce titre">🚫</button> ' +
-        '<button class="btn btn-sm btn-outline-warning" style="font-size:0.65rem;padding:1px 4px;" ' +
+    var delBtn = '<button class="btn btn-sm btn-outline-danger" style="font-size:0.65rem;padding:1px 4px;" ' +
+        'onclick="window._shazamClick.call(this,&#39;supprimer&#39;,&#39;' + tbl + '&#39;,' + rowId + ')" ' +
+        'title="Supprimer définitivement (modal de confirmation — irréversible)">🗑</button> ';
+    var remBtn = '<button class="btn btn-sm btn-outline-warning" style="font-size:0.65rem;padding:1px 4px;" ' +
+        'onclick="window._shazamClick.call(this,&#39;remettre&#39;,&#39;' + tbl + '&#39;,' + rowId + ')" ' +
+        'title="Remettre en Nouveau (réversible — le match est vidé)">↺</button> ';
+    var corrBtn = '<button class="btn btn-sm btn-outline-warning" style="font-size:0.65rem;padding:1px 4px;" ' +
         'onclick="window._shazamClick.call(this,&#39;corriger&#39;,&#39;' + tbl + '&#39;,' + rowId + ')" ' +
-        'title="Corriger artiste/titre">✎</button></td>';
+        'title="Corriger cette entrée">✎</button>';
+    var rejBtn = '<button class="btn btn-sm btn-outline-danger" style="font-size:0.65rem;padding:1px 4px;" ' +
+        'onclick="window._shazamClick.call(this,&#39;rejeter&#39;,&#39;' + tbl + '&#39;,' + rowId + ')" ' +
+        'title="Rejeter ce titre">🚫</button> ';
+
+    if (s === 'rejete' || s === 'rejeté' || s === 'rejete_corrigé' || s === 'rejete_corrige') {
+        // Rejeté : corriger (réhabilitation) + supprimer
+        return '<td class="text-center">' + delBtn + corrBtn + '</td>';
+    }
+    if (s === 'matche' || s === 'matché') {
+        // Matché : remettre en nouveau + supprimer (22-A — fin des actions « — »)
+        return '<td class="text-center">' + remBtn + delBtn + '</td>';
+    }
+    if (s === 'pousse_azura' || s === 'poussé_azura' || s === 'pousse' || s === 'poussé') {
+        // Diffusé : suppression seule (titre déjà géré)
+        return '<td class="text-center">' + delBtn + '</td>';
+    }
+    // Nouveau : rejeter / corriger / supprimer
+    return '<td class="text-center">' + rejBtn + corrBtn + delBtn + '</td>';
 }
 
 
@@ -339,6 +356,146 @@ var currentStatutFilterByPrefix = { shazam: '', animateurs: '' };
 // Les sources sont des valeurs libres (corrige, Disco., Chronique, etc.)
 // donc on peuple le dropdown dynamiquement à partir des valeurs présentes dans la table.
 var currentSourceFilterByPrefix = { shazam: '', animateurs: '' };
+
+// ── 22-A : sélection multiple (présélection OBLIGATOIRE pour la synchro) ──
+// Structure : {rowId: true} par préfixe — survit aux filtres/paginations,
+// purgée après une synchro / suppression / remise réussie.
+var _selectionByPrefix = { shazam: {}, animateurs: {} };
+// Verrou anti double-lancement pendant un run (prefill ou pipeline)
+var _syncEnCours = { shazam: false, animateurs: false };
+
+function getSelectionIds(prefix) {
+    return Object.keys(_selectionByPrefix[prefix] || {})
+        .map(function(v) { return parseInt(v, 10); })
+        .filter(function(v) { return v > 0; });
+}
+
+function _setSelectionRow(prefix, rowId, checked) {
+    rowId = parseInt(rowId, 10);
+    if (!rowId) return;
+    if (checked) _selectionByPrefix[prefix][rowId] = true;
+    else delete _selectionByPrefix[prefix][rowId];
+    updateSelectionBar(prefix);
+}
+// Handler global des cases à cocher de ligne (onclick inline)
+window._shazamToggleRow = function(prefix, rowId, checked) {
+    _setSelectionRow(prefix, rowId, checked);
+};
+
+// Handler global de la case « tout cocher » (en-tête de colonne) :
+// opère sur les lignes FILTRÉES affichées (page courante).
+window._shazamToggleAll = function(prefix, checked) {
+    var filtered = _filtrerLignes(prefix);
+    filtered.forEach(function(r) {
+        if (checked) _selectionByPrefix[prefix][r.id] = true;
+        else delete _selectionByPrefix[prefix][r.id];
+    });
+    renderShazamListTable(allShazamRowsData[prefix] || [], {}, prefix);
+};
+
+// ── 22-A : chaîne de filtrage extraite de renderShazamListTable ──
+// (source, animateur, source dropdown, statut, masquer gérées) — réutilisée
+// par le toggle « tout cocher » pour opérer sur les lignes filtrées.
+function _filtrerLignes(prefix, rows) {
+    rows = rows || allShazamRowsData[prefix] || [];
+    let activeFilter = getShazamFilter(prefix);
+    let animFilter = getAnimFilter(prefix);
+    let statutFilter = getStatutFilter(prefix);
+
+    let filtered = (rows || []).filter(function(r) {
+        let src = (r.source || '').toLowerCase();
+        let isWeb = ['shazam', 'recommandation', 'saisie manuelle', 'autre', 'formulaire_programmeur'].indexOf(src) !== -1;
+        let isExt = src.includes('externe');
+
+        // Filtre source
+        if (activeFilter === 'shazam_studio') return !isWeb && !isExt;
+        if (activeFilter === 'shazam_ext') return isExt;
+        if (activeFilter === 'web') return isWeb;
+        return true; // 'all' ou autres
+    });
+
+    // Filtre animateur
+    if (animFilter) {
+        filtered = filtered.filter(function(r) {
+            return (r.animateur || '') === animFilter;
+        });
+    }
+
+    // Filtre source (dropdown dynamique — surtout pour Animateurs où les sources sont libres)
+    var sourceFilterVal = currentSourceFilterByPrefix[prefix] || '';
+    if (sourceFilterVal) {
+        filtered = filtered.filter(function(r) {
+            return (r.source || '') === sourceFilterVal;
+        });
+    }
+
+    // Filtre statut (R6)
+    if (statutFilter) {
+        filtered = filtered.filter(function(r) {
+            var s = (r.statut || 'nouveau').toLowerCase();
+            if (statutFilter === 'nouveau') return s === 'nouveau' || !s;
+            if (statutFilter === 'matche') return s === 'matche' || s === 'matché';
+            if (statutFilter === 'rejete') return s === 'rejete' || s === 'rejeté' || s === 'rejete_corrigé' || s === 'rejete_corrige';
+            if (statutFilter === 'pousse') return s === 'pousse_azura' || s === 'poussé_azura' || s === 'pousse' || s === 'poussé';
+            return true;
+        });
+    }
+
+    // Filtre "Masquer gérées" (toggle client-side)
+    if (hideManagedByPrefix[prefix]) {
+        filtered = filtered.filter(function(r) {
+            var s = (r.statut || 'nouveau').toLowerCase();
+            return MANAGED_STATUTS.indexOf(s) === -1;
+        });
+    }
+
+    return filtered;
+}
+
+// ── 22-A : barre de sélection (compteur + boutons batch) ──
+function updateSelectionBar(prefix) {
+    var ids = getSelectionIds(prefix);
+    var n = ids.length;
+
+    var countEl = document.getElementById(prefix + '_selection_count');
+    if (countEl) {
+        countEl.textContent = n + ' sélectionné' + (n > 1 ? 's' : '');
+        countEl.className = 'badge ' + (n > 0 ? 'bg-success' : 'bg-secondary');
+    }
+
+    ['supprimer', 'remettre'].forEach(function(act) {
+        var btn = document.getElementById('btn_' + prefix + '_' + act);
+        if (btn) btn.disabled = (n === 0);
+    });
+
+    // Présélection OBLIGATOIRE : les boutons de synchro restent inopérants
+    // tant que rien n'est coché (et pendant un run en cours)
+    var btnPrefill = getShazamButton(prefix, 'prefill');
+    if (btnPrefill) {
+        btnPrefill.disabled = (n === 0) || _syncEnCours[prefix];
+        btnPrefill.title = (n === 0)
+            ? 'Présélection obligatoire : cochez au moins un titre'
+            : ('Lancer le matching sur les ' + n + ' titre(s) cochés');
+    }
+    var btnPipe = document.getElementById('btn_' + prefix + '_pipeline');
+    if (btnPipe) {
+        btnPipe.disabled = (n === 0) || _syncEnCours[prefix];
+        btnPipe.title = (n === 0)
+            ? 'Présélection obligatoire : cochez au moins un titre'
+            : ('Pipeline sur les ' + n + ' titre(s) cochés');
+    }
+
+    // État de la case « tout cocher » (page affichée)
+    var chkAll = document.getElementById(prefix + '_check_all');
+    if (chkAll) {
+        var filtered = _filtrerLignes(prefix);
+        var nbPage = filtered.filter(function(r) {
+            return !!(_selectionByPrefix[prefix] || {})[r.id];
+        }).length;
+        chkAll.checked = nbPage > 0 && nbPage === filtered.length;
+        chkAll.indeterminate = nbPage > 0 && nbPage < filtered.length;
+    }
+}
 
 // ── Hide-managed state per prefix (toggle "Masquer gérées") ──
 // Quand true, les lignes dont le statut est dans MANAGED_STATUTS sont masquées.
@@ -519,59 +676,12 @@ function updateShazamModeUI(mode, prefix) {
 function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
     matchedSet = matchedSet || {};
     let tbody = getShazamElement(prefix, 'list_body');
-    let activeFilter = getShazamFilter(prefix);
-    let animFilter = getAnimFilter(prefix);
-    let statutFilter = getStatutFilter(prefix);
     let isAnimateursTab = (prefix === 'animateurs');
-    // +2 colonnes : statut + actions rejet/correction
-    let colCount = isAnimateursTab ? 12 : 8;
+    // 22-A : +3 colonnes par rapport à l'origine — checkbox + statut + actions
+    let colCount = isAnimateursTab ? 13 : 9;
 
-    let filtered = (rows || []).filter(function(r) {
-        let src = (r.source || '').toLowerCase();
-        let isWeb = ['shazam', 'recommandation', 'saisie manuelle', 'autre', 'formulaire_programmeur'].indexOf(src) !== -1;
-        let isExt = src.includes('externe');
-
-        // Filtre source
-        if (activeFilter === 'shazam_studio') return !isWeb && !isExt;
-        if (activeFilter === 'shazam_ext') return isExt;
-        if (activeFilter === 'web') return isWeb;
-        return true; // 'all' ou autres
-    });
-
-    // Filtre animateur
-    if (animFilter) {
-        filtered = filtered.filter(function(r) {
-            return (r.animateur || '') === animFilter;
-        });
-    }
-
-    // Filtre source (dropdown dynamique — surtout pour Animateurs où les sources sont libres)
-    var sourceFilterVal = currentSourceFilterByPrefix[prefix] || '';
-    if (sourceFilterVal) {
-        filtered = filtered.filter(function(r) {
-            return (r.source || '') === sourceFilterVal;
-        });
-    }
-
-    // Filtre statut (R6)
-    if (statutFilter) {
-        filtered = filtered.filter(function(r) {
-            var s = (r.statut || 'nouveau').toLowerCase();
-            if (statutFilter === 'nouveau') return s === 'nouveau' || !s;
-            if (statutFilter === 'matche') return s === 'matche' || s === 'matché';
-            if (statutFilter === 'rejete') return s === 'rejete' || s === 'rejeté' || s === 'rejete_corrigé' || s === 'rejete_corrige';
-            if (statutFilter === 'pousse') return s === 'pousse_azura' || s === 'poussé_azura' || s === 'pousse' || s === 'poussé';
-            return true;
-        });
-    }
-
-    // Filtre "Masquer gérées" (toggle client-side)
-    if (hideManagedByPrefix[prefix]) {
-        filtered = filtered.filter(function(r) {
-            var s = (r.statut || 'nouveau').toLowerCase();
-            return MANAGED_STATUTS.indexOf(s) === -1;
-        });
-    }
+    // 22-A : chaîne de filtrage extraite (source, animateur, statut, masquer gérées)
+    let filtered = _filtrerLignes(prefix, rows);
 
     // Peupler le dropdown de source dynamiquement (après chargement des données)
     populateSourceDropdown(prefix);
@@ -585,10 +695,18 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
     if (filtered.length === 0) {
         tbody.innerHTML = '<tr><td colspan="' + colCount + '" class="text-center text-muted p-2 small">' +
             'Aucune entrée dans ce filtre.</td></tr>';
+        updateSelectionBar(prefix);
         return;
     }
 
     tbody.innerHTML = filtered.map(function(r) {
+        // 22-A : cellule de sélection — présélection obligatoire pour la synchro
+        var selState = !!(_selectionByPrefix[prefix] || {})[r.id];
+        var checkCell = '<td class="text-center">' +
+            '<input type="checkbox" class="form-check-input mt-0"' + (selState ? ' checked' : '') +
+            ' onchange="window._shazamToggleRow(\'' + prefix + '\',' + r.id + ', this.checked)"' +
+            ' title="Cocher pour la sélection (synchro / suppression / remise en nouveau)"></td>';
+
         let key = (r.artiste || '').toLowerCase().trim() + '||' +
                   (r.titre || '').toLowerCase().trim();
         // P1 — Colonne Match persistante : dérivée de la DB (match_song_id /
@@ -614,7 +732,7 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
         let actionCell = getRejetActionsCell(r.statut, r.id, prefix, r.artiste, r.titre);
 
         if (isAnimateursTab) {
-            // Ordre des colonnes : Animateur | Source | Artiste | Titre | Genre | Commentaire | Date | Match | Statut | Actions | Video | Edit
+            // Ordre des colonnes : Check | Animateur | Source | Artiste | Titre | Genre | Commentaire | Date | Match | Statut | Actions | Video | Edit
             let dateVal = r.date_soumission || r.date_reconnaissance || '';
             let genreCell = '<td class="text-center">' + getGenreBadge(r.genre) + '</td>';
             let commentCell = getCommentaireCell(r.commentaire);
@@ -625,6 +743,7 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
                 ? '<td class="text-center"><a href="https://programmes.airvs.fr/?edit=' + r.vps_id + '" target="_blank" rel="noopener" title="Modifier sur le VPS" style="color:#0ea5e9;font-weight:bold">✎</a></td>'
                 : '<td class="text-center text-muted" style="font-size:0.75rem">—</td>';
             return '<tr>' +
+                checkCell +
                 animBadge +
                 animSrcBadge +
                 '<td class="small">' + escapeHtml(r.artiste || '') + '</td>' +
@@ -640,6 +759,7 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
                 '</tr>';
         } else {
             return '<tr>' +
+                checkCell +
                 srcBadge +
                 animBadge +
                 '<td class="small">' + escapeHtml(r.artiste || '') + '</td>' +
@@ -651,6 +771,9 @@ function renderShazamListTable(rows, matchedSet, prefix = 'shazam') {
                 '</tr>';
         }
     }).join('');
+
+    // 22-A : synchroniser la barre de sélection (compteur + boutons + tout-cocher)
+    updateSelectionBar(prefix);
 }
 
 
@@ -951,18 +1074,31 @@ function handleShazamPrefill(prefix) {
     if (_prefillController) {
         _prefillController.abort();
         _prefillController = null;
+        _syncEnCours[prefix] = false;
         btn.disabled = false;
         btn.textContent = getShazamPrefillButtonText(getShazamFilter(prefix), prefix);
         statusEl.textContent = 'Annulé.';
         _removeCancelBtn(btn);
+        updateSelectionBar(prefix);
         return;
     }
 
     let currentFilter = getShazamFilter(prefix);
     let isAnimateurs = (prefix === 'animateurs');
+
+    // 22-A : présélection OBLIGATOIRE — la synchro ne part que sur les
+    // lignes cochées (le bouton est déjà désactivé à 0 par updateSelectionBar)
+    var selIds22a = getSelectionIds(prefix);
+    if (selIds22a.length === 0) {
+        statusEl.textContent = '⛔ Présélection obligatoire : cochez au moins un titre (cases en début de ligne).';
+        return;
+    }
+
     btn.disabled = true;
     btn.textContent = isAnimateurs ? '⏳ Synchro VPS + Matching...' : '⏳ Matching en cours...';
     statusEl.textContent = 'Recherche des correspondances dans RadioDJ...';
+    _syncEnCours[prefix] = true;
+    updateSelectionBar(prefix);
 
     _insertCancelBtn(btn, prefix);
 
@@ -979,6 +1115,9 @@ function handleShazamPrefill(prefix) {
     }
     if (animFilterVal) params.set('animateur', animFilterVal);
 
+    // 22-A : la sélection cochée EST la cible du run (backend : 400 sans ids)
+    params.set('ids', selIds22a.join(','));
+
     let url = '/api/shazam/prefill?' + params.toString();
 
     _prefillController = new AbortController();
@@ -993,15 +1132,21 @@ function handleShazamPrefill(prefix) {
         .then(function(data) {
             _prefillController = null;
             _removeCancelBtn(btn);
+            _syncEnCours[prefix] = false;
             btn.disabled = false;
             btn.textContent = getShazamPrefillButtonText(currentFilter, prefix);
 
             if (data.error) {
                 statusEl.textContent = 'Erreur : ' + data.error;
+                updateSelectionBar(prefix);
                 return;
             }
 
-            updateShazamListWithMatch(data.found, data.not_found, prefix);
+            // 22-A : intégrer les transitions « matché → nouveau/rejeté »
+            updateShazamListWithMatch(data.found, data.not_found, prefix, data.matchs_perdus);
+            // 22-A : la sélection a été traitée → purge + barre à jour
+            _selectionByPrefix[prefix] = {};
+            updateSelectionBar(prefix);
             if (prefix === 'animateurs') {
                 if (window._onAnimateursMatchResult) window._onAnimateursMatchResult(data.found, data.not_found, data);
             } else {
@@ -1012,8 +1157,10 @@ function handleShazamPrefill(prefix) {
         .catch(function(err) {
             _prefillController = null;
             _removeCancelBtn(btn);
+            _syncEnCours[prefix] = false;
             btn.disabled = false;
             btn.textContent = getShazamPrefillButtonText(currentFilter, prefix);
+            updateSelectionBar(prefix);
             if (err.name === 'AbortError') {
                 statusEl.textContent = 'Annulé par l\u2019utilisateur.';
             } else {
@@ -1029,11 +1176,20 @@ function handleShazamPipeline(prefix) {
     let statusEl = getShazamElement(prefix, 'prefill_status');
     if (!btn || !terminal || !logCard || !statusEl) return;
 
+    // 22-A : présélection OBLIGATOIRE (même règle que la synchro simple)
+    var pipeSelIds22a = getSelectionIds(prefix);
+    if (pipeSelIds22a.length === 0) {
+        statusEl.textContent = '⛔ Présélection obligatoire : cochez au moins un titre (cases en début de ligne).';
+        return;
+    }
+
     btn.disabled = true;
     btn.textContent = '⏳ Envoi...';
     logCard.style.display = 'block';
     terminal.textContent = '⏳ Déclenchement du pipeline Shazam...';
     statusEl.textContent = 'Pipeline en cours...';
+    _syncEnCours[prefix] = true;
+    updateSelectionBar(prefix);
 
     let sheetsIdEl = getShazamElement(prefix, 'pipeline_sheets_id');
     let sheetsId = sheetsIdEl ? sheetsIdEl.value || '' : '';
@@ -1050,6 +1206,9 @@ function handleShazamPipeline(prefix) {
     }
     if (animF) pipelineData.animateur = animF;
 
+    // 22-A : la sélection cochée EST la cible du pipeline (backend : 400 sans ids)
+    pipelineData.ids = pipeSelIds22a;
+
     fetch('/api/shazam/pipeline/trigger', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1062,12 +1221,17 @@ function handleShazamPipeline(prefix) {
         return r.json();
     })
     .then(function(d) {
+        _syncEnCours[prefix] = false;
         btn.disabled = false;
         btn.textContent = '▶ Pipeline';
 
         if (d.status === 'ok') {
             terminal.textContent = (d.logs || []).join('\n');
-            updateShazamListWithMatch(d.found || [], d.not_found || [], prefix);
+            // 22-A : intégrer les transitions « matché → nouveau/rejeté »
+            updateShazamListWithMatch(d.found || [], d.not_found || [], prefix, d.matchs_perdus);
+            // 22-A : la sélection a été traitée → purge + barre à jour
+            _selectionByPrefix[prefix] = {};
+            updateSelectionBar(prefix);
             if (d.found || d.not_found) {
                 if (prefix === "animateurs") {
                     if (window._onAnimateursMatchResult) window._onAnimateursMatchResult(d.found || [], d.not_found || [], d);
@@ -1083,8 +1247,10 @@ function handleShazamPipeline(prefix) {
         }
     })
     .catch(function(err) {
+        _syncEnCours[prefix] = false;
         btn.disabled = false;
         btn.textContent = '▶ Pipeline';
+        updateSelectionBar(prefix);
         terminal.textContent = '❌ ' + (err.message || 'Erreur réseau');
         statusEl.textContent = '❌ ' + (err.message || 'Erreur réseau');
     });
@@ -1137,7 +1303,7 @@ function handleShazamCsvImport(prefix, file) {
 }
 
 // ── Mettre à jour le tableau local Shazam avec les résultats de match ──
-function updateShazamListWithMatch(found, notFound, prefix = 'shazam') {
+function updateShazamListWithMatch(found, notFound, prefix = 'shazam', matchsPerdus) {
     let matchedSet = {};
     (found || []).forEach(function(t) {
         let key = (t.artist || '').toLowerCase().trim() + '||' +
@@ -1161,6 +1327,21 @@ function updateShazamListWithMatch(found, notFound, prefix = 'shazam') {
             }
         });
     });
+    // 22-A — Transitions « matché → nouveau/rejeté » (match perdu, auto) :
+    // appliquer AVANT la boucle notFound pour que les lignes requalifiées
+    // en 'nouveau' reçoivent aussi match_passe='non_trouve'.
+    (matchsPerdus || []).forEach(function(mp) {
+        var mid = mp.id;
+        if (mid === undefined || mid === null) return;
+        data.forEach(function(r) {
+            if (r.id == mid) {
+                r.statut = mp.nouveau_statut || 'nouveau';
+                r.match_song_id = null;
+                r.match_passe = (mp.match_passe !== undefined) ? mp.match_passe : null;
+            }
+        });
+    });
+
     (notFound || []).forEach(function(nf) {
         var nid = nf.id;  // id ligne source (fourni par le backend, P1)
         if (nid === undefined || nid === null) return;
@@ -1451,6 +1632,192 @@ function _loadSuggestions() {
     }, 300);
 }
 
+// ════════════════════════════════════
+// 22-A : Suppression physique (modal précis) / Remise en nouveau / Journal
+// ════════════════════════════════════
+
+function _closeSuppressionModal() {
+    var m = document.getElementById('_suppression_modal');
+    if (m) m.remove();
+}
+
+function _closeJournalModal() {
+    var m = document.getElementById('_journal_modal');
+    if (m) m.remove();
+}
+
+// ── Modal précis de suppression PHYSIQUE (irréversible) ──
+// rowIds : array d'ids — sélection batch ou suppression par ligne.
+function supprimerRows(rowIds, table) {
+    _closeSuppressionModal();
+    var prefix = (table === 'animateurs') ? 'animateurs' : 'shazam';
+    var data = allShazamRowsData[prefix] || [];
+    var rows = (rowIds || []).map(function(id) {
+        return data.find(function(r) { return r.id == id; });
+    }).filter(function(r) { return !!r; });
+    if (rows.length === 0) {
+        alert('Aucune ligne identifiable pour la suppression (rechargez la liste).');
+        return;
+    }
+
+    // Aperçu : 8 premières lignes + total (modal PRÉCIS)
+    var apercu = rows.slice(0, 8).map(function(r) {
+        return '<li style="margin-bottom:2px;">' +
+            escapeHtml((r.artiste || '?') + ' — ' + (r.titre || '?')) + '</li>';
+    }).join('');
+    var autres = rows.length > 8
+        ? '<li style="color:#6b7280;">… et ' + (rows.length - 8) + ' autre(s) titre(s)</li>' : '';
+
+    var modalHtml = '<div id="_suppression_modal" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.55);">' +
+        '<div style="background:#fff;border-radius:8px;padding:20px;width:min(520px,94vw);max-height:85vh;overflow-y:auto;box-shadow:0 4px 24px rgba(0,0,0,0.35);">' +
+        '<h5 style="margin:0 0 12px 0;color:#ef4444;">🗑 Suppression DÉFINITIVE</h5>' +
+        '<p style="font-size:0.85rem;color:#111827;margin:0 0 8px 0;"><b>' + rows.length +
+        ' titre' + (rows.length > 1 ? 's' : '') + '</b> sera' + (rows.length > 1 ? 'ont' : '') +
+        ' <b>définitivement supprimé' + (rows.length > 1 ? 's' : '') +
+        ' de la base</b> (ligne physique, pas un statut). Cette opération est <b>irréversible</b>.</p>' +
+        '<ul style="font-size:0.78rem;color:#374151;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:10px 10px 10px 28px;margin:0 0 10px 0;max-height:180px;overflow-y:auto;">' +
+        apercu + autres + '</ul>' +
+        '<p style="font-size:0.75rem;color:#6b7280;margin:0 0 8px 0;">L\'opération est enregistrée dans le 📖 Journal des opérations (pour mémoire).</p>' +
+        '<label style="font-size:0.8rem;font-weight:bold;display:block;margin-bottom:4px;">Motif (optionnel, tracé au journal) :</label>' +
+        '<input id="_suppr_motif" type="text" style="width:100%;border:1px solid #d1d5db;border-radius:4px;padding:6px;font-size:0.8rem;margin-bottom:6px;" placeholder="Ex. : déjà diffusé, hors antenne, doublon...">' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">' +
+        '<button onclick="window._shazamFns._closeSuppressionModal()" style="padding:6px 14px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;font-size:0.8rem;">Annuler</button>' +
+        '<button onclick="window._shazamFns._doSupprimer(' + JSON.stringify(rows.map(function(r) { return r.id; })) + ',\'' + table + '\')" ' +
+        'style="padding:6px 14px;border:none;border-radius:4px;background:#ef4444;color:#fff;cursor:pointer;font-size:0.8rem;font-weight:bold;">Supprimer définitivement</button>' +
+        '</div></div></div>';
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+function _doSupprimer(rowIds, table) {
+    var motifEl = document.getElementById('_suppr_motif');
+    var motif = motifEl ? motifEl.value.trim() : '';
+    _closeSuppressionModal();
+    var prefix = (table === 'animateurs') ? 'animateurs' : 'shazam';
+    var statusEl = getShazamElement(prefix, 'prefill_status');
+    if (statusEl) statusEl.textContent = '🗑 Suppression de ' + rowIds.length + ' titre(s)...';
+
+    fetch('/api/shazam/supprimer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: rowIds, table: table, motif: motif })
+    })
+    .then(function(r) {
+        if (r.status === 401 || r.status === 302) throw new Error('Session expirée');
+        return r.json();
+    })
+    .then(function(d) {
+        if (d.error) {
+            if (statusEl) statusEl.textContent = '❌ ' + d.error;
+            return;
+        }
+        if (statusEl) statusEl.textContent = '🗑 ' + d.supprimes + ' titre(s) supprimé(s) définitivement (journalisé).';
+        // Purger la sélection des ids supprimés + barre à jour
+        (rowIds || []).forEach(function(id) { delete _selectionByPrefix[prefix][id]; });
+        updateSelectionBar(prefix);
+        loadShazamList(prefix);
+    })
+    .catch(function(err) {
+        if (statusEl) statusEl.textContent = '❌ Suppression : ' + err.message;
+    });
+}
+
+// ── Remise en Nouveau (transition « matché → nouveau », MANUELLE) ──
+// Réversible et non destructif → pas de modal (principe validé 22-A).
+// Backend : seules les lignes Matché sont traitées (Diffusé/Rejeté ignorés,
+// garde R9 non contournable) et chaque ligne est journalisée.
+function remettreNouveau(rowIds, table) {
+    var prefix = (table === 'animateurs') ? 'animateurs' : 'shazam';
+    var statusEl = getShazamElement(prefix, 'prefill_status');
+    if (statusEl) statusEl.textContent = '↺ Remise en Nouveau de ' + rowIds.length + ' titre(s)...';
+
+    fetch('/api/shazam/remettre_nouveau', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: rowIds, table: table })
+    })
+    .then(function(r) {
+        if (r.status === 401 || r.status === 302) throw new Error('Session expirée');
+        return r.json();
+    })
+    .then(function(d) {
+        if (d.error) {
+            if (statusEl) statusEl.textContent = '❌ ' + d.error;
+            return;
+        }
+        var msg = '↺ ' + (d.remis || 0) + ' titre(s) remis en Nouveau';
+        var ign = (d.ignores || []).length;
+        if (ign) msg += ' — ' + ign + ' ignoré(s) (non matchés ou couple rejeté en Manquants)';
+        if (d.message && (d.remis || 0) === 0) msg = d.message;
+        if (statusEl) statusEl.textContent = msg;
+        (rowIds || []).forEach(function(id) { delete _selectionByPrefix[prefix][id]; });
+        updateSelectionBar(prefix);
+        loadShazamList(prefix);
+    })
+    .catch(function(err) {
+        if (statusEl) statusEl.textContent = '❌ Remise en Nouveau : ' + err.message;
+    });
+}
+
+// ── Journal des opérations (pour mémoire) ──
+function openJournalModal(table) {
+    _closeJournalModal();
+    var modalHtml = '<div id="_journal_modal" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.55);">' +
+        '<div style="background:#fff;border-radius:8px;width:min(780px,94vw);max-height:85vh;display:flex;flex-direction:column;box-shadow:0 4px 24px rgba(0,0,0,0.35);">' +
+        '<div style="padding:14px 16px;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;">' +
+        '<h5 style="margin:0;">📖 Journal des opérations (pour mémoire)</h5>' +
+        '<button onclick="window._shazamFns._closeJournalModal()" style="border:none;background:none;font-size:1.1rem;cursor:pointer;">✕</button></div>' +
+        '<div id="_journal_body" style="padding:12px 16px;overflow-y:auto;flex:1;font-size:0.78rem;">Chargement…</div>' +
+        '<div style="padding:10px 16px;border-top:1px solid #e5e7eb;color:#6b7280;font-size:0.75rem;" id="_journal_footer"></div>' +
+        '</div></div>';
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    fetch('/api/shazam/journal?days=90&limit=300')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            var bodyEl = document.getElementById('_journal_body');
+            if (!bodyEl) return;
+            if (d.error) {
+                bodyEl.innerHTML = '<span style="color:#ef4444;">Erreur : ' + escapeHtml(d.error) + '</span>';
+                return;
+            }
+            var rows = d.rows || [];
+            var badges = {
+                synchro: ['#0ea5e9', '🔍'],
+                suppression: ['#ef4444', '🗑'],
+                remise_nouveau: ['#f59e0b', '↺'],
+                match_perdu: ['#a855f7', '⚡']
+            };
+            if (!rows.length) {
+                bodyEl.innerHTML = '<div class="text-center text-muted p-3">Aucune opération sur les 90 derniers jours.</div>';
+            } else {
+                var html = '<table class="table table-sm table-hover mb-0"><thead><tr>' +
+                    '<th>Date</th><th>Opération</th><th>Table</th><th>Titre</th><th>Détails</th></tr></thead><tbody>';
+                rows.forEach(function(r) {
+                    var b = badges[r.type_operation] || ['#6b7280', '•'];
+                    html += '<tr>' +
+                        '<td class="text-nowrap">' + escapeHtml(r.date_operation || '') + '</td>' +
+                        '<td class="text-nowrap"><span class="badge" style="background:' + b[0] + ';color:#fff;font-size:0.65rem;">' + b[1] + ' ' + escapeHtml(r.type_operation || '') + '</span></td>' +
+                        '<td>' + escapeHtml(r.table_source || '') + '</td>' +
+                        '<td>' + escapeHtml((r.artiste || '') + ' — ' + (r.titre || '')) +
+                        (r.row_id ? ' <span class="text-muted">#' + r.row_id + '</span>' : '') + '</td>' +
+                        '<td class="text-muted">' + escapeHtml(r.details || '') + '</td>' +
+                        '</tr>';
+                });
+                html += '</tbody></table>';
+                bodyEl.innerHTML = html;
+            }
+            var foot = document.getElementById('_journal_footer');
+            if (foot) {
+                foot.textContent = 'Total : ' + (d.total || rows.length) + ' opération(s) sur 90 jours — conservation : ' +
+                    (d.retention_days || 365) + ' jours (purge automatique).';
+            }
+        })
+        .catch(function(err) {
+            var bodyEl = document.getElementById('_journal_body');
+            if (bodyEl) bodyEl.innerHTML = '<span style="color:#ef4444;">Erreur : ' + escapeHtml(err.message) + '</span>';
+        });
+}
+
     // ── Dispatcher _shazamClick (pour les onclick inline dans le HTML) ──
     window._shazamClick = function(action, prefix, extra) {
         switch (action) {
@@ -1489,6 +1856,33 @@ function _loadSuggestions() {
                 corrigerManquant(corrId, corrTbl);
                 break;
             }
+            // ── 22-A : suppression / remise en nouveau / journal ──
+            case 'supprimer': {
+                var supId = parseInt(extra);
+                supprimerRows([supId], prefix === 'animateurs' ? 'animateurs' : 'shazam');
+                break;
+            }
+            case 'supprimerSelection': {
+                var selSup = getSelectionIds(prefix);
+                if (selSup.length === 0) { alert('Sélection vide — cochez d\'abord des titres.'); break; }
+                supprimerRows(selSup, prefix);
+                break;
+            }
+            case 'remettre': {
+                var remId = parseInt(extra);
+                remettreNouveau([remId], prefix === 'animateurs' ? 'animateurs' : 'shazam');
+                break;
+            }
+            case 'remettreSelection': {
+                var selRem = getSelectionIds(prefix);
+                if (selRem.length === 0) { alert('Sélection vide — cochez d\'abord des titres.'); break; }
+                remettreNouveau(selRem, prefix);
+                break;
+            }
+            case 'journal': {
+                openJournalModal(prefix);
+                break;
+            }
             default: console.warn('[shazamClick] Action inconnue:', action);
         }
     };
@@ -1522,6 +1916,14 @@ function _loadSuggestions() {
         syncVps: syncVpsNow,
         rejeter: rejeterManquant,
         corriger: corrigerManquant,
+        supprimerRows: supprimerRows,
+        remettreNouveau: remettreNouveau,
+        openJournalModal: openJournalModal,
+        getSelectionIds: getSelectionIds,
+        updateSelectionBar: updateSelectionBar,
+        _closeSuppressionModal: _closeSuppressionModal,
+        _closeJournalModal: _closeJournalModal,
+        _doSupprimer: _doSupprimer,
         _closeRejetModal: _closeRejetModal,
         _closeCorrectionModal: _closeCorrectionModal,
         _doRejeter: _doRejeter,

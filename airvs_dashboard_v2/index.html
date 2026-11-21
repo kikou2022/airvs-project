@@ -2720,6 +2720,22 @@
                                                 <div class="form-text small mt-1" id="shazam_prefill_status"></div>
                                             </div>
                                         </div>
+
+                                        <!-- 22-A : barre de sélection (présélection OBLIGATOIRE pour la synchro) -->
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <div class="d-flex align-items-center gap-2">
+                                                <span class="badge bg-secondary" id="shazam_selection_count">0 sélectionné</span>
+                                                <button class="btn btn-sm btn-outline-danger" id="btn_shazam_supprimer" disabled
+                                                        onclick="window._shazamClick('supprimerSelection','shazam')"
+                                                        title="Supprimer définitivement les titres cochés (modal de confirmation — irréversible)">🗑 Supprimer</button>
+                                                <button class="btn btn-sm btn-outline-warning" id="btn_shazam_remettre" disabled
+                                                        onclick="window._shazamClick('remettreSelection','shazam')"
+                                                        title="Remettre les titres Matchés cochés en statut Nouveau (réversible)">↺ Remettre en nouveau</button>
+                                            </div>
+                                            <button class="btn btn-sm btn-outline-secondary" id="btn_shazam_journal"
+                                                    onclick="window._shazamClick('journal','shazam')"
+                                                    title="Journal des opérations (pour mémoire — conservation 365 jours)">📖 Journal</button>
+                                        </div>
     
                                         <!-- Barre de filtres de provenance -->
                                         <div class="d-flex justify-content-between align-items-center mb-2">
@@ -2774,6 +2790,7 @@
                                             <table class="table table-sm table-hover mb-0">
                                                 <thead class="table-light sticky-top">
     <tr>
+        <th width="4%" class="text-center"><input type="checkbox" class="form-check-input mt-0" id="shazam_check_all" onchange="window._shazamToggleAll('shazam', this.checked)" title="Tout cocher / décocher la page affichée"></th>
         <th width="8%" class="text-center">Provenance</th>
         <th width="8%" class="text-center">Animateur</th>
         <th>Artiste</th>
@@ -2785,7 +2802,7 @@
     </tr>
 </thead>
                                                 <tbody id="shazam_list_body">
-                                                    <tr><td colspan="8" class="text-center text-muted p-2 small">
+                                                    <tr><td colspan="9" class="text-center text-muted p-2 small">
                                                         Cliquez sur « ↻ » (base locale) ou « ⬇ VPS » (nouveautés distantes) pour charger les données.
                                                     </td></tr>
                                                 </tbody>
@@ -2846,6 +2863,22 @@
                                                 <div class="form-text small mt-1" id="animateurs_prefill_status"></div>
                                             </div>
                                         </div>
+
+                                        <!-- 22-A : barre de sélection (présélection OBLIGATOIRE pour la synchro) -->
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <div class="d-flex align-items-center gap-2">
+                                                <span class="badge bg-secondary" id="animateurs_selection_count">0 sélectionné</span>
+                                                <button class="btn btn-sm btn-outline-danger" id="btn_animateurs_supprimer" disabled
+                                                        onclick="window._shazamClick('supprimerSelection','animateurs')"
+                                                        title="Supprimer définitivement les titres cochés (modal de confirmation — irréversible)">🗑 Supprimer</button>
+                                                <button class="btn btn-sm btn-outline-warning" id="btn_animateurs_remettre" disabled
+                                                        onclick="window._shazamClick('remettreSelection','animateurs')"
+                                                        title="Remettre les titres Matchés cochés en statut Nouveau (réversible)">↺ Remettre en nouveau</button>
+                                            </div>
+                                            <button class="btn btn-sm btn-outline-secondary" id="btn_animateurs_journal"
+                                                    onclick="window._shazamClick('journal','animateurs')"
+                                                    title="Journal des opérations (pour mémoire — conservation 365 jours)">📖 Journal</button>
+                                        </div>
     
                                         <!-- Barre de filtres de provenance -->
                                         <div class="d-flex justify-content-between align-items-center mb-2">
@@ -2901,6 +2934,7 @@
                                             <table class="table table-sm table-hover mb-0">
                                                 <thead class="table-light sticky-top">
     <tr>
+        <th width="4%" class="text-center"><input type="checkbox" class="form-check-input mt-0" id="animateurs_check_all" onchange="window._shazamToggleAll('animateurs', this.checked)" title="Tout cocher / décocher la page affichée"></th>
         <th width="8%" class="text-center">Animateur</th>
         <th width="8%" class="text-center">Source</th>
         <th>Artiste</th>
@@ -2917,7 +2951,7 @@
 </thead>
 
                                                 <tbody id="animateurs_list_body">
-                                                    <tr><td colspan="12" class="text-center text-muted p-2 small">
+                                                    <tr><td colspan="13" class="text-center text-muted p-2 small">
                                                         Cliquez sur « ↻ » (base locale) ou « ⬇ VPS » (nouveautés distantes) pour charger les données.
                                                     </td></tr>
                                                 </tbody>
@@ -5569,7 +5603,7 @@
 
 
 <!-- ══════════════════════════════════════════════════ -->
-<script src="/static/js/modules/shazam-animateurs.js?v=8"></script>
+<script src="/static/js/modules/shazam-animateurs.js?v=9"></script>
 <!-- PHASE 3 - Étape 2/5 : shazam-animateurs (appel direct window._onShazamMatchResult / window._onAnimateursMatchResult) -->
 <!-- ══════════════════════════════════════════════════ -->
 <script src="/static/js/modules/pont-player.js?v=1"></script>
