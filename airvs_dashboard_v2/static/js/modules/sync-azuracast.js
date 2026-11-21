@@ -270,6 +270,14 @@
         buffer.statsText = _ps ? _ps.textContent : '';
         buffer.pushLogText = _tp ? _tp.textContent : '';
         buffer.playlistLogText = _tpl ? _tpl.textContent : '';
+        // Hotfix 2026.11.21-B2 — persistance des titres de cartes harmonisés
+        // et des en-têtes contextuels (cohérence titre ⇄ journal au retour sur l'onglet)
+        var _plbl = document.getElementById('push_log_label');
+        var _pllb = document.getElementById('playlist_log_label');
+        buffer.pushLogLabelText = _plbl ? _plbl.textContent : '';
+        buffer.playlistLogLabelText = _pllb ? _pllb.textContent : '';
+        buffer.pushLogHeaderText = (typeof _pushLogHeader === 'string') ? _pushLogHeader : '';
+        buffer.playlistLogHeaderText = (typeof _playlistLogHeader === 'string') ? _playlistLogHeader : '';
         buffer.selectedFiles = getCurrentSelectedFilesFromCheckboxes();
         if (_psa) buffer._selectAllChecked = _psa.checked;
         if (_psab) buffer._selectAllBottomChecked = _psab.checked;
@@ -307,6 +315,13 @@
         if (_ps) _ps.textContent = buffer.statsText || '';
         if (_tp) _tp.textContent = buffer.pushLogText || '';
         if (_tpl) _tpl.textContent = buffer.playlistLogText || '';
+        // Hotfix 2026.11.21-B2 — restaurer les titres de cartes harmonisés
+        var _plbl = document.getElementById('push_log_label');
+        var _pllb = document.getElementById('playlist_log_label');
+        if (_plbl) _plbl.textContent = buffer.pushLogLabelText || _journalLabelDefault;
+        if (_pllb) _pllb.textContent = buffer.playlistLogLabelText || _journalLabelDefault;
+        if (typeof buffer.pushLogHeaderText === 'string') _pushLogHeader = buffer.pushLogHeaderText;
+        if (typeof buffer.playlistLogHeaderText === 'string') _playlistLogHeader = buffer.playlistLogHeaderText;
         if (_psa) _psa.checked = !!buffer._selectAllChecked;
         if (_psab) _psab.checked = !!buffer._selectAllBottomChecked;
         if (_mc) _mc.textContent = buffer.missingCountText || '';
@@ -754,10 +769,8 @@ function showPlaylistDropdown(result, songId, stationId, fetchTaskId) {
         dropdownArea.innerHTML = html;
     }
 
-    // Le journal reste dans le terminal (pour les logs worker)
-    if (terminal) {
-        terminal.textContent = '';
-    }
+    // Hotfix 2026.11.21-B — journal contextuel : vidage des deux zones à chaque opération
+    viderJournaux('');
 
     // Activer le bouton quand une playlist est sélectionnée
     var select = document.getElementById('retire_playlist_select');
@@ -808,9 +821,12 @@ function showPlaylistDropdown(result, songId, stationId, fetchTaskId) {
                     if (terminal) {
                         terminal.textContent = '⏳ En attente du worker...';
                     }
-                    // Poll du statut de la tâche
+                    // Poll du statut de la tâche (hotfix 2026.11.21-B : en-tête contextuel)
+                    // Hotfix 2026.11.21-B2 — titre de carte harmonisé
+                    journalLabel('action', 'Journal · ➖ Retirer de la playlist :');
                     if (typeof surveillerActionLog === 'function') {
-                        surveillerActionLog(data.task_id, []);
+                        surveillerActionLog(data.task_id, [], journalActionHeader('➖ Retirer PLS',
+                            (selectedPlaylist ? selectedPlaylist.name : 'Playlist ' + playlistId) + ' (ID ' + playlistId + ') · Station ' + stationId));
                     }
                 } else {
                     alert('Erreur : ' + (data.message || 'réponse inattendue'));
@@ -843,6 +859,11 @@ function supprimerTitreAzuraCast() {
 
     var stationId = getActionStationId();
     var songId = actionTrack.ID;
+
+    // Hotfix 2026.11.21-B — journal contextuel : vidage à chaque opération
+    // Hotfix 2026.11.21-B2 — titre de carte harmonisé
+    viderJournaux('action');
+    journalLabel('action', 'Journal · 🗑️ Supprimer d\'AzuraCast :');
 
     if (!confirm(
         '⚠️ SUPPRESSION DÉFINITIVE ⚠️\n\n' +
@@ -878,9 +899,10 @@ function supprimerTitreAzuraCast() {
                     'Station : ' + data.station_id + '<br>' +
                     '⏳ Le worker va traiter la suppression...</div>';
             }
-            // Surveiller le journal d'action
+            // Surveiller le journal d'action (hotfix 2026.11.21-B : en-tête contextuel)
             if (typeof surveillerActionLog === 'function') {
-                surveillerActionLog(data.task_id, []);
+                surveillerActionLog(data.task_id, [], journalActionHeader('🗑️ Supprimer d\'AzuraCast',
+                    actionTrack.artist + ' — ' + actionTrack.title + ' · Station ' + stationId));
             }
         } else {
             if (resultArea) {
@@ -1063,12 +1085,17 @@ function retirerSelectionPlaylistAzura() {
         dropdownArea.style.display = 'none';
         dropdownArea.innerHTML = '';
 
-        // Afficher le statut dans le terminal push
+        // Hotfix 2026.11.21-B — journal contextuel : en-tête + vidage à chaque opération
+        // Hotfix 2026.11.21-B2 — titre de carte harmonisé
+        _pushLogHeader = journalActionHeader('➖ Retirer PLS (batch)',
+            songIds.length + ' titre(s) · ' + playlistIds.length + ' playlist(s) · Station ' + stationId);
+        viderJournaux('push');
+        journalLabel('push', 'Journal · ➖ Retirer des playlists :');
         var terminal = document.getElementById('terminal_push_output');
         var logWrapper2 = document.getElementById('push_log_wrapper');
         if (logWrapper2) logWrapper2.style.display = 'block';
         if (terminal) {
-            terminal.textContent = '⏳ Création de la tâche de retrait batch (' +
+            terminal.textContent = _pushLogHeader + '⏳ Création de la tâche de retrait batch (' +
                                     songIds.length + ' titre(s) ← ' + playlistIds.length + ' playlist(s))...';
         }
 
@@ -1096,9 +1123,9 @@ function retirerSelectionPlaylistAzura() {
                         terminal.textContent = '✅ Tâche 1/' + totalTasks + ' créée (ID ' + data.task_id + ')\n' +
                                                 '⏳ Le worker traite les retraits...';
                     }
-                    // Poll la première tâche dans le terminal push
+                    // Poll la première tâche dans le terminal push (hotfix 2026.11.21-B)
                     if (typeof surveillerPushLog === 'function') {
-                        surveillerPushLog(data.task_id);
+                        surveillerPushLog(data.task_id, _pushLogHeader);
                     }
                 } else if (data.status === 'ok') {
                     if (terminal) {
@@ -1260,15 +1287,20 @@ function supprimerSelectionAzuraCast() {
                     data.count + ' titre(s), station ' + data.station_id + '.<br>' +
                     '⏳ Le worker va traiter les suppressions...</div>';
             }
-            // Suivi détaillé dans le terminal push (même pattern que le retrait batch)
+            // Suivi détaillé dans le terminal push (hotfix 2026.11.21-B : en-tête contextuel)
+            // Hotfix 2026.11.21-B2 — titre de carte harmonisé
+            _pushLogHeader = journalActionHeader('🗑️ Supprimer d\'AzuraCast (batch)',
+                songIds.length + ' titre(s) · Station ' + stationId);
+            viderJournaux('push');
+            journalLabel('push', 'Journal · 🗑️ Supprimer d\'AzuraCast :');
             var terminal = document.getElementById('terminal_push_output');
             var logWrapper = document.getElementById('push_log_wrapper');
             if (logWrapper) logWrapper.style.display = 'block';
             if (terminal) {
-                terminal.textContent = '🗑️ Suppression batch lancée (' + songIds.length + ' titre(s), station ' + stationId + ') — tâche ' + data.task_id + '\n' +
+                terminal.textContent = _pushLogHeader + '🗑️ Suppression batch lancée (' + songIds.length + ' titre(s), station ' + stationId + ') — tâche ' + data.task_id + '\n' +
                                         '⏳ Le worker traite les suppressions...';
             }
-            surveillerPushLog(data.task_id);
+            surveillerPushLog(data.task_id, _pushLogHeader);
 
             // Réinitialiser la double confirmation après lancement
             if (conf) conf.checked = false;
@@ -1327,6 +1359,9 @@ function showPanel(name) {
     });
     var panel = document.getElementById('panel-' + name);
     if (panel) panel.classList.add('active');
+
+    // Hotfix 2026.11.21-B — journal contextuel : vidage à chaque changement d'opération
+    viderJournaux('');
 
     // Le panneau « retirer » doit être peuplé dynamiquement à chaque activation
     // (les titres cochés peuvent avoir changé depuis le dernier affichage).
@@ -1449,6 +1484,9 @@ function showActionPanel(name) {
     });
     var panel = document.getElementById('action-panel-' + name);
     if (panel) panel.classList.add('active');
+
+    // Hotfix 2026.11.21-B — journal contextuel : vidage à chaque changement d'opération
+    viderJournaux('');
 }
 window.showActionPanel = showActionPanel;
 
@@ -1678,6 +1716,8 @@ function loadActionPlaylists() {
 // Action : Copier vers AzuraCast
 document.getElementById('btn_action_copier').addEventListener('click', function() {
     if (!actionTrack) return;
+    viderJournaux('action'); // Hotfix 2026.11.21-B — journal contextuel
+    journalLabel('action', 'Journal · 🚀 Copier vers AzuraCast :'); // Hotfix 2026.11.21-B2
     let dossier = getDossierCible('action_dossier_cible', 'action_new_folder_name') || 'imports_push';
     // Si déjà IN_AZURACAST, pas besoin de copier
     if (actionTrack.inAzura) {
@@ -1697,7 +1737,8 @@ document.getElementById('btn_action_copier').addEventListener('click', function(
     .then(function(r) { return r.json(); })
     .then(function(data) {
         if (data.task_id) {
-            surveillerActionLog(data.task_id);
+            surveillerActionLog(data.task_id, [], journalActionHeader('📋 Copier vers AzuraCast',
+                actionTrack.artist + ' — ' + actionTrack.title + ' · dossier ' + dossier + ' · Station ' + getActionStationId()));
         } else if (data.message) {
             alert('Erreur : ' + data.message);
         }
@@ -1707,6 +1748,8 @@ document.getElementById('btn_action_copier').addEventListener('click', function(
 // Action : Ajouter à une ou plusieurs playlists existantes
 document.getElementById('btn_action_ajouter_playlist').addEventListener('click', function() {
     if (!actionTrack) return;
+    viderJournaux('action'); // Hotfix 2026.11.21-B — journal contextuel
+    journalLabel('action', 'Journal · ➕ Ajouter aux playlists :'); // Hotfix 2026.11.21-B2
     let playlistIds = getActionPlaylistIds();
     // Lecture null-safe (l'élément a été supprimé puis réintroduit en v2.7)
     let npEl = document.getElementById('action_new_playlist_name');
@@ -1748,7 +1791,8 @@ document.getElementById('btn_action_ajouter_playlist').addEventListener('click',
         .then(function(data) {
             let plIds = data.playlist_task_ids || (data.playlist_task_id ? [data.playlist_task_id] : []);
             if (data.task_id || plIds.length > 0) {
-                surveillerActionLog(data.task_id, plIds);
+                surveillerActionLog(data.task_id, plIds, journalActionHeader('➕ Ajouter aux playlists',
+                    actionTrack.artist + ' — ' + actionTrack.title + ' · ' + (playlistIds.length + (newPlaylistName ? 1 : 0)) + ' playlist(s) · Station ' + getActionStationId()));
             }
         });
     } else {
@@ -1773,7 +1817,8 @@ document.getElementById('btn_action_ajouter_playlist').addEventListener('click',
         .then(function(data) {
             let plIds = data.playlist_task_ids || (data.playlist_task_id ? [data.playlist_task_id] : []);
             if (data.task_id || plIds.length > 0) {
-                surveillerActionLog(data.task_id, plIds);
+                surveillerActionLog(data.task_id, plIds, journalActionHeader('➕ Ajouter aux playlists',
+                    actionTrack.artist + ' — ' + actionTrack.title + ' · ' + (playlistIds.length + (newPlaylistName ? 1 : 0)) + ' playlist(s) · Station ' + getActionStationId()));
             }
         });
     }
@@ -1782,6 +1827,8 @@ document.getElementById('btn_action_ajouter_playlist').addEventListener('click',
 // Action : Copier + Ajouter à playlists
 document.getElementById('btn_action_copier_et_playlist').addEventListener('click', function() {
     if (!actionTrack) return;
+    viderJournaux('action'); // Hotfix 2026.11.21-B — journal contextuel
+    journalLabel('action', 'Journal · 🚀 Copier + ➕ Playlists :'); // Hotfix 2026.11.21-B2
     let playlistIds = getActionPlaylistIds();
     // Lecture null-safe (l'élément a été supprimé puis réintroduit en v2.7)
     let npEl = document.getElementById('action_new_playlist_name');
@@ -1820,7 +1867,8 @@ document.getElementById('btn_action_copier_et_playlist').addEventListener('click
     .then(function(data) {
         let plIds = data.playlist_task_ids || (data.playlist_task_id ? [data.playlist_task_id] : []);
         if (data.task_id || plIds.length > 0) {
-            surveillerActionLog(data.task_id, plIds);
+            surveillerActionLog(data.task_id, plIds, journalActionHeader('🚀 Copier + Ajouter aux playlists',
+                actionTrack.artist + ' — ' + actionTrack.title + ' · dossier ' + dossier + ' · ' + (playlistIds.length + (newPlaylistName ? 1 : 0)) + ' playlist(s) · Station ' + getActionStationId()));
         } else if (data.message) {
             alert('Erreur : ' + data.message);
         }
@@ -1835,11 +1883,85 @@ document.getElementById('btn_action_copier_et_playlist').addEventListener('click
 
 var pushLogInterval = null;
 
-function surveillerPushLog(taskId) {
+// ═══ Hotfix 2026.11.21-B — journaux contextuels (vidage à chaque opération) ═══
+// ═══ Hotfix 2026.11.21-B2 — titres de cartes harmonisés ═══
+// Chaque opération (Copier / Ajouter PLS / Retirer PLS / Supprimer — unitaire,
+// batch ou envoi combiné) démarre un journal propre :
+//   1. les zones de journal non concernées sont vidées (aucune trace résiduelle) ;
+//   2. le titre de la carte passe au format uniforme « Journal · <opération> : » ;
+//   3. un en-tête horodaté est écrit dans la zone de l'opération et le poll du
+//      log s'affiche sous cet en-tête.
+// Au repos (changement de panneau ou de section), les titres reviennent au
+// libellé neutre commun « Journal : ».
+var _actionLogHeader = '';
+var _pushLogHeader = '';
+var _playlistLogHeader = '';
+
+// Libellés neutres communs (harmonisation B2 — identiques dans les deux menus)
+var _journalLabelDefault = 'Journal :';
+
+function journalLabel(zone, texte) {
+    // Titre de carte harmonisé : zone ∈ { push, playlist, action }
+    var el = document.getElementById(zone + '_log_label');
+    if (el && typeof texte === 'string') el.textContent = texte;
+}
+
+function resetJournalLabel(zone) {
+    journalLabel(zone, _journalLabelDefault);
+}
+
+function journalActionHeader(type, details) {
+    var now = new Date();
+    var hh = ('0' + now.getHours()).slice(-2) + ':' +
+             ('0' + now.getMinutes()).slice(-2) + ':' +
+             ('0' + now.getSeconds()).slice(-2);
+    return '═══ ' + type + (details ? ' · ' + details : '') + ' · ' + hh + ' ═══\n';
+}
+
+function viderJournaux(zoneActive) {
+    // Hotfix 2026.11.21-B2 — vide les zones de journal non concernées par
+    // l'opération en cours et ramène leurs titres de carte au libellé neutre.
+    //   zoneActive 'push'    → l'opération écrit dans terminal_push_output ;
+    //                          la carte playlist est vidée et son label ramené
+    //                          au neutre (elle sera réécrite immédiatement si
+    //                          l'envoi combiné comporte une phase playlist) ;
+    //   zoneActive 'action'  → l'opération écrit dans terminal_action_output (Explorateur) ;
+    //   zoneActive ''        → repos : tout est vidé et ramené au libellé neutre.
+    var tAction = document.getElementById('terminal_action_output');
+    var tPush = document.getElementById('terminal_push_output');
+    var tPl = document.getElementById('terminal_playlist_output');
+    if (tAction && zoneActive !== 'action') {
+        tAction.textContent = '';
+        _actionLogHeader = '';
+        resetJournalLabel('action');
+    }
+    if (zoneActive !== 'push') {
+        if (tPush) {
+            tPush.textContent = '';
+        }
+        _pushLogHeader = '';
+        resetJournalLabel('push');
+    }
+    // La carte playlist est vidée pour toute zone active autre que
+    // « playlist » (elle n'a pas de zone propre : seule la phase playlist
+    // d'un envoi combiné l'écrit, et elle réécrit son contenu de tête).
+    if (tPl) {
+        tPl.textContent = '';
+    }
+    _playlistLogHeader = '';
+    resetJournalLabel('playlist');
+}
+
+function surveillerPushLog(taskId, header) {
     var logWrapper = document.getElementById('push_log_wrapper');
     var terminal = document.getElementById('terminal_push_output');
     if (logWrapper) logWrapper.style.display = 'block';
     if (!terminal) return;
+
+    // Hotfix 2026.11.21-B — journal contextuel : en-tête + vidage de l'autre zone
+    if (typeof header === 'string') _pushLogHeader = header;
+    viderJournaux('push');
+    terminal.textContent = _pushLogHeader + '⏳ En attente du worker Ubuntu...';
 
     if (pushLogInterval) clearInterval(pushLogInterval);
 
@@ -1847,7 +1969,7 @@ function surveillerPushLog(taskId) {
         fetch('/lire_log_push?task_id=' + taskId)
             .then(function(r) { return r.json(); })
             .then(function(data) {
-                terminal.textContent = data.log || '...';
+                terminal.textContent = _pushLogHeader + '\n' + (data.log || '...');
                 terminal.scrollTop = terminal.scrollHeight;
 
                 if (data.statut === 'termine' || data.statut === 'erreur') {
@@ -1867,9 +1989,13 @@ function surveillerPushLog(taskId) {
     }, 2000);
 }
 
-function surveillerActionLog(taskId, playlistTaskIds) {
+function surveillerActionLog(taskId, playlistTaskIds, header) {
     document.getElementById('action_log_wrapper').style.display = 'block';
     let terminal = document.getElementById('terminal_action_output');
+
+    // Hotfix 2026.11.21-B — journal contextuel : en-tête + vidage de l'autre zone
+    if (typeof header === 'string') _actionLogHeader = header;
+    viderJournaux('action');
 
     // Normaliser en tableau
     if (!Array.isArray(playlistTaskIds)) {
@@ -1879,19 +2005,19 @@ function surveillerActionLog(taskId, playlistTaskIds) {
     // Si pas de tâche de copie mais des tâches playlist → surveiller directement les playlists
     if (!taskId && playlistTaskIds.length > 0) {
         let nbPl = playlistTaskIds.length;
-        terminal.textContent = 'Titre déjà dans AzuraCast. Ajout à ' + nbPl + ' playlist(s) en cours...';
+        terminal.textContent = _actionLogHeader + 'Titre déjà dans AzuraCast. Ajout à ' + nbPl + ' playlist(s) en cours...';
         surveillerPlaylistActionLogChain(playlistTaskIds, '');
         return;
     }
 
-    terminal.textContent = 'En attente du worker Ubuntu...';
+    terminal.textContent = _actionLogHeader + '⏳ En attente du worker Ubuntu...';
     if (actionLogInterval) clearInterval(actionLogInterval);
 
     actionLogInterval = setInterval(function() {
         fetch('/lire_log_push?task_id=' + taskId)
             .then(function(r) { return r.json(); })
             .then(function(data) {
-                document.getElementById('terminal_action_output').textContent = data.log || '...';
+                document.getElementById('terminal_action_output').textContent = _actionLogHeader + '\n' + (data.log || '...');
                 if (data.statut === 'termine' || data.statut === 'erreur') {
                     // v2.7 — marquage IN_AZURACAST renvoyé par /lire_log_push (radiodb.songs)
                     if (data.marquage && data.marquage.updated > 0) {
@@ -1944,7 +2070,7 @@ function surveillerPlaylistActionLogChain(remainingIds, prefixLog) {
         fetch('/lire_log_playlist?task_id=' + currentId)
             .then(function(r) { return r.json(); })
             .then(function(data) {
-                terminal.textContent = accumulatedLog + (data.log || '...');
+                terminal.textContent = _actionLogHeader + accumulatedLog + (data.log || '...');
                 terminal.scrollTop = terminal.scrollHeight;
                 if (data.statut === 'termine' || data.statut === 'erreur') {
                     clearInterval(interval);
@@ -1956,7 +2082,7 @@ function surveillerPlaylistActionLogChain(remainingIds, prefixLog) {
                         surveillerPlaylistActionLogChain(nextIds, accumulatedLog);
                     } else {
                         // Toutes les playlists sont terminées
-                        terminal.textContent = accumulatedLog;
+                        terminal.textContent = _actionLogHeader + accumulatedLog;
                         terminal.scrollTop = terminal.scrollHeight;
                     }
                     // Auto-sync après chaque playlist terminée
@@ -3338,8 +3464,22 @@ btnEnvoyer.addEventListener('click', function() {
     // Marquer le buffer comme en cours d'envoi
     if (activeBuffer) activeBuffer.isPushing = true;
 
+    // Hotfix 2026.11.21-B2 — journal contextuel : en-tête horodaté + titre de
+    // carte harmonisé + vidage des zones non concernées (aucun résidu d'une
+    // opération batch précédente, et la carte playlist est réinitialisée).
+    var _opType = '🚀 Copier vers AzuraCast';
+    if (creerPlaylist && fichiersACopier.length === 0) _opType = '➕ Ajouter aux playlists';
+    else if (creerPlaylist) _opType = '🚀 Copier + ➕ Playlists';
+    var _opDetails = fichiersACopier.length + ' copie(s) SFTP · ' +
+                     fichiersDejaAzura.length + ' déjà dans AzuraCast';
+    if (creerPlaylist && playlistIds.length > 0) _opDetails += ' · ' + playlistIds.length + ' playlist(s)';
+    if (creerPlaylist && nomPlaylist) _opDetails += ' · nouvelle PLS « ' + nomPlaylist + ' »';
+    _opDetails += ' · Station ' + getPushStationId();
+    _pushLogHeader = journalActionHeader(_opType, _opDetails);
+    viderJournaux('push');
+    journalLabel('push', 'Journal · ' + _opType + ' :');
     pushLogWrapper.style.display = 'block';
-    terminalPush.textContent = "Envoi au Worker Ubuntu...\n";
+    terminalPush.textContent = _pushLogHeader + "Envoi au Worker Ubuntu...\n";
     btnEnvoyer.disabled = false;  // reste cliquable pour pouvoir annuler
     btnEnvoyer.textContent = "✕ Annuler l'envoi";
     btnEnvoyer.classList.add('btn-danger');
@@ -3384,14 +3524,18 @@ btnEnvoyer.addEventListener('click', function() {
                 activeBuffer.isPlaylistPending = true;
             }
             playlistLogWrapper.style.display = 'block';
+            // Hotfix 2026.11.21-B2 — titre de carte harmonisé + en-tête de la zone playlist
+            _playlistLogHeader = journalActionHeader('➕ Ajout aux playlists',
+                playlistTaskIds.length + ' playlist(s) en file');
+            journalLabel('playlist', 'Journal · ➕ Ajout aux playlists :');
             if (currentPushTaskId) {
-                terminalPlaylist.textContent = "En attente de la copie SFTP avant ajout à " + playlistTaskIds.length + " playlist(s)...\n";
+                terminalPlaylist.textContent = _playlistLogHeader + "En attente de la copie SFTP avant ajout à " + playlistTaskIds.length + " playlist(s)...\n";
             } else {
                 // Pas de copie SFTP nécessaire (tous déjà IN_AZURACAST) → playlist directement
                 if (playlistTaskIds.length > 1) {
-                    terminalPlaylist.textContent = "Titre(s) déjà dans AzuraCast. Ajout à " + playlistTaskIds.length + " playlists en cours...\n";
+                    terminalPlaylist.textContent = _playlistLogHeader + "Titre(s) déjà dans AzuraCast. Ajout à " + playlistTaskIds.length + " playlists en cours...\n";
                 } else {
-                    terminalPlaylist.textContent = "Titre déjà dans AzuraCast. Ajout à la playlist en cours...\n";
+                    terminalPlaylist.textContent = _playlistLogHeader + "Titre déjà dans AzuraCast. Ajout à la playlist en cours...\n";
                 }
                 if (intervalPlaylist) clearInterval(intervalPlaylist);
                 intervalPlaylist = setInterval(fetchLogPlaylist, 500);
@@ -3433,7 +3577,7 @@ function fetchLogPush() {
                     data.log += '\n✅ ' + data.marquage.updated + ' titre(s) marqué(s) IN_AZURACAST dans RadioDJ.';
                     document.dispatchEvent(new CustomEvent('azura:marked', { detail: { paths: data.marquage.paths || [] } }));
                 }
-                terminalPush.textContent = data.log;
+                terminalPush.textContent = _pushLogHeader + data.log;
                 terminalPush.scrollTop = terminalPush.scrollHeight;
                 var ab = getActiveBuffer();
                 if (ab) ab.pushLogText = data.log;
@@ -3465,7 +3609,8 @@ function fetchLogPlaylist() {
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data && data.log) {
-                terminalPlaylist.textContent = data.log;
+                // Hotfix 2026.11.21-B2 — en-tête contextuel conservé pendant le poll
+                terminalPlaylist.textContent = _playlistLogHeader + data.log;
                 terminalPlaylist.scrollTop = terminalPlaylist.scrollHeight;
                 var ab = getActiveBuffer();
                 if (ab) ab.playlistLogText = data.log;
@@ -3497,7 +3642,7 @@ function surveillerFinPush() {
             // Si une tâche playlist est en attente, commencer à la surveiller
             if (!_wasCancelled && currentPlaylistTaskId) {
                 let nbRestantes = pendingPlaylistTaskIds.length + 1;  // celle en cours + la file
-                terminalPlaylist.textContent = "La copie SFTP est terminée. Ajout à " + nbRestantes + " playlist(s) en cours...\n";
+                terminalPlaylist.textContent = _playlistLogHeader + "La copie SFTP est terminée. Ajout à " + nbRestantes + " playlist(s) en cours...\n";
                 if (intervalPlaylist) clearInterval(intervalPlaylist);
                 intervalPlaylist = setInterval(fetchLogPlaylist, 500);
                 surveillerFinPlaylist();
@@ -3952,6 +4097,11 @@ function surveillerFinPlaylist() {
             pushStats.textContent = '';
             terminalPush.textContent = '';
             terminalPlaylist.textContent = '';
+            // Hotfix 2026.11.21-B2 — titres de cartes ramenés au libellé neutre
+            resetJournalLabel('push');
+            resetJournalLabel('playlist');
+            _pushLogHeader = '';
+            _playlistLogHeader = '';
             pushPreviewWrapper.style.display = 'none';
             var _mw = document.getElementById('push_missing_wrapper');
             if (_mw) { _mw.style.display = 'none'; }
