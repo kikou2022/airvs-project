@@ -1,14 +1,29 @@
-# ██████ AIRVS PATCH PROGRAMMATION v2.5 — 2026-10-09 — ZONE DOWNLOAD AI ██████
-# Correctif : réintégration des lignes déjà « Matché » dans le flux éditorial
-#   Pont → AzuraCast (prefill + pipeline) : défaut de filtre statut
-#   'nouveau,matche', résolution directe par match_song_id (sans repasser
-#   dans le moteur), qualification auto 'pousse_azura' des morceaux déjà
-#   IN_AZURACAST. Cause de la régression : le filtre R5 défaut='nouveau'
-#   était écrit quand la colonne statut n'était jamais alimentée (bug
-#   TINYINT v2.3) — une fois l'écriture réparée, les matchés sortaient
-#   du Pont et n'étaient plus poussés vers AzuraCast.
-# Base : v2.4 (persister normalisé + bandeau). utils.py/pipeline_import.py
-#   v2.4 inchangés — seuls shazam.py et azuracast.py évoluent en v2.5.
+# ██████ AIRVS PATCH PROGRAMMATION v2.6 — 2026-11-22 — ZONE DOWNLOAD AI ██████
+# Hotfix 2026.11.22-A — Gestion de la liste Shazam/Animateurs :
+#   1. Présélection OBLIGATOIRE : prefill + pipeline exigent les ids des
+#      lignes cochées (sans ids → 400) ; garde-fou LIMITE_BATCH_RUN = 500
+#      titres max par run ;
+#   2. Suppression PHYSIQUE batch POST /api/shazam/supprimer (modal précis
+#      côté front, journal 'suppression'). Pas de résurrection VPS : le
+#      pull ne renvoie que les soumissions statut='pending' (lignes déjà
+#      ackées jamais re-pullées) ;
+#   3. Transition « matché → nouveau » :
+#      - AUTO ('match_perdu') : morceau RadioDJ disparu + re-match sans
+#        résultat → statut='nouveau', match_song_id=NULL,
+#        match_passe='non_trouve' ; si le couple est rejeté en manquants
+#        (R9) → alignement 'rejete' (on ferme la boucle au lieu de la
+#        rouvrir) ; corrige la boucle futile v2.5 (ligne 'matché' à ID
+#        mort repassait au moteur à chaque run) ;
+#      - MANUELLE POST /api/shazam/remettre_nouveau : statut='nouveau',
+#        match_song_id=NULL, match_passe=NULL (état neutre '?') ; jamais
+#        sur pousse_azura/rejete ; garde R9 non contournable ; réversible
+#        → pas de modal requis ;
+#   4. Journal des opérations « pour mémoire » : table
+#      airvs_shazam_journal (synchro / suppression / remise_nouveau /
+#      match_perdu), purge opportuniste à chaque écriture au-delà de
+#      JOURNAL_RETENTION_JOURS = 365 jours, lecture GET /api/shazam/journal.
+# Base : v2.5 (réintégration des matchés dans le flux Pont). azuracast.py,
+#   utils.py, pipeline_import.py et le worker restent inchangés en v2.6.
 # Vérif déploiement : cette ligne doit être la 1re ligne du fichier sur .39
 """blueprints/shazam.py -- Shazam + VPS sync AIRVS.
 
@@ -44,6 +59,18 @@ from utils import is_in_azuracast
 
 
 shazam_bp = Blueprint('shazam', __name__)
+
+
+# ─── 22-A : paramètres de gestion de la liste ──────────────────────
+
+# Garde-fou : nombre maximal de titres traités par run (sélection de
+# synchro, suppression batch, remise en nouveau). Au-delà → HTTP 400.
+LIMITE_BATCH_RUN = 500
+
+# Journal des opérations « pour mémoire » : durée de conservation en
+# jours. Purge opportuniste à chaque écriture (aucune tâche planifiée
+# requise). Ajuster ici si l'exploitant fixe un délai différent.
+JOURNAL_RETENTION_JOURS = 365
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
@@ -169,6 +196,30 @@ def _assurer_schema_shazam():
                     _logger.info(f"Migration : ENUM statut enrichi avec 'rejete_corrige' sur {_tbl_enum}")
             except Exception as e:
                 _logger.warning(f"Migration ENUM statut {_tbl_enum} échouée : {e}")
+
+        # ── 22-A : journal des opérations (pour mémoire) ──
+        # Une ligne par opération : synchro (matching sur sélection),
+        # suppression physique, remise en nouveau (manuelle ou auto).
+        # Purge opportuniste gérée par _journaliser (JOURNAL_RETENTION_JOURS).
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS airvs_shazam_journal (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    date_operation DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    type_operation VARCHAR(40) NOT NULL,
+                    table_source VARCHAR(20) NOT NULL,
+                    row_id INT DEFAULT NULL,
+                    artiste VARCHAR(255) DEFAULT NULL,
+                    titre VARCHAR(255) DEFAULT NULL,
+                    details VARCHAR(500) DEFAULT NULL,
+                    INDEX idx_journal_date (date_operation),
+                    INDEX idx_journal_type (type_operation),
+                    INDEX idx_journal_source_row (table_source, row_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+            db.commit()
+        except Exception as e:
+            _logger.debug(f"Migration journal (ignorée si déjà faite) : {e}")
 
         db.commit()
         cursor.close()
@@ -431,6 +482,121 @@ def _qualifier_pousse_azura(db, source_ids, table_src):
 
 def _tbl_label(table_src):
     return 'airvs_shazam' if 'shazam' in (table_src or '') else 'airvs_animateurs'
+
+
+def _colonne_existe(db, table_sql, colonne):
+    """True si la colonne existe sur la table (détection à l'exécution,
+    même approche que /api/manquants/rejeter pour `commentaire`)."""
+    try:
+        cur = db.cursor()
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = %s AND column_name = %s",
+            (table_sql, colonne)
+        )
+        row = cur.fetchone()
+        cur.close()
+        return bool(row and list(row.values())[0])
+    except Exception:
+        return False
+
+
+def _table_existe(db, table):
+    """True si la table existe dans la base courante."""
+    try:
+        cur = db.cursor()
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name = %s",
+            (table,)
+        )
+        row = cur.fetchone()
+        cur.close()
+        return bool(row and list(row.values())[0])
+    except Exception:
+        return False
+
+
+def _verifier_limite_selection(ids):
+    """22-A — Garde-fou de présélection.
+
+    Règles (validées exploitant) :
+      - présélection OBLIGATOIRE : liste vide/absente → erreur ;
+      - garde-fou 500/run : au-delà de LIMITE_BATCH_RUN → erreur.
+    Retourne (ids_propres, None) ou (None, message_erreur).
+    """
+    if not ids:
+        return None, ("Sélection obligatoire : cochez au moins un titre "
+                      "avant de lancer l'opération")
+    ids_propres = []
+    for _v in ids:
+        try:
+            _n = int(_v)
+        except (TypeError, ValueError):
+            continue
+        if _n > 0:
+            ids_propres.append(_n)
+    ids_propres = sorted(set(ids_propres))
+    if not ids_propres:
+        return None, "Sélection invalide : aucun identifiant exploitable"
+    if len(ids_propres) > LIMITE_BATCH_RUN:
+        return None, (f"Garde-fou : {LIMITE_BATCH_RUN} titres maximum par run "
+                      f"(sélection reçue = {len(ids_propres)})")
+    return ids_propres, None
+
+
+def _journaliser(db, entrees):
+    """22-A — Écrit des entrées du journal des opérations (pour mémoire).
+
+    entrees : liste de dicts {type_operation, table_source, row_id,
+              artiste, titre, details}.
+    Types d'opération : 'synchro', 'suppression', 'remise_nouveau',
+    'match_perdu'.
+
+    Purge opportuniste : à chaque écriture, supprime les entrées plus
+    vieilles que JOURNAL_RETENTION_JOURS (pas de tâche planifiée requise).
+    Non bloquant : une erreur de journal n'interrompt jamais l'opération
+    métier (simple warning dans le log).
+    """
+    if not entrees:
+        return 0
+    try:
+        cur = db.cursor()
+        nb = 0
+        for e in entrees:
+            cur.execute(
+                "INSERT INTO airvs_shazam_journal "
+                "(type_operation, table_source, row_id, artiste, titre, details) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    str(e.get('type_operation') or '')[:40],
+                    str(e.get('table_source') or '')[:20],
+                    e.get('row_id'),
+                    (str(e.get('artiste') or '').strip()[:255] or None),
+                    (str(e.get('titre') or '').strip()[:255] or None),
+                    (str(e.get('details') or '').strip()[:500] or None),
+                )
+            )
+            nb += cur.rowcount
+        # Purge opportuniste (conservation limitée à JOURNAL_RETENTION_JOURS)
+        try:
+            cur.execute(
+                "DELETE FROM airvs_shazam_journal "
+                "WHERE date_operation < NOW() - INTERVAL %d DAY"
+                % int(JOURNAL_RETENTION_JOURS)
+            )
+        except Exception:
+            pass
+        db.commit()
+        cur.close()
+        return nb
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _logger.warning(f"22-A journal (écriture ignorée) : {e}")
+        return 0
 
 
 def _match_shazam_songs(cursor, artiste, titre):
@@ -845,6 +1011,285 @@ def api_shazam_delete(shazam_id):
         return jsonify({"status": "error", "message": "Non trouvé"}), 404
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ── 22-A : suppression PHYSIQUE batch (avec journal) ──
+@shazam_bp.route('/api/shazam/supprimer', methods=['POST'])
+@login_requis
+def api_shazam_supprimer():
+    """Suppression PHYSIQUE (définitive) des lignes cochées.
+
+    Body JSON : {ids: [...], table: 'shazam'|'animateurs', motif: str?}
+
+    - DELETE réel (pas un statut) — irréversible ; le modal précis du
+      front est la première garde, le garde-fou 500/run la seconde.
+    - Chaque ligne supprimée est journalisée ('suppression', pour
+      mémoire) avec le motif facultatif saisi dans le modal.
+    - airvs_animateurs : pas de résurrection — le pull VPS ne renvoie
+      que les soumissions statut='pending' (déjà ackées jamais re-pullées).
+      Si l'animateur RÉACTIVE sa soumission sur le VPS, elle revient
+      comme événement éditorial légitime (comportement voulu).
+    - L'ancien endpoint unitaire /api/shazam/delete/<id> reste valable
+      (rétro-compatibilité) mais ne journalise pas.
+    """
+    data = request.json or {}
+    table = (data.get('table') or 'shazam').strip().lower()
+    motif = (data.get('motif') or '').strip()
+
+    _ids, _err = _verifier_limite_selection(data.get('ids') or [])
+    if _err:
+        return jsonify({"error": _err}), 400
+    if table not in ('shazam', 'animateurs'):
+        return jsonify({"error": "table doit être 'shazam' ou 'animateurs'"}), 400
+
+    table_sql = 'airvs_shazam' if table == 'shazam' else 'airvs_animateurs'
+
+    try:
+        db = get_db_connection()
+        if not db:
+            return jsonify({"error": "DB indisponible"}), 500
+
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        _ph = ",".join(["%s"] * len(_ids))
+
+        # Lire AVANT de supprimer (pour le journal pour mémoire)
+        cursor.execute(
+            f"SELECT id, artiste, titre FROM {table_sql} WHERE id IN ({_ph})",
+            tuple(_ids)
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            cursor.close()
+            db.close()
+            return jsonify({"error": "Aucune ligne trouvée pour ces identifiants"}), 404
+
+        cursor.execute(
+            f"DELETE FROM {table_sql} WHERE id IN ({_ph})",
+            tuple(_ids)
+        )
+        nb = cursor.rowcount
+        db.commit()
+        cursor.close()
+
+        _detail = 'suppression physique manuelle (modal confirmé)'
+        if motif:
+            _detail += ' — motif : ' + motif
+        _journaliser(db, [
+            {'type_operation': 'suppression', 'table_source': table,
+             'row_id': r['id'], 'artiste': r.get('artiste'), 'titre': r.get('titre'),
+             'details': _detail}
+            for r in rows
+        ])
+        db.close()
+
+        _logger.info(f"[22-A] Suppression physique : {nb} ligne(s) de {table_sql} "
+                     f"(demandé = {len(_ids)})")
+        return jsonify({"ok": True, "supprimes": nb, "demandes": len(_ids)})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 22-A : transition manuelle « matché → nouveau » ──
+@shazam_bp.route('/api/shazam/remettre_nouveau', methods=['POST'])
+@login_requis
+def api_shazam_remettre_nouveau():
+    """Transition MANUELLE « matché → nouveau » (décision éditoriale).
+
+    Body JSON : {ids: [...], table: 'shazam'|'animateurs'}
+
+    Effet (par ligne statut='matche') :
+      - statut → 'nouveau', match_song_id → NULL, match_passe → NULL
+        (état neutre « ? » : rien ne dit que le moteur ne le retrouverait
+        pas à la prochaine synchro où la ligne sera cochée) ;
+      - trace horodatée en commentaire si la colonne existe.
+
+    Règles (validées exploitant) :
+      - 'pousse_azura' (Diffusé) : jamais touché (cycle éditorial terminé) ;
+      - 'rejete'/'rejete_corrige' : jamais touché (la réhabilitation passe
+        par « ✎ Corriger ») — lignes ignorées et rapportées ;
+      - R9 : couple rejeté dans airvs_manquants → ligne ignorée (la garde
+        anti-remontée n'est pas contournable).
+
+    Réversible et non destructif → pas de modal côté front.
+    Garde-fou 500/run. Journal : 'remise_nouveau'.
+    """
+    data = request.json or {}
+    table = (data.get('table') or 'shazam').strip().lower()
+
+    _ids, _err = _verifier_limite_selection(data.get('ids') or [])
+    if _err:
+        return jsonify({"error": _err}), 400
+    if table not in ('shazam', 'animateurs'):
+        return jsonify({"error": "table doit être 'shazam' ou 'animateurs'"}), 400
+
+    table_sql = 'airvs_shazam' if table == 'shazam' else 'airvs_animateurs'
+
+    try:
+        db = get_db_connection()
+        if not db:
+            return jsonify({"error": "DB indisponible"}), 500
+
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        _ph = ",".join(["%s"] * len(_ids))
+        cursor.execute(
+            f"SELECT id, artiste, titre, statut, match_song_id "
+            f"FROM {table_sql} WHERE id IN ({_ph})",
+            tuple(_ids)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+
+        if not rows:
+            db.close()
+            return jsonify({"error": "Aucune ligne trouvée pour ces identifiants"}), 404
+
+        # Seules les lignes 'matche' sont concernées (règles ci-dessus)
+        _a_traiter = [r for r in rows if (r.get('statut') or '') == 'matche']
+        _ignores = []
+        for r in rows:
+            if (r.get('statut') or '') != 'matche':
+                _ignores.append({
+                    'id': r['id'],
+                    'raison': ("statut=%s (seules les lignes Matché sont "
+                               "concernées — Diffusé et Rejeté ne sont jamais "
+                               "touchés)" % (r.get('statut') or 'vide'))
+                })
+
+        if not _a_traiter:
+            db.close()
+            return jsonify({"ok": True, "remis": 0, "ignores": _ignores,
+                            "message": "Aucune ligne Matché dans la sélection — rien à faire"})
+
+        _has_comm = _colonne_existe(db, table_sql, 'commentaire')
+        _horodatage = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+        cur = db.cursor()
+        _nb = 0
+        _journal = []
+        for r in _a_traiter:
+            # R9 : couple rejeté en manquants → ignoré (garde non contournable)
+            _r9 = False
+            try:
+                chk = db.cursor()
+                chk.execute(
+                    "SELECT id FROM airvs_manquants "
+                    "WHERE LOWER(artiste) = LOWER(%s) AND LOWER(titre) = LOWER(%s) "
+                    "AND statut IN ('rejete','rejete_corrigé') LIMIT 1",
+                    (str(r.get('artiste') or '').strip(),
+                     str(r.get('titre') or '').strip())
+                )
+                _r9 = bool(chk.fetchone())
+                chk.close()
+            except Exception:
+                _r9 = False  # ne pas bloquer si la vérification échoue
+            if _r9:
+                _ignores.append({
+                    'id': r['id'],
+                    'raison': 'couple rejeté dans Manquants (R9) — utiliser « ✎ Corriger »'
+                })
+                continue
+
+            _sql = ("UPDATE %s SET statut = 'nouveau', match_song_id = NULL, "
+                    "match_passe = NULL" % table_sql)
+            _params = []
+            if _has_comm:
+                _sql += ", commentaire = CONCAT(IFNULL(commentaire, ''), %s)"
+                _params.append(' | remis en Nouveau (22-A) le ' + _horodatage)
+            _sql += " WHERE id = %s"
+            _params.append(r['id'])
+            cur.execute(_sql, tuple(_params))
+            _nb += cur.rowcount
+            _journal.append({
+                'type_operation': 'remise_nouveau', 'table_source': table,
+                'row_id': r['id'], 'artiste': r.get('artiste'), 'titre': r.get('titre'),
+                'details': ('match_song_id=#%s vidé — remise MANUELLE en Nouveau '
+                            '(réversible)' % (r.get('match_song_id') or '?'))
+            })
+
+        db.commit()
+        cur.close()
+        if _journal:
+            _journaliser(db, _journal)
+        db.close()
+
+        _logger.info(f"[22-A] Remise en Nouveau manuelle : {_nb} ligne(s) "
+                     f"({table_sql}), {len(_ignores)} ignorée(s)")
+        return jsonify({"ok": True, "remis": _nb, "ignores": _ignores})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 22-A : journal des opérations (pour mémoire) ──
+@shazam_bp.route('/api/shazam/journal')
+@login_requis
+def api_shazam_journal():
+    """Journal des opérations (pour mémoire).
+
+    Params GET :
+      ?days=N    fenêtre en jours (défaut 90, plafonnée à JOURNAL_RETENTION_JOURS)
+      ?type=...  filtre type_operation (synchro|suppression|remise_nouveau|match_perdu)
+      ?table=... filtre table_source (shazam|animateurs)
+      ?limit=N   nombre de lignes (défaut 200, max 500)
+
+    Retourne {rows, retention_days, total}.
+    """
+    try:
+        try:
+            days = min(max(int(request.args.get('days') or 90), 1), JOURNAL_RETENTION_JOURS)
+        except (TypeError, ValueError):
+            days = 90
+        try:
+            limit = min(max(int(request.args.get('limit') or 200), 1), 500)
+        except (TypeError, ValueError):
+            limit = 200
+        type_f = (request.args.get('type') or '').strip().lower()
+        table_f = (request.args.get('table') or '').strip().lower()
+
+        db = get_db_connection()
+        if not db:
+            return jsonify({"error": "DB indisponible"}), 500
+
+        if not _table_existe(db, 'airvs_shazam_journal'):
+            db.close()
+            return jsonify({"rows": [], "retention_days": JOURNAL_RETENTION_JOURS,
+                            "total": 0})
+
+        _where = ["date_operation >= NOW() - INTERVAL %d DAY" % days]
+        _params = []
+        if type_f:
+            _where.append("type_operation = %s")
+            _params.append(type_f)
+        if table_f in ('shazam', 'animateurs'):
+            _where.append("table_source = %s")
+            _params.append(table_f)
+
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            "SELECT id, date_operation, type_operation, table_source, row_id, "
+            "artiste, titre, details FROM airvs_shazam_journal "
+            f"WHERE {' AND '.join(_where)} "
+            "ORDER BY date_operation DESC, id DESC LIMIT %s",
+            tuple(_params + [limit])
+        )
+        rows = cursor.fetchall()
+        cursor.execute(
+            "SELECT COUNT(*) AS c FROM airvs_shazam_journal WHERE " + " AND ".join(_where),
+            tuple(_params)
+        )
+        total = list(cursor.fetchone().values())[0]
+        cursor.close()
+        db.close()
+
+        for r in rows:
+            if isinstance(r.get('date_operation'), datetime):
+                r['date_operation'] = r['date_operation'].strftime('%d/%m/%Y %H:%M:%S')
+
+        return jsonify({"rows": rows, "retention_days": JOURNAL_RETENTION_JOURS,
+                        "total": total})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ══════════════════════════════════════════
@@ -1345,6 +1790,18 @@ def api_shazam_prefill():
         mode = (request.args.get('mode') or '').strip().lower()
         animateur_filter = (request.args.get('animateur') or '').strip()
 
+        # ── 22-A : présélection OBLIGATOIRE (ids) ──
+        # La synchro ne part plus sur tout le stock : seules les lignes
+        # cochées côté front sont traitées. Sans ids → 400 ; au-delà de
+        # LIMITE_BATCH_RUN (500) → 400 (garde-fou).
+        # Les ids sont explicites : filtres source/statut/animateur ignorés.
+        ids_param = (request.args.get('ids') or '').strip()
+        _ids, _err_ids = _verifier_limite_selection(
+            [v for v in ids_param.split(',') if v.strip()] if ids_param else []
+        )
+        if _err_ids:
+            return jsonify({"error": _err_ids}), 400
+
         # Construction dynamique de la requête selon le mode
         # Phase 2 : mode=web lit airvs_animateurs (soumissions VPS),
         # les autres modes continuent de lire airvs_shazam (reconnaissances MacroDroid).
@@ -1362,7 +1819,21 @@ def api_shazam_prefill():
         except Exception:
             _has_statut = False
         _cols_statut = ", statut, match_song_id, match_passe" if _has_statut else ""
-        if mode == 'web':
+        if _ids:
+            # 22-A : présélection explicite — la table est choisie par le
+            # mode, les filtres source/statut/animateur sont court-circuités
+            _ph_ids = ",".join(["%s"] * len(_ids))
+            if mode == 'web':
+                base_query = ("SELECT id, artiste, titre, "
+                              "date_soumission AS date_reconnaissance, "
+                              "source, animateur" + _cols_statut +
+                              " FROM airvs_animateurs WHERE id IN (%s)" % _ph_ids)
+            else:
+                base_query = ("SELECT id, artiste, titre, date_reconnaissance, "
+                              "source, animateur" + _cols_statut +
+                              " FROM airvs_shazam WHERE id IN (%s)" % _ph_ids)
+            params = tuple(_ids)
+        elif mode == 'web':
             base_query = ("SELECT id, artiste, titre, "
                           "date_soumission AS date_reconnaissance, "
                           "source, animateur" + _cols_statut +
@@ -1387,8 +1858,9 @@ def api_shazam_prefill():
         # vers AzuraCast (régression apparue avec la v2.3 : une fois
         # l'écriture des statuts réparée, les matchés sortaient du filtre).
         # Le paramètre ?statut= reste prioritaire (ex: statut=nouveau).
+        # 22-A : sans objet en mode ids (sélection explicite) — ignoré.
         statut_filter = (request.args.get('statut') or 'nouveau,matche').strip()
-        if statut_filter != 'tous':
+        if statut_filter != 'tous' and not _ids:
             _statuts_valides = [s.strip() for s in statut_filter.split(',') if s.strip()]
             if _statuts_valides and _has_statut:
                 _statut_clause = ",".join(["%s"] * len(_statuts_valides))
@@ -1399,7 +1871,8 @@ def api_shazam_prefill():
                 params = params + tuple(_statuts_valides)
 
         # Filtre optionnel par animateur
-        if animateur_filter:
+        # 22-A : sans objet en mode ids (sélection explicite) — ignoré.
+        if animateur_filter and not _ids:
             if 'WHERE' in base_query:
                 base_query += " AND animateur = %s"
             else:
@@ -1422,6 +1895,8 @@ def api_shazam_prefill():
         not_found = []
         matched_ids = []  # R3 : IDs à mettre à jour après matching
         not_found_ids = []  # P1 : IDs des non-trouvés (marquage match_passe='non_trouve')
+        matchs_perdus = []    # 22-A : lignes 'matché' requalifiées (match perdu → nouveau/rejeté)
+        _journal_entries = []  # 22-A : entrées du journal des opérations (pour mémoire)
 
         # ── v2.5 — partition nouveau / déjà-matché ──────────────────
         # Les lignes déjà 'matche' avec un match_song_id ne repassent PAS
@@ -1436,6 +1911,13 @@ def api_shazam_prefill():
                 rows_deja.append(sr)
             else:
                 rows_engine.append(sr)
+
+        # ── 22-A : état transitions/journal (noms identiques dans prefill
+        # et pipeline — les blocs partagés plus bas y font référence) ──
+        _tbl_src_22a = _src_table
+        _journal_tbl_22a = 'animateurs' if mode == 'web' else 'shazam'
+        _has_comm_22a = _colonne_existe(db, _src_table, 'commentaire')
+        _horodatage_22a = datetime.now().strftime('%Y-%m-%d %H:%M')
 
         _nb_deja_reintegres = 0
         _ids_pousse_azura_prefill = []
@@ -1457,6 +1939,35 @@ def api_shazam_prefill():
                     _rejected = bool(chk_rd.fetchone())
                     chk_rd.close()
                     if _rejected:
+                        if sr.get('_rematch_apres_perdu'):
+                            # 22-A : ligne matchée dont le morceau a disparu
+                            # ET couple rejeté en manquants (R9) → alignement
+                            # définitif 'rejete' (on ferme la boucle au lieu
+                            # de la rouvrir)
+                            try:
+                                cur_al = db.cursor()
+                                cur_al.execute(
+                                    "UPDATE %s SET statut = 'rejete', match_passe = NULL "
+                                    "WHERE id = %%s" % _tbl_src_22a,
+                                    (sr['id'],)
+                                )
+                                db.commit()
+                                cur_al.close()
+                                matchs_perdus.append({
+                                    'id': sr['id'], 'artiste': sr.get('artiste'),
+                                    'titre': sr.get('titre'),
+                                    'nouveau_statut': 'rejete', 'match_passe': None
+                                })
+                                _journal_entries.append({
+                                    'type_operation': 'match_perdu',
+                                    'table_source': _journal_tbl_22a,
+                                    'row_id': sr['id'],
+                                    'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                                    'details': 'morceau #%s disparu + couple rejeté en manquants (R9) → aligné Rejeté'
+                                               % (sr.get('match_song_id') or '?')
+                                })
+                            except Exception as _al_e:
+                                _logger.warning(f"22-A alignement R9 ignoré : {_al_e}")
                         continue
                 except Exception:
                     pass
@@ -1464,6 +1975,9 @@ def api_shazam_prefill():
                 if not _song:
                     # morceau disparu de RadioDJ : retente le moteur
                     # (une nouvelle version a pu être importée entre-temps)
+                    # 22-A : flag de re-match — si le moteur échoue à son
+                    # tour, la ligne subira la transition « matché → nouveau »
+                    sr['_rematch_apres_perdu'] = True
                     rows_engine.append(sr)
                     continue
                 if is_in_azuracast(_song.get('comments')):
@@ -1471,6 +1985,15 @@ def api_shazam_prefill():
                     # la ligne source 'pousse_azura' et on la retire du flux
                     # (elle ne doit plus remonter dans le push)
                     _ids_pousse_azura_prefill.append(sr['id'])
+                    # 22-A : journal de la qualification (pour mémoire)
+                    _journal_entries.append({
+                        'type_operation': 'synchro',
+                        'table_source': _journal_tbl_22a,
+                        'row_id': sr['id'],
+                        'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                        'details': 'morceau #%s déjà IN_AZURACAST → qualifié Diffusé (pousse_azura)'
+                                   % (sr.get('match_song_id') or '?')
+                    })
                     continue
                 _song['in_shazam'] = True
                 _song['_shazam_id'] = sr['id']
@@ -1483,6 +2006,15 @@ def api_shazam_prefill():
                 _song['_deja_matche'] = True
                 found.append(_song)
                 _nb_deja_reintegres += 1
+                # 22-A : journal de la réintégration (pour mémoire)
+                _journal_entries.append({
+                    'type_operation': 'synchro',
+                    'table_source': _journal_tbl_22a,
+                    'row_id': sr['id'],
+                    'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                    'details': 'réintégré au push (déjà matché) → song #%s'
+                               % (_song.get('ID') or '?')
+                })
             cursor_d.close()
             if _ids_pousse_azura_prefill and _has_statut:
                 _qualifier_pousse_azura(db, _ids_pousse_azura_prefill, _src_table)
@@ -1535,6 +2067,33 @@ def api_shazam_prefill():
                 )
                 if chk_r.fetchone():
                     chk_r.close()
+                    if sr.get('_rematch_apres_perdu'):
+                        # 22-A : alignement R9 (cf. bloc rows_deja) — le
+                        # couple rejeté ne doit pas rester 'matché' à l'infini
+                        try:
+                            cur_al = db.cursor()
+                            cur_al.execute(
+                                "UPDATE %s SET statut = 'rejete', match_passe = NULL "
+                                "WHERE id = %%s" % _tbl_src_22a,
+                                (sr['id'],)
+                            )
+                            db.commit()
+                            cur_al.close()
+                            matchs_perdus.append({
+                                'id': sr['id'], 'artiste': sr.get('artiste'),
+                                'titre': sr.get('titre'),
+                                'nouveau_statut': 'rejete', 'match_passe': None
+                            })
+                            _journal_entries.append({
+                                'type_operation': 'match_perdu',
+                                'table_source': _journal_tbl_22a,
+                                'row_id': sr['id'],
+                                'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                                'details': 'morceau #%s disparu + couple rejeté en manquants (R9) → aligné Rejeté'
+                                           % (sr.get('match_song_id') or '?')
+                            })
+                        except Exception as _al_e:
+                            _logger.warning(f"22-A alignement R9 ignoré : {_al_e}")
                     continue  # Déjà rejeté, skip
                 chk_r.close()
             except Exception:
@@ -1556,6 +2115,14 @@ def api_shazam_prefill():
                 found.append(match)
                 # R3 : mémoriser pour persister après la boucle
                 matched_ids.append((sr['id'], match['ID'], methode))
+                # 22-A : journal du matching (pour mémoire)
+                _journal_entries.append({
+                    'type_operation': 'synchro',
+                    'table_source': _journal_tbl_22a,
+                    'row_id': sr['id'],
+                    'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                    'details': 'match song #%s via %s' % (match['ID'], methode)
+                })
             else:
                 not_found_ids.append(sr['id'])  # P1
                 not_found.append({
@@ -1567,6 +2134,55 @@ def api_shazam_prefill():
                     '_match_methode': '',
                     'display': (sr['artiste'] or '') + ' — ' + (sr['titre'] or '')
                 })
+                if sr.get('_rematch_apres_perdu'):
+                    # ── 22-A : transition automatique « matché → nouveau » ──
+                    # Le morceau lié a disparu de RadioDJ ET le re-match ne
+                    # retrouve rien : la ligne repasse en 'nouveau' (vivier
+                    # des candidats) au lieu de rester 'matché' avec un ID
+                    # mort (boucle futile v2.5). Fidèle au principe validé :
+                    # match_passe='non_trouve' (la colonne Match affichera ✗).
+                    _old_song_22a = sr.get('match_song_id')
+                    try:
+                        cur_t = db.cursor()
+                        _sql_t = ("UPDATE %s SET statut = 'nouveau', "
+                                  "match_song_id = NULL, match_passe = 'non_trouve'"
+                                  % _tbl_src_22a)
+                        _params_t = []
+                        if _has_comm_22a:
+                            _sql_t += ", commentaire = CONCAT(IFNULL(commentaire, ''), %s)"
+                            _params_t.append(' | match perdu (22-A) le '
+                                             + _horodatage_22a + ' : morceau #'
+                                             + str(_old_song_22a or '?')
+                                             + ' disparu de RadioDJ, remis en Nouveau')
+                        _sql_t += " WHERE id = %s"
+                        _params_t.append(sr['id'])
+                        cur_t.execute(_sql_t, tuple(_params_t))
+                        db.commit()
+                        cur_t.close()
+                        matchs_perdus.append({
+                            'id': sr['id'], 'artiste': sr.get('artiste'),
+                            'titre': sr.get('titre'),
+                            'nouveau_statut': 'nouveau', 'match_passe': 'non_trouve'
+                        })
+                        _journal_entries.append({
+                            'type_operation': 'match_perdu',
+                            'table_source': _journal_tbl_22a,
+                            'row_id': sr['id'],
+                            'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                            'details': 'morceau #%s disparu de RadioDJ + re-match sans résultat → remis en Nouveau (auto)'
+                                       % (_old_song_22a or '?')
+                        })
+                    except Exception as _t_e:
+                        _logger.warning(f"22-A transition match perdu ignorée : {_t_e}")
+                else:
+                    # 22-A : journal du non-trouvé « nouveau » (pour mémoire)
+                    _journal_entries.append({
+                        'type_operation': 'synchro',
+                        'table_source': _journal_tbl_22a,
+                        'row_id': sr['id'],
+                        'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                        'details': 'non trouvé dans RadioDJ (non_trouve)'
+                    })
 
         cursor.close()
 
@@ -1603,6 +2219,10 @@ def api_shazam_prefill():
                 cur_nf.close()
             except Exception as e:
                 _logger.warning(f"P1 : persister non-trouvés ignoré : {e}")
+
+        # ── 22-A : journal des opérations (pour mémoire) ──
+        # Un seul appel : N entrées + purge opportuniste (rétention 365 j).
+        _nb_journal_22a = _journaliser(db, _journal_entries)
 
         db.close()
 
@@ -1642,6 +2262,11 @@ def api_shazam_prefill():
             result['manquants_persistes'] = _nb_manq
         if _nb_persisted:
             result['matchs_persistes'] = _nb_persisted
+        # 22-A : transparence sur les transitions et le journal
+        if matchs_perdus:
+            result['matchs_perdus'] = matchs_perdus
+        if _nb_journal_22a:
+            result['journalises'] = _nb_journal_22a
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1727,8 +2352,17 @@ def api_shazam_pipeline_trigger():
             return jsonify({'status': 'error', 'message': 'DB indisponible'}), 500
 
         # Filtrage par mode (si fourni dans le POST body)
-        pipeline_mode = (request.get_json(silent=True) or {}).get('mode', '')
-        pipeline_animateur = (request.get_json(silent=True) or {}).get('animateur', '')
+        _req_body_22a = request.get_json(silent=True) or {}
+        pipeline_mode = _req_body_22a.get('mode', '')
+        pipeline_animateur = _req_body_22a.get('animateur', '')
+
+        # ── 22-A : présélection OBLIGATOIRE (ids) ──
+        # Même règle que le prefill : seules les lignes cochées sont
+        # traitées. Sans ids → 400 ; au-delà de LIMITE_BATCH_RUN → 400.
+        _ids_pipe, _err_ids_pipe = _verifier_limite_selection(_req_body_22a.get('ids') or [])
+        if _err_ids_pipe:
+            logs.append(f'❌ {_err_ids_pipe}')
+            return jsonify({'status': 'error', 'message': _err_ids_pipe, 'logs': logs}), 400
         # v2.5 — défaut 'nouveau,matche' (était 'nouveau') : le pipeline
         # alimente aussi le push preview du Pont via _onAnimateursMatchResult
         # → les lignes déjà « Matché » doivent remonter elles aussi.
@@ -1745,27 +2379,43 @@ def api_shazam_pipeline_trigger():
         except Exception:
             _has_statut_pipe = False
         _cols_statut_pipe = ", statut, match_song_id, match_passe" if _has_statut_pipe else ""
-        if pipeline_mode == 'web':
-            base_query = ("SELECT id, artiste, titre, "
-                          "date_soumission AS date_reconnaissance, "
-                          "source, animateur" + _cols_statut_pipe +
-                          " FROM airvs_animateurs")
-            params = ()
+        if _ids_pipe:
+            # 22-A : présélection explicite — la table est choisie par le
+            # mode, les filtres source/statut/animateur sont court-circuités
+            _ph_ids = ",".join(["%s"] * len(_ids_pipe))
+            if pipeline_mode == 'web':
+                base_query = ("SELECT id, artiste, titre, "
+                              "date_soumission AS date_reconnaissance, "
+                              "source, animateur" + _cols_statut_pipe +
+                              " FROM airvs_animateurs WHERE id IN (%s)" % _ph_ids)
+            else:
+                base_query = ("SELECT id, artiste, titre, date_reconnaissance, "
+                              "source, animateur" + _cols_statut_pipe +
+                              " FROM airvs_shazam WHERE id IN (%s)" % _ph_ids)
+            params = tuple(_ids_pipe)
         else:
-            base_query = ("SELECT id, artiste, titre, date_reconnaissance, "
-                          "source, animateur" + _cols_statut_pipe +
-                          " FROM airvs_shazam")
-            params = ()
+            if pipeline_mode == 'web':
+                base_query = ("SELECT id, artiste, titre, "
+                              "date_soumission AS date_reconnaissance, "
+                              "source, animateur" + _cols_statut_pipe +
+                              " FROM airvs_animateurs")
+                params = ()
+            else:
+                base_query = ("SELECT id, artiste, titre, date_reconnaissance, "
+                              "source, animateur" + _cols_statut_pipe +
+                              " FROM airvs_shazam")
+                params = ()
 
-        if pipeline_mode == 'shazam':
-            base_query += " WHERE (source IS NULL OR source = 'macrodroid' OR source LIKE '%%shazam%%') AND (source IS NULL OR source NOT LIKE '%%formulaire%%') AND (source IS NULL OR source NOT LIKE '%%animateur%%') AND (source IS NULL OR source NOT LIKE '%%programmeur%%')"
-        elif pipeline_mode == 'shazam_studio':
-            base_query += " WHERE source = 'shazam_studio' OR source IS NULL"
-        elif pipeline_mode == 'shazam_ext':
-            base_query += " WHERE source LIKE '%%externe%%'"
+            if pipeline_mode == 'shazam':
+                base_query += " WHERE (source IS NULL OR source = 'macrodroid' OR source LIKE '%%shazam%%') AND (source IS NULL OR source NOT LIKE '%%formulaire%%') AND (source IS NULL OR source NOT LIKE '%%animateur%%') AND (source IS NULL OR source NOT LIKE '%%programmeur%%')"
+            elif pipeline_mode == 'shazam_studio':
+                base_query += " WHERE source = 'shazam_studio' OR source IS NULL"
+            elif pipeline_mode == 'shazam_ext':
+                base_query += " WHERE source LIKE '%%externe%%'"
 
         # ── R5 : Filtre statut dans pipeline ──
-        if pipeline_statut and pipeline_statut != 'tous':
+        # 22-A : sans objet en mode ids (sélection explicite) — ignoré.
+        if pipeline_statut and pipeline_statut != 'tous' and not _ids_pipe:
             _statuts_p = [s.strip() for s in pipeline_statut.split(',') if s.strip()]
             if _statuts_p and _has_statut_pipe:
                 _sc = ",".join(["%s"] * len(_statuts_p))
@@ -1775,7 +2425,8 @@ def api_shazam_pipeline_trigger():
                     base_query += f" WHERE statut IN ({_sc})"
                 params = params + tuple(_statuts_p)
 
-        if pipeline_animateur:
+        # 22-A : sans objet en mode ids (sélection explicite) — ignoré.
+        if pipeline_animateur and not _ids_pipe:
             if 'WHERE' in base_query:
                 base_query += " AND animateur = %s"
             else:
@@ -1805,6 +2456,8 @@ def api_shazam_pipeline_trigger():
         not_found = []
         matched_ids = []  # R3 : IDs à mettre à jour après matching
         not_found_ids = []  # P1 : IDs des non-trouvés (marquage match_passe='non_trouve')
+        matchs_perdus = []    # 22-A : lignes 'matché' requalifiées (match perdu → nouveau/rejeté)
+        _journal_entries = []  # 22-A : entrées du journal des opérations (pour mémoire)
 
         # ── v2.5 — partition nouveau / déjà-matché (identique au prefill) ──
         rows_engine = []
@@ -1814,6 +2467,13 @@ def api_shazam_pipeline_trigger():
                 rows_deja.append(sr)
             else:
                 rows_engine.append(sr)
+
+        # ── 22-A : état transitions/journal (noms identiques dans prefill
+        # et pipeline — les blocs partagés plus bas y font référence) ──
+        _tbl_src_22a = _pipe_src_table
+        _journal_tbl_22a = 'animateurs' if pipeline_mode == 'web' else 'shazam'
+        _has_comm_22a = _colonne_existe(db, _pipe_src_table, 'commentaire')
+        _horodatage_22a = datetime.now().strftime('%Y-%m-%d %H:%M')
 
         _nb_deja_reintegres_pipe = 0
         _ids_pousse_azura_pipe = []
@@ -1833,15 +2493,56 @@ def api_shazam_pipeline_trigger():
                     _rejected = bool(chk_rd.fetchone())
                     chk_rd.close()
                     if _rejected:
+                        if sr.get('_rematch_apres_perdu'):
+                            # 22-A : ligne matchée dont le morceau a disparu
+                            # ET couple rejeté en manquants (R9) → alignement
+                            # définitif 'rejete' (on ferme la boucle au lieu
+                            # de la rouvrir)
+                            try:
+                                cur_al = db.cursor()
+                                cur_al.execute(
+                                    "UPDATE %s SET statut = 'rejete', match_passe = NULL "
+                                    "WHERE id = %%s" % _tbl_src_22a,
+                                    (sr['id'],)
+                                )
+                                db.commit()
+                                cur_al.close()
+                                matchs_perdus.append({
+                                    'id': sr['id'], 'artiste': sr.get('artiste'),
+                                    'titre': sr.get('titre'),
+                                    'nouveau_statut': 'rejete', 'match_passe': None
+                                })
+                                _journal_entries.append({
+                                    'type_operation': 'match_perdu',
+                                    'table_source': _journal_tbl_22a,
+                                    'row_id': sr['id'],
+                                    'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                                    'details': 'morceau #%s disparu + couple rejeté en manquants (R9) → aligné Rejeté'
+                                               % (sr.get('match_song_id') or '?')
+                                })
+                            except Exception as _al_e:
+                                _logger.warning(f"22-A alignement R9 ignoré : {_al_e}")
                         continue
                 except Exception:
                     pass
                 _song = _resoudre_song_par_id(cursor_d, sr.get('match_song_id'))
                 if not _song:
+                    # 22-A : flag de re-match — si le moteur échoue à son
+                    # tour, la ligne subira la transition « matché → nouveau »
+                    sr['_rematch_apres_perdu'] = True
                     rows_engine.append(sr)
                     continue
                 if is_in_azuracast(_song.get('comments')):
                     _ids_pousse_azura_pipe.append(sr['id'])
+                    # 22-A : journal de la qualification (pour mémoire)
+                    _journal_entries.append({
+                        'type_operation': 'synchro',
+                        'table_source': _journal_tbl_22a,
+                        'row_id': sr['id'],
+                        'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                        'details': 'morceau #%s déjà IN_AZURACAST → qualifié Diffusé (pousse_azura)'
+                                   % (sr.get('match_song_id') or '?')
+                    })
                     continue
                 _song['in_shazam'] = True
                 _song['_shazam_id'] = sr['id']
@@ -1854,6 +2555,15 @@ def api_shazam_pipeline_trigger():
                 _song['_deja_matche'] = True
                 found.append(_song)
                 _nb_deja_reintegres_pipe += 1
+                # 22-A : journal de la réintégration (pour mémoire)
+                _journal_entries.append({
+                    'type_operation': 'synchro',
+                    'table_source': _journal_tbl_22a,
+                    'row_id': sr['id'],
+                    'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                    'details': 'réintégré au push (déjà matché) → song #%s'
+                               % (_song.get('ID') or '?')
+                })
             cursor_d.close()
             if _ids_pousse_azura_pipe and _has_statut_pipe:
                 _nb_q = _qualifier_pousse_azura(db, _ids_pousse_azura_pipe, _pipe_src_table)
@@ -1912,6 +2622,33 @@ def api_shazam_pipeline_trigger():
                 )
                 if chk_r.fetchone():
                     chk_r.close()
+                    if sr.get('_rematch_apres_perdu'):
+                        # 22-A : alignement R9 (cf. bloc rows_deja) — le
+                        # couple rejeté ne doit pas rester 'matché' à l'infini
+                        try:
+                            cur_al = db.cursor()
+                            cur_al.execute(
+                                "UPDATE %s SET statut = 'rejete', match_passe = NULL "
+                                "WHERE id = %%s" % _tbl_src_22a,
+                                (sr['id'],)
+                            )
+                            db.commit()
+                            cur_al.close()
+                            matchs_perdus.append({
+                                'id': sr['id'], 'artiste': sr.get('artiste'),
+                                'titre': sr.get('titre'),
+                                'nouveau_statut': 'rejete', 'match_passe': None
+                            })
+                            _journal_entries.append({
+                                'type_operation': 'match_perdu',
+                                'table_source': _journal_tbl_22a,
+                                'row_id': sr['id'],
+                                'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                                'details': 'morceau #%s disparu + couple rejeté en manquants (R9) → aligné Rejeté'
+                                           % (sr.get('match_song_id') or '?')
+                            })
+                        except Exception as _al_e:
+                            _logger.warning(f"22-A alignement R9 ignoré : {_al_e}")
                     continue  # Déjà rejeté, skip
                 chk_r.close()
             except Exception:
@@ -1933,6 +2670,14 @@ def api_shazam_pipeline_trigger():
                 found.append(match)
                 # R3 : mémoriser pour persister après la boucle
                 matched_ids.append((sr['id'], match['ID'], methode))
+                # 22-A : journal du matching (pour mémoire)
+                _journal_entries.append({
+                    'type_operation': 'synchro',
+                    'table_source': _journal_tbl_22a,
+                    'row_id': sr['id'],
+                    'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                    'details': 'match song #%s via %s' % (match['ID'], methode)
+                })
             else:
                 not_found_ids.append(sr['id'])  # P1
                 not_found.append({
@@ -1944,6 +2689,55 @@ def api_shazam_pipeline_trigger():
                     '_match_methode': '',
                     'display': (sr['artiste'] or '') + ' — ' + (sr['titre'] or '')
                 })
+                if sr.get('_rematch_apres_perdu'):
+                    # ── 22-A : transition automatique « matché → nouveau » ──
+                    # Le morceau lié a disparu de RadioDJ ET le re-match ne
+                    # retrouve rien : la ligne repasse en 'nouveau' (vivier
+                    # des candidats) au lieu de rester 'matché' avec un ID
+                    # mort (boucle futile v2.5). Fidèle au principe validé :
+                    # match_passe='non_trouve' (la colonne Match affichera ✗).
+                    _old_song_22a = sr.get('match_song_id')
+                    try:
+                        cur_t = db.cursor()
+                        _sql_t = ("UPDATE %s SET statut = 'nouveau', "
+                                  "match_song_id = NULL, match_passe = 'non_trouve'"
+                                  % _tbl_src_22a)
+                        _params_t = []
+                        if _has_comm_22a:
+                            _sql_t += ", commentaire = CONCAT(IFNULL(commentaire, ''), %s)"
+                            _params_t.append(' | match perdu (22-A) le '
+                                             + _horodatage_22a + ' : morceau #'
+                                             + str(_old_song_22a or '?')
+                                             + ' disparu de RadioDJ, remis en Nouveau')
+                        _sql_t += " WHERE id = %s"
+                        _params_t.append(sr['id'])
+                        cur_t.execute(_sql_t, tuple(_params_t))
+                        db.commit()
+                        cur_t.close()
+                        matchs_perdus.append({
+                            'id': sr['id'], 'artiste': sr.get('artiste'),
+                            'titre': sr.get('titre'),
+                            'nouveau_statut': 'nouveau', 'match_passe': 'non_trouve'
+                        })
+                        _journal_entries.append({
+                            'type_operation': 'match_perdu',
+                            'table_source': _journal_tbl_22a,
+                            'row_id': sr['id'],
+                            'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                            'details': 'morceau #%s disparu de RadioDJ + re-match sans résultat → remis en Nouveau (auto)'
+                                       % (_old_song_22a or '?')
+                        })
+                    except Exception as _t_e:
+                        _logger.warning(f"22-A transition match perdu ignorée : {_t_e}")
+                else:
+                    # 22-A : journal du non-trouvé « nouveau » (pour mémoire)
+                    _journal_entries.append({
+                        'type_operation': 'synchro',
+                        'table_source': _journal_tbl_22a,
+                        'row_id': sr['id'],
+                        'artiste': sr.get('artiste'), 'titre': sr.get('titre'),
+                        'details': 'non trouvé dans RadioDJ (non_trouve)'
+                    })
 
         cursor.close()
 
@@ -1982,6 +2776,11 @@ def api_shazam_pipeline_trigger():
 
         if _nb_persisted_pipe:
             logs.append(f'  → {_nb_persisted_pipe} match(s) persisté(s) sur {_pipe_src_table}')
+
+        # ── 22-A : journal des opérations (pour mémoire) ──
+        _nb_journal_22a_pipe = _journaliser(db, _journal_entries)
+        if matchs_perdus:
+            logs.append(f'  → {len(matchs_perdus)} match(s) perdu(s) → transition « matché → nouveau/rejeté »')
 
         db.close()
 
@@ -2064,7 +2863,9 @@ def api_shazam_pipeline_trigger():
             'found': found,
             'not_found': not_found,
             'total_shazam': len(shazam_rows),
-            'sheets_task_id': sheets_task_id
+            'sheets_task_id': sheets_task_id,
+            'matchs_perdus': matchs_perdus,
+            'journalises': _nb_journal_22a_pipe
         })
     except Exception as e:
         logs.append(f'❌ Erreur : {e}')
