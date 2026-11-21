@@ -471,6 +471,104 @@ class AzuraCastAPI:
         return self._handle_response(response, f"Supprimer le média {media_id}")
 
     # ═══════════════════════════════════════════════
+    # ASSOCIATION MÉDIA ↔ PLAYLISTS (Rotation éditoriale — Phase 1)
+    # ═══════════════════════════════════════════════
+    # Hotfix 2026.11.20-A — méthode absente appelée par le worker
+    # (executer_azura_remove_from_playlist / executer_azura_remove_from_playlist_batch)
+    # → "AttributeError: 'AzuraCastAPI' object has no attribute
+    #    'remove_media_from_playlist'" sur les tâches AZURA_REMOVE_FROM_PLAYLIST.
+    # Implémentation conforme à ETUDE_API_AZURACAST_RETOUR.md §1.3 / §2.1 :
+    # AzuraCast 0.24.0 n'a PAS d'endpoint dédié add/remove media ↔ playlist ;
+    # l'association passe par le champ `playlists` du média (PUT /file/{id}).
+
+    def remove_media_from_playlist(self, media_id, playlist_id):
+        """
+        Retire un média d'une playlist AzuraCast SANS supprimer le fichier.
+
+        Workflow :
+          1. GET  /station/{id}/file/{media_id} → liste courante des playlists
+          2. Filtrer playlist_id de la liste
+          3. PUT  /station/{id}/file/{media_id} avec { playlists: [...] }
+          4. Vérification post-écriture (re-GET) : si AzuraCast a ignoré le
+             PUT (playlist folder-based notamment) → AzuraCastAPIError
+
+        Args:
+            media_id: ID du média dans AzuraCast
+            playlist_id: ID de la playlist dont il faut retirer le média
+
+        Returns:
+            dict: {'status': 'no_change', 'message': ...} si le média est
+                  déjà absent de la playlist (contrat attendu par le worker) ;
+                  sinon {'status': 'ok', 'playlists_restantes': [...], ...}
+                  enrichi de la réponse du PUT.
+
+        Raises:
+            AzuraCastAPIError: échec HTTP, playlist_id invalide, ou PUT
+                               ignoré par AzuraCast (association toujours
+                               présente à la re-lecture).
+        """
+        try:
+            playlist_id = int(playlist_id)
+        except (TypeError, ValueError):
+            raise AzuraCastAPIError(
+                f"remove_media_from_playlist: playlist_id invalide "
+                f"({playlist_id!r})")
+
+        # 1. Liste courante des playlists du média.
+        #    Les entrées peuvent être des dicts (Api_StationMediaPlaylist,
+        #    ex: {'id': 465, 'name': '...', 'folder': None}) ou des entiers
+        #    (IDs seuls) selon la version de l'API — on accepte les deux.
+        media = self.get_media(media_id)
+        current = []
+        for p in (media.get('playlists') or []):
+            pid = p.get('id') if isinstance(p, dict) else p
+            try:
+                current.append(int(pid))
+            except (TypeError, ValueError):
+                continue
+
+        # 2. Déjà absent de la playlist → no_change
+        if playlist_id not in current:
+            return {
+                'status': 'no_change',
+                'message': (f"Média {media_id} déjà absent de la playlist "
+                            f"{playlist_id} (playlists courantes: "
+                            f"{current if current else 'aucune'})"),
+            }
+
+        new_playlists = [pid for pid in current if pid != playlist_id]
+
+        # 3. PUT avec la liste sans l'ID cible
+        put_result = self.update_media(media_id, playlists=new_playlists)
+
+        # 4. Vérification post-écriture : re-lecture réelle côté AzuraCast.
+        #    Si l'association est toujours présente, le PUT a été ignoré
+        #    (cas playlist folder-based : l'association vient du dossier,
+        #    il faut déplacer le fichier hors du dossier pour la rompre).
+        media_apres = self.get_media(media_id)
+        apres = []
+        for p in (media_apres.get('playlists') or []):
+            pid = p.get('id') if isinstance(p, dict) else p
+            try:
+                apres.append(int(pid))
+            except (TypeError, ValueError):
+                continue
+
+        if playlist_id in apres:
+            raise AzuraCastAPIError(
+                f"Retrait ignoré par AzuraCast : média {media_id} toujours "
+                f"dans la playlist {playlist_id} après PUT. "
+                f"Playlist folder-based probable. "
+                f"(playlists restantes: {apres if apres else 'aucune'})")
+
+        result = {}
+        if isinstance(put_result, dict):
+            result.update(put_result)
+        result['status'] = 'ok'
+        result['playlists_restantes'] = apres
+        return result
+
+    # ═══════════════════════════════════════════════
     # OPÉRATIONS COMPOSITES (HAUT NIVEAU)
     # ═══════════════════════════════════════════════
 
