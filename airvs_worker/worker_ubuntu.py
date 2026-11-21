@@ -198,6 +198,25 @@ AZURA_API_KEY = "5e256834da4da4cf:1cadd3936115612949a795cd5a48e12d"
 _DEFAULT_STATION_ID = 7
 
 PURGE_RETENTION_JOURS = 14  # Valeur par défaut (surchargée par airvs_maintenance_config)
+
+
+def _resoudre_station_id_tache(tache_id, parametres, contexte):
+    """Hotfix 2026.11.21-C — résolution explicite et VERBEUSE de la station d'une tâche.
+
+    La station doit être fournie par le dashboard (choix utilisateur volontaire).
+    Si elle est absente/invalide, on retombe sur _DEFAULT_STATION_ID mais de façon
+    TRACÉE : le fallback silencieux qui masquait les non-propagations de station
+    (incident média 13650 du 20/11) est supprimé.
+    """
+    raw = parametres.get('station_id')
+    if raw is None or raw == '':
+        logger(tache_id, f"[ATTENTION] station_id absent des paramètres — fallback station {_DEFAULT_STATION_ID} utilisé ({contexte})")
+        return _DEFAULT_STATION_ID
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        logger(tache_id, f"[ATTENTION] station_id invalide ({raw!r}) — fallback station {_DEFAULT_STATION_ID} utilisé ({contexte})")
+        return _DEFAULT_STATION_ID
 INTERVALLE_PURGE_TERMINEES = 6 * 3600  # Purge auto des tâches terminées toutes les 6h
 
 # ── Colonnes optionnelles de la table songs (RadioDJ) ──
@@ -1902,7 +1921,7 @@ def executer_azura_remove_from_playlist(tache_id, parametres):
     """
     media_id = parametres.get('media_id')
     playlist_id = parametres.get('playlist_id')
-    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_azura_remove_from_playlist')  # Hotfix 2026.11.21-C
     song_id_radiodj = parametres.get('song_id_radiodj')
 
     if not playlist_id:
@@ -2164,7 +2183,7 @@ def executer_azura_delete_media(tache_id, parametres):
     3. Mettre à jour le flag RadioDJ → AZURA_REMOVED_S{station_id}
     """
     song_id_radiodj = parametres.get('song_id_radiodj')
-    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_azura_delete_media')  # Hotfix 2026.11.21-C
 
     if not song_id_radiodj:
         logger(tache_id, "ERREUR: song_id_radiodj obligatoire.")
@@ -2308,7 +2327,7 @@ def executer_azura_delete_media_batch(tache_id, parametres):
     RadioDJ n'est PAS affecté — les fichiers sources restent intacts.
     """
     song_ids = parametres.get('song_ids')
-    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_azura_delete_media_batch')  # Hotfix 2026.11.21-C
 
     if not isinstance(song_ids, list) or not song_ids:
         logger(tache_id, "ERREUR: song_ids (liste non vide) obligatoire.")
@@ -2487,7 +2506,7 @@ def executer_get_media_playlists(tache_id, parametres):
     __RESULT__ pour être parsé par le dashboard.
     """
     song_id_radiodj = parametres.get('song_id_radiodj')
-    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_get_media_playlists')  # Hotfix 2026.11.21-C
 
     if not song_id_radiodj:
         logger(tache_id, "ERREUR: song_id_radiodj obligatoire.")
@@ -2665,7 +2684,7 @@ def executer_get_batch_media_playlists(tache_id, parametres):
     Optimisation : 1 seul appel api.list_media_all() pour tous les titres.
     """
     song_ids = parametres.get('song_ids', [])
-    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_get_batch_media_playlists')  # Hotfix 2026.11.21-C
 
     if not song_ids:
         logger(tache_id, "ERREUR: song_ids obligatoire.")
@@ -2833,7 +2852,7 @@ def executer_azura_remove_from_playlist_batch(tache_id, parametres):
     """
     song_ids = parametres.get('song_ids') or []
     playlist_id = parametres.get('playlist_id')
-    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_azura_remove_from_playlist_batch')  # Hotfix 2026.11.21-C
 
     # ── Validation des paramètres ──
     if not playlist_id:
@@ -3207,8 +3226,9 @@ def executer_copie(tache_id, parametres):
     fichiers = parametres.get('fichiers', [])
     dossier_nom = parametres.get('dossier_nom', '')
     ajouter_sous_dossier_date = parametres.get('ajouter_sous_dossier_date', True)
-    # station_id (multi-station). Fallback sur station 7 pour les tâches anciennes.
-    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    # station_id (multi-station). Hotfix 2026.11.21-C : fallback VERBEUX
+    # (voir _resoudre_station_id_tache) au lieu du défaut silencieux.
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_copie')
     try:
         station_id = int(station_id)
     except (ValueError, TypeError):
@@ -3415,6 +3435,7 @@ def _assurer_cache_playlists_schema(default_station_id=None):
                             existantes lors de la migration (NULL → _DEFAULT_STATION_ID).
     """
     if default_station_id is None:
+        print(f"[ATTENTION] _assurer_cache_playlists_schema : default_station_id absent — fallback station {_DEFAULT_STATION_ID} utilisé (migration)")  # Hotfix 2026.11.21-C
         default_station_id = _DEFAULT_STATION_ID
     try:
         db = pymysql.connect(**DB_CONFIG)
@@ -4668,8 +4689,9 @@ def executer_creer_playlist_azura(tache_id, parametres):
     Parametres (depuis taches_planifiees.parametres, JSON) :
       - station_id: ID de la station cible (ex: 6 ou 7). Fallback 7 si absent.
     """
-    # station_id (multi-station). Fallback sur station 7 pour les tâches anciennes.
-    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    # station_id (multi-station). Hotfix 2026.11.21-C : fallback VERBEUX
+    # (voir _resoudre_station_id_tache) au lieu du défaut silencieux.
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_creer_playlist_azura')
     try:
         station_id = int(station_id)
     except (ValueError, TypeError):
@@ -4962,8 +4984,9 @@ def executer_import_m3u_playlist(tache_id, parametres):
     Parametres :
       - station_id: ID de la station cible (ex: 6 ou 7). Fallback 7 si absent.
     """
-    # station_id (multi-station). Fallback sur station 7 pour les tâches anciennes.
-    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    # station_id (multi-station). Hotfix 2026.11.21-C : fallback VERBEUX
+    # (voir _resoudre_station_id_tache) au lieu du défaut silencieux.
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_import_m3u_playlist')
     try:
         station_id = int(station_id)
     except (ValueError, TypeError):
@@ -5203,7 +5226,7 @@ def executer_import_m3u_retry(tache_id, parametres):
     encore non résolus après ce retry, on logge en warning sans créer de
     retry supplémentaire (limite à 1 retry pour éviter une cascade).
     """
-    station_id = parametres.get('station_id', _DEFAULT_STATION_ID)
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_import_m3u_retry')  # Hotfix 2026.11.21-C
     try:
         station_id = int(station_id)
     except (ValueError, TypeError):
@@ -5327,6 +5350,7 @@ def executer_sync_playlists_cache(tache_id, parametres):
     if not station_ids:
         # Fallback ultime
         station_ids = [_DEFAULT_STATION_ID]
+        logger(tache_id, f"[ATTENTION] aucune station dans la configuration — fallback station {_DEFAULT_STATION_ID} utilisé (sync cache)")  # Hotfix 2026.11.21-C
 
     logger(tache_id, f"DÉBUT SYNCHRONISATION CACHE PLAYLISTS pour station(s) {station_ids}")
     print(f"[Tâche {tache_id}] SYNC_PLAYLISTS_CACHE : stations={station_ids}")
@@ -5978,6 +6002,7 @@ def executer_sync_azura_status(tache_id, parametres):
 
     if not station_ids:
         station_ids = [_DEFAULT_STATION_ID]
+        logger(tache_id, f"[ATTENTION] aucune station dans la configuration — fallback station {_DEFAULT_STATION_ID} utilisé (sync IN_AZURACAST)")  # Hotfix 2026.11.21-C
 
     logger(tache_id, f"Synchronisation IN_AZURACAST démarrée pour station(s) {station_ids} (badge global, Phase 19.2 — ACTIVE/RETIRED/PUSHED/REMOVED)")
 
@@ -8650,7 +8675,7 @@ def executer_rotation_preview(tache_id, parametres):
         logger(tache_id, "ERREUR: module rotation_azura.py indisponible.")
         logger(tache_id, "=== TERMINÉ === (module indisponible)")
         return
-    station_id = int(parametres.get('station_id', _DEFAULT_STATION_ID))
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_rotation_preview')  # Hotfix 2026.11.21-C
     params = parametres.get('params') or {}
     try:
         moteur = MoteurRotation(DB_CONFIG)
@@ -8712,7 +8737,7 @@ def executer_rotation_execute(tache_id, parametres):
         logger(tache_id, "ERREUR: module rotation_azura.py indisponible.")
         logger(tache_id, "=== TERMINÉ === (module indisponible)")
         return
-    station_id = int(parametres.get('station_id', _DEFAULT_STATION_ID))
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_rotation_execute')  # Hotfix 2026.11.21-C
     song_ids = parametres.get('song_ids') or []
     mode = str(parametres.get('mode', 'soft'))
     trigger_source = parametres.get('trigger_source') or 'dashboard'
