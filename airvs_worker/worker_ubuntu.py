@@ -2014,6 +2014,28 @@ def executer_azura_remove_from_playlist(tache_id, parametres):
 
     logger(tache_id, f"Média AzuraCast ID: {media_id}")
 
+    # ── Hotfix 2026.11.21-A : valider que la playlist appartient à la station ──
+    # L'API AzuraCast est permissive en lecture cross-station (GET /station/{s}/file/{id}
+    # renvoie un média même hors station) : un PUT cross-station est sans effet, et une
+    # playlist homonyme peut exister sur l'autre station. On refuse l'opération si la
+    # playlist ciblée n'appartient pas à la station demandée.
+    try:
+        _pl_station = api.list_playlists() or []
+        _ids_station = set()
+        for _pl in _pl_station:
+            try:
+                _ids_station.add(int(_pl.get('id')))
+            except (TypeError, ValueError):
+                continue
+        if _ids_station and int(playlist_id) not in _ids_station:
+            logger(tache_id, f"ERREUR: La playlist {playlist_id} n'appartient pas à la station {station_id}.")
+            logger(tache_id, f"Playlists connues de la station {station_id} : {sorted(_ids_station)}")
+            logger(tache_id, "Cause probable: média/playlist résolus sur une autre station (mismatch station sélectionnée).")
+            logger(tache_id, "=== TERMINÉ === (playlist hors station)")
+            return
+    except Exception as _e:
+        logger(tache_id, f"[ATTENTION] Validation station de la playlist impossible: {_e} — poursuite sans ce garde-fou.")
+
     try:
         # 0. Vérifier si la playlist à retirer est folder-based
         #    (AzuraCast ignore le PUT /file/{id} pour ce type de playlist)
@@ -2564,6 +2586,34 @@ def executer_get_media_playlists(tache_id, parametres):
                 }
                 playlists.append(playlist_info)
 
+        # ── Hotfix 2026.11.21-A : filtrer les playlists par la station demandée ──
+        # GET /station/{s}/file/{id} renvoie toutes les playlists du média, y compris
+        # celles d'une autre station (API permissive en lecture cross-station). Le
+        # dropdown du dashboard ne doit proposer que les playlists de la station
+        # sélectionnée, sinon le retrait part sur la mauvaise station.
+        try:
+            _pl_station = api.list_playlists() or []
+            _ids_station = set()
+            for _pl in _pl_station:
+                try:
+                    _ids_station.add(int(_pl.get('id')))
+                except (TypeError, ValueError):
+                    continue
+            if _ids_station:
+                _hors_station = [p for p in playlists if p['id'] not in _ids_station]
+                if _hors_station:
+                    playlists = [p for p in playlists if p['id'] in _ids_station]
+                    logger(tache_id, f"[INFO] {len(_hors_station)} playlist(s) hors station {station_id} filtrée(s) "
+                                     f"du dropdown: {[p['id'] for p in _hors_station]}")
+                    if not playlists:
+                        logger(tache_id, f"[INFO] Le titre n'a AUCUNE playlist dans la station {station_id} "
+                                         f"(toutes ses playlists sont sur une autre station) — retrait impossible ici.")
+                    else:
+                        logger(tache_id, f"[INFO] Le média {media_id_trouve} a des playlists sur plusieurs stations — "
+                                         f"seules celles de la station {station_id} sont proposées.")
+        except Exception as _e:
+            logger(tache_id, f"[ATTENTION] Filtrage playlists par station impossible: {_e}")
+
         logger(tache_id, f"[OK] {len(playlists)} playlist(s) trouvée(s) pour le média {media_id_trouve}")
         for p in playlists:
             type_str = "folder-based" if p['is_folder_based'] else "directe"
@@ -2573,7 +2623,8 @@ def executer_get_media_playlists(tache_id, parametres):
         result_json = json.dumps({
             'playlists': playlists,
             'media_id': media_id_trouve,
-            'song_id_radiodj': song_id_radiodj
+            'song_id_radiodj': song_id_radiodj,
+            'station_id': station_id
         })
         _store_task_result(tache_id, result_json)
 
@@ -2829,6 +2880,26 @@ def executer_azura_remove_from_playlist_batch(tache_id, parametres):
         logger(tache_id, "ERREUR FATALE: Module azuracast_api non disponible.")
         logger(tache_id, "=== TERMINÉ === (module API indisponible)")
         return
+
+    # ── Hotfix 2026.11.21-A : valider que la playlist appartient à la station ──
+    # Même garde-fou que le retrait unitaire : l'API AzuraCast est permissive en
+    # lecture cross-station et un PUT cross-station est sans effet silencieux.
+    try:
+        _pl_station = api.list_playlists() or []
+        _ids_station = set()
+        for _pl in _pl_station:
+            try:
+                _ids_station.add(int(_pl.get('id')))
+            except (TypeError, ValueError):
+                continue
+        if _ids_station and int(playlist_id) not in _ids_station:
+            logger(tache_id, f"ERREUR: La playlist {playlist_id} n'appartient pas à la station {station_id}.")
+            logger(tache_id, f"Playlists connues de la station {station_id} : {sorted(_ids_station)}")
+            logger(tache_id, "Cause probable: playlist résolue sur une autre station (mismatch station sélectionnée).")
+            logger(tache_id, "=== TERMINÉ === (playlist hors station)")
+            return
+    except Exception as _e:
+        logger(tache_id, f"[ATTENTION] Validation station de la playlist impossible: {_e} — poursuite sans ce garde-fou.")
 
     # ── 1. Lecture groupée des songs RadioDJ ──
     songs_map = {}  # {song_id: {'artist':..., 'title':..., 'path':...}}
