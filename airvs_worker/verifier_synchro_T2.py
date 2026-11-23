@@ -36,12 +36,20 @@
 #
 # Codes de sortie : 0 = synchro opérationnelle · 1 = manques/anomalies ·
 #                   2 = dbconfig absent · 8 = MySQL indisponible
+#
+# Hotfix 2026.11.23-A : le contrôle n°6 interrogeait la colonne inexistante
+# `date_creation` (erreur 1054 « Unknown column 'date_creation' ») — la table
+# journal_operations_azura utilise `date_op` (cf. scripts_db/
+# 003_create_journal_operations.sql ; l'INSERT du module synchro_diffusion
+# était déjà correct : date_op = DEFAULT CURRENT_TIMESTAMP).
 # ============================================================================
 import argparse
 import datetime
 import json
 import os
 import sys
+
+VERIF_VERSION = "2026.11.23-A"
 
 DB_DEFAUTS = {
     "host": "192.168.1.30",
@@ -319,7 +327,7 @@ def _verifier_radiodj(cur, r, echantillon):
 def _verifier_journal(cur, r):
     try:
         cur.execute(
-            "SELECT id, date_creation, triggered_by, trigger_source, task_id, "
+            "SELECT id, date_op, triggered_by, trigger_source, task_id, "
             "details FROM journal_operations_azura "
             "WHERE type_op = 'synchro_diffusion' ORDER BY id DESC LIMIT 5")
         rows = cur.fetchall()
@@ -356,7 +364,7 @@ def _verifier_journal(cur, r):
     statut = sec.get("status")
     taux = (100.0 * res / (res + ech)) if isinstance(res, int) and isinstance(ech, int) and (res + ech) > 0 else None
     det = [
-        "dernier cycle journalisé : #%s du %s" % (last["id"], last["date_creation"]),
+        "dernier cycle journalisé : #%s du %s" % (last["id"], last["date_op"]),
         "  déclenchement : triggered_by=%s · trigger_source=%s · task_id=%s" %
         (last["triggered_by"], last["trigger_source"] or "-", last["task_id"] or "-"),
         "  statut : %s · dry_run : %s" % (statut or "-", dry),
@@ -380,7 +388,7 @@ def _verifier_journal(cur, r):
         except Exception:
             s = {}
         det.append("  cycle #%s du %s — %s%s : écrites %s, échecs %s, dry_run=%s" %
-                   (row["id"], row["date_creation"], row["triggered_by"],
+                   (row["id"], row["date_op"], row["triggered_by"],
                     "/%s" % (row["trigger_source"] or "-"),
                     s.get("lignes_ecrites", "?"), s.get("echecs_musique", "?"),
                     s.get("dry_run", "?")))
@@ -563,8 +571,8 @@ def main():
     cur = db.cursor(pymysql.cursors.DictCursor)
     r = Rapport()
     print("╔" + "═" * 72 + "╗")
-    print("║  VÉRIFICATION SYNCHRO_DIFFUSION (T2) — lecture seule — %s" %
-          datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    print("║  VÉRIFICATION SYNCHRO_DIFFUSION (T2) — lecture seule — v%s — %s" %
+          (VERIF_VERSION, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     print("╚" + "═" * 72 + "╝")
 
     _verifier_worker(cur, r, args.version_attendue)
