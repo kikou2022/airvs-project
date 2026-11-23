@@ -44,7 +44,7 @@
 #                 • Réutilisation du moteur de matching flou de executer_prefill_sheets
 #                 • Dépendance : validation_pool_multiformat.py (même dossier)
 # ═══════════════════════════════════════════════════════════════════
-WORKER_VERSION = "2026.11.13-C"  # + Phase 21.3 : résolveur mapping_radiodj_azura, moteur rotation (preview/execute, R9-R12), bootstrap mapping, régénération miroir après opération (mémo §5.1). B : hotfix whitelist SQL. C : hotfix cleanup orphelines (date_debut_execution)
+WORKER_VERSION = "2026.11.23-A"  # + D4-a bis : cycle quotidien SYNCHRO_DIFFUSION avec rattrapage au démarrage (machines studio éteintes la nuit) + fix garde journalier (manuelles exclues via trigger_source). Historique : + T2 SYNCHRO_DIFFUSION : compteurs RadioDJ depuis historique AzuraCast (D1/D2 écrasement+delta, D3 résolveur P3→P4→P5→P6→N1→N2 + ambiguïté +1 tous, D4-a cron quotidien, snapshot bak_songs_counters avant 1er run, journal synchro_diffusion). Historique antérieur : Phase 21.3 résolveur mapping/moteur rotation. B : hotfix whitelist SQL. C : hotfix cleanup orphelines (date_debut_execution)
 
 import time
 import datetime
@@ -106,6 +106,20 @@ except ImportError as _e_rotation:
     ROTATION_MODULE_DISPONIBLE = False
     print(f"[WARN] Module rotation_azura.py introuvable ({_e_rotation}). "
           f"Tâches ROTATION_*/MAPPING_BOOTSTRAP désactivées.")
+
+# T2 Synchro diffusion A — compteurs RadioDJ depuis l'historique AzuraCast
+# (spec RESULTAT_SONDES_T1 §6, arbitrages D1/D3/D4-a validés le 22/11).
+try:
+    from synchro_diffusion import (
+        SYNCHRO_VERSION,
+        executer_synchro_diffusion as _synchro_executer_cycle,
+        assurer_schema_synchro as _synchro_assurer_schema,
+    )
+    SYNCHRO_MODULE_DISPONIBLE = True
+except ImportError as _e_synchro:
+    SYNCHRO_MODULE_DISPONIBLE = False
+    print(f"[WARN] Module synchro_diffusion.py introuvable ({_e_synchro}). "
+          f"Tâche SYNCHRO_DIFFUSION désactivée.")
 
 # Module multi-format pour le mode Pool de titres validés.
 # Doit être déployé dans le même dossier que ce worker.
@@ -194,7 +208,7 @@ SHEETS_SCOPES = [
 # Constantes historiques (station 7). Conservées comme fallback si config.json absent.
 # NE PLUS UTILISER DIRECTEMENT — passer par _url_key_for_station(station_id).
 AZURA_API_URL = "https://azuracast.2026.airvs.fr/api/station/7/files"
-AZURA_API_KEY = "5e256834da4da4cf:1cadd3936115612949a795cd5a48e12d"
+AZURA_API_KEY = "7be19245f5a0421a:2f674f95a015b917db69cb116c6a1809"
 _DEFAULT_STATION_ID = 7
 
 PURGE_RETENTION_JOURS = 14  # Valeur par défaut (surchargée par airvs_maintenance_config)
@@ -6496,10 +6510,13 @@ TYPES_PRIORITE_HAUTE = (
 )
 # Crons lourds / analytics déclenchés automatiquement → traités en dernier.
 # Surchargable via config.json "automation"."priorite_fond" (liste de types).
+# T2 2026.11.22-A : SYNCHRO_DIFFUSION en fond — job lourd (history complet,
+# lots de 300) ; le 1er run manuel accepte d'attendre derrière les interactifs
+# (GF1 : ne pas retarder un utilisateur pour un job de plusieurs minutes).
 TYPES_PRIORITE_FOND = (
     'SYNC_AZURA_STATUS', 'SYNC_PLAYLISTS_CACHE', 'AUTO_CHECK_SHEETS',
     'AUDIENCE_GET_DATA', 'PIGE_LIST', 'PIGE_EXTRACT',
-    'PODCASTS_LIST', 'PODCASTS_EPISODES',
+    'PODCASTS_LIST', 'PODCASTS_EPISODES', 'SYNCHRO_DIFFUSION',
 )
 
 
@@ -6546,6 +6563,10 @@ def _lire_config_automation(force=False):
         'sync_azura_heure_debut': SYNC_AZURA_AUTO_HEURE_DEBUT,
         'sync_azura_heure_fin': SYNC_AZURA_AUTO_HEURE_FIN,
         'sync_azura_intervalle_min': SYNC_AZURA_AUTO_INTERVALLE_MIN,
+        # T2 2026.11.22-A — cron quotidien SYNCHRO_DIFFUSION (D4-a) :
+        #   actif = False par défaut → activé APRÈS validation du 1er run manuel
+        'synchro_diffusion_actif': False,
+        'synchro_diffusion_heure': 4,
         'priorite_fond': list(TYPES_PRIORITE_FOND),
     }
     try:
@@ -6555,10 +6576,13 @@ def _lire_config_automation(force=False):
             auto = cfg.get('automation') if isinstance(cfg, dict) else None
             if isinstance(auto, dict):
                 for cle in ('sync_azura_heure_debut', 'sync_azura_heure_fin',
-                            'sync_azura_intervalle_min'):
+                            'sync_azura_intervalle_min', 'synchro_diffusion_heure'):
                     v = auto.get(cle)
                     if isinstance(v, (int, float)) and v >= 0:
                         eff[cle] = int(v)
+                sd_actif = auto.get('synchro_diffusion_actif')
+                if isinstance(sd_actif, (bool, int)):
+                    eff['synchro_diffusion_actif'] = bool(sd_actif)
                 pf = auto.get('priorite_fond')
                 if isinstance(pf, list) and pf:
                     eff['priorite_fond'] = [str(x) for x in pf]
@@ -7927,6 +7951,80 @@ def _sync_azura_automatique():
         print(f"[SYNC AUTO] Erreur : {e}")
 
 
+# ── T2 2026.11.22-A — cron quotidien SYNCHRO_DIFFUSION (D4-a) ──
+INTERVALLE_VERIF_SYNCHRO_DIFFUSION = 300  # vérification toutes les 5 min
+
+
+def _verifier_synchro_diffusion():
+    """T2 — D4-a bis : insère une tâche SYNCHRO_DIFFUSION une fois par jour,
+    au premier passage à partir de l'heure configurée (config.json automation :
+      synchro_diffusion_actif  : False par défaut — activé APRÈS validation
+                                 du 1er run manuel par l'exploitant ;
+      synchro_diffusion_heure  : heure locale à partir de laquelle le cycle
+                                 peut s'exécuter, défaut 4).
+    Machines studio éteintes la nuit, allumage à heure variable : si le
+    worker démarre après l'heure configurée, le cycle part au premier
+    passage suivant (rattrapage au démarrage, sous 5 minutes) — plus de
+    fenêtre horaire stricte à rater. Une seule tâche auto par jour ; les
+    manuelles ne comptent pas (filtre sur trigger_source cron:quotidien)."""
+    try:
+        from datetime import datetime as _dt2
+        cfg_auto = _lire_config_automation()
+        if not cfg_auto.get('synchro_diffusion_actif'):
+            return
+        try:
+            import tzlocal
+            now_local = _dt2.now(tzlocal.get_localzone())
+        except ImportError:
+            now_local = _dt2.now()
+        # D4-a bis : « >= » et non « == » — si le worker démarre après
+        # l'heure planifiée, le cycle part au premier passage (rattrapage).
+        if now_local.hour < int(cfg_auto.get('synchro_diffusion_heure', 4)):
+            return
+
+        db = pymysql.connect(**DB_CONFIG)
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+
+        # Une seule tâche en file à la fois
+        cursor.execute(
+            "SELECT id FROM taches_planifiees "
+            "WHERE type_action = 'SYNCHRO_DIFFUSION' "
+            "AND statut IN ('en_attente', 'en_cours') LIMIT 1")
+        if cursor.fetchone():
+            cursor.close()
+            db.close()
+            return
+
+        # Une seule exécution AUTO par jour (les manuelles ne comptent pas)
+        cursor.execute(
+            "SELECT date_creation FROM taches_planifiees "
+            "WHERE type_action = 'SYNCHRO_DIFFUSION' "
+            "AND parametres LIKE '%cron:quotidien%' "
+            "AND date_creation >= CURDATE() "
+            "ORDER BY id DESC LIMIT 1")
+        if cursor.fetchone():
+            cursor.close()
+            db.close()
+            return
+
+        params = json.dumps({
+            'auto_scheduled': True,
+            'trigger_source': 'cron:quotidien',
+        })
+        cursor.execute(
+            "INSERT INTO taches_planifiees (type_action, statut, parametres, date_creation) "
+            "VALUES ('SYNCHRO_DIFFUSION', 'en_attente', %s, NOW())",
+            (params,))
+        task_id = cursor.lastrowid
+        db.commit()
+        cursor.close()
+        db.close()
+        print(f"[SYNCHRO AUTO] Tâche SYNCHRO_DIFFUSION #{task_id} planifiée "
+              f"(cycle quotidien, à partir de {cfg_auto.get('synchro_diffusion_heure')}h)")
+    except Exception as e:
+        print(f"[SYNCHRO AUTO] Erreur : {e}")
+
+
 # ============================================================
 # Sync VPS OVH 1 — Soumissions programmeurs + Shazam externe
 # ============================================================
@@ -8767,6 +8865,32 @@ def executer_rotation_execute(tache_id, parametres):
         logger(tache_id, "=== TERMINÉ ROTATION EXECUTE (ERREUR) ===")
 
 
+def executer_synchro_diffusion(tache_id, parametres):
+    """T2 Synchro diffusion A (2026.11.22-A) — cycle complet : history
+    AzuraCast S6+S7 → résolveur mapping (P3→P4→P5→P6→N1→N2) → écriture
+    radiodb.songs.count_played/date_played (D1 : vérité AzuraCast + delta
+    RadioDJ ; D3 : uniquement lignes réellement modifiées, lots 300) ;
+    snapshot bak_songs_counters automatique avant la 1re écriture du 1er run.
+    Paramètres : {'dry_run': bool, 'auto_scheduled': bool, 'station_ids': [...]}"""
+    logger(tache_id, "=== DÉBUT SYNCHRO DIFFUSION ===")
+    if not SYNCHRO_MODULE_DISPONIBLE:
+        logger(tache_id, "ERREUR: module synchro_diffusion.py indisponible.")
+        logger(tache_id, "=== TERMINÉ === (module indisponible)")
+        return
+    try:
+        stats = _synchro_executer_cycle(
+            tache_id=tache_id, parametres=parametres, db_config=DB_CONFIG,
+            log_fn=lambda m: logger(tache_id, m), chemin_config=CONFIG_JSON)
+        if stats.get("status") == "abandon_snapshot":
+            # le cycle n'a rien écrit → erreur visible dans le dashboard
+            raise RuntimeError("snapshot bak_songs_counters impossible — "
+                               "aucune écriture effectuée (voir log)")
+    except Exception as e:
+        logger(tache_id, f"ERREUR synchro diffusion: {type(e).__name__}: {e}")
+        raise
+    logger(tache_id, "=== TERMINÉ SYNCHRO DIFFUSION ===")
+
+
 def executer_mapping_bootstrap(tache_id, parametres):
     """Phase 21.3 — bootstrap du cache mapping_radiodj_azura (spec A.11).
     Remplit les correspondances RadioDJ ↔ AzuraCast pour les stations
@@ -8855,6 +8979,14 @@ def main():
 
     # ── Phase 21.1 : socle rotation (journal_operations_azura + audit_doublons) ──
     _assurer_schema_rotation_socle()
+
+    # ── T2 2026.11.22-A : tables d'état synchro diffusion (cursors + compteurs
+    #    + ENUM journal 'synchro_diffusion') — idempotent, non bloquant ──
+    if SYNCHRO_MODULE_DISPONIBLE:
+        try:
+            _synchro_assurer_schema(DB_CONFIG)
+        except Exception as _e_sds:
+            print(f"  ⚠ Schéma synchro_diffusion ignoré : {_e_sds}")
 
     # ── Phase 21.1 — GF4 : rattrapage des crons en retard au démarrage ──
     _rattrapage_crons_au_demarrage()
@@ -9105,6 +9237,7 @@ def main():
     dernier_check_auto_validation = 0
     dernier_check_sync_azura_auto = 0
     dernier_check_sync_vps = 0
+    dernier_check_synchro_diffusion = 0  # T2 2026.11.22-A : cron quotidien D4-a
     dernier_check_orphelines = 0
     dernier_check_purge_terminees = 0  # 2026.09.28 : purge auto tâches terminées
     dernier_check_nowplaying = 0  # Phase 20.1 : cache nowplaying topbar (10s)
@@ -9148,6 +9281,11 @@ def main():
             if now_ts - dernier_check_sync_vps >= INTERVALLE_SYNC_VPS:
                 _sync_vps_automatique()
                 dernier_check_sync_vps = now_ts
+
+            # ── T2 — cron quotidien SYNCHRO_DIFFUSION (D4-a, actif en config) ──
+            if now_ts - dernier_check_synchro_diffusion >= INTERVALLE_VERIF_SYNCHRO_DIFFUSION:
+                _verifier_synchro_diffusion()
+                dernier_check_synchro_diffusion = now_ts
 
             # ── Nettoyage périodique des tâches orphelines (toutes les heures) ──
             if now_ts - dernier_check_orphelines >= INTERVALLE_CLEANUP_ORPHELINES:
@@ -9228,7 +9366,8 @@ def main():
                 "    'IMPORT_M3U_RETRY', "  # Phase 19.1 — A1 : retry différé import M3U
                 "    'ROTATION_PREVIEW', "  # Phase 21.3 — candidats au retrait (sans exécuter)
                 "    'ROTATION_EXECUTE', "  # Phase 21.3 — rotation validée (soft par défaut)
-                "    'MAPPING_BOOTSTRAP') "  # Phase 21.3 — remplissage cache mapping_radiodj_azura
+                "    'MAPPING_BOOTSTRAP', "  # Phase 21.3 — remplissage cache mapping_radiodj_azura
+                "    'SYNCHRO_DIFFUSION') "  # T2 2026.11.22-A — compteurs RadioDJ depuis history AzuraCast
                 # Phase 19.1 — A1 : respecter date_planifiee pour les tâches différées
                 # (IMPORT_M3U_RETRY programmé 60s plus tard). Les tâches sans date_planifiee
                 # sont immédiatement éligibles (comportement historique préservé).
@@ -9339,6 +9478,9 @@ def main():
                     elif type_action == 'MAPPING_BOOTSTRAP':
                         # Phase 21.3 — remplissage cache mapping_radiodj_azura
                         executer_mapping_bootstrap(tache_id, parametres)
+                    elif type_action == 'SYNCHRO_DIFFUSION':
+                        # T2 2026.11.22-A — compteurs RadioDJ depuis history AzuraCast
+                        executer_synchro_diffusion(tache_id, parametres)
                     else:
                         executer_copie(tache_id, parametres)
                 except Exception as exc:

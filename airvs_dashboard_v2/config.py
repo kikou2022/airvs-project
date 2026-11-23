@@ -267,7 +267,7 @@ PIGES_ARTWORK_WINDOWS_DIR = os.getenv('PIGES_ARTWORK_WINDOWS_DIR', r"U:\airvs_ar
 # Worker
 # ═══════════════════════════════════════════════════════════════════════
 
-WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.11.22-A')  # + Phase 21.3 : rotation éditoriale (mapping + preview/execute) + regen miroir. C : hotfix cleanup orphelines
+WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.11.23-A')  # D4-a bis : cycle quotidien SYNCHRO_DIFFUSION avec rattrapage au démarrage (machines studio éteintes la nuit). Historique : 2026.11.22-A (T2 SYNCHRO_DIFFUSION), + Phase 21.3 : rotation éditoriale (mapping + preview/execute) + regen miroir, C : hotfix cleanup orphelines
 
 
 # ═══════════════════════════════════════════════════════════════════════
