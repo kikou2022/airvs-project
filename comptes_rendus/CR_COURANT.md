@@ -2,7 +2,7 @@
 
 > Fichier roulant : remplacé à chaque étape importante (jamais empilé).
 > Historique complet : `git log -p -- comptes_rendus/CR_COURANT.md`.
-> **Mis à jour** : 25/11/2026 · **Base git** : `b7fa035` (fix miroir clé API 2026.11.25-A) · Rédaction : session agent IA
+> **Mis à jour** : 25/11/2026 · **Base git** : `be9793e` (fix miroir clé API 2026.11.25-A, poussé sur origin/main) · Rédaction : session agent IA
 
 ## Dernière étape — Lot 2026.11.25-A : miroir public — CLÔTURÉ (clé API dynamique + draineur, validés en exploitation 24/11)
 
@@ -44,8 +44,9 @@ config.json, jamais le script.
   **panneau [MIROIR] au vert**. Chaîne complète opérationnelle : prochaine rotation/retrait/resync/
   push → export automatique ≤ 60 s (debounce 10 min, ≈ 1 min/run, thread de fond, sans incidence
   sur les tâches).
-- **Reste côté exploitant** : commit + push (`feat` 21.4-a 4 fichiers + `fix(mirror)` 2026.11.25-A) ;
-  activation observation/execution 21.4 quand voulu (config relu par exécution, sans redémarrage).
+- **Commit + push : FAIT** — `34cc406` (`feat` 21.4-a, 4 fichiers) et `be9793e` (`fix(mirror)`
+  2026.11.25-A) sont sur origin/main. Reste : activation observation/execution 21.4 quand voulu
+  (config relu par exécution, sans redémarrage).
 
 ## Étape précédente — Lot 21.4-a APPLIQUÉ et VALIDÉ sur pige (24/11)
 
@@ -57,13 +58,14 @@ AUTO_PURGE_RETIRED, garde présente cron + rattrapage GF4) ; **run d'observation
 "proteges": 0, "seuil_jours": 90, "plafond": 25}` — zéro écriture RadioDJ/AzuraCast ; journal
 `auto_purge` vide = cohérent (journalisation PAR CANDIDAT) ; les 3 « âge inconnu » = titres RETIRED
 antérieurs au socle 21.1 (accumulation progressive via playlist_remove). Tests T1-T5 hors-ligne
-tous PASS (voir `git show fa99d0d` et le LISEZMOI 2026.11.24-B).
+tous PASS (feat poussé : `34cc406` ; détail des tests dans le LISEZMOI 2026.11.24-B, zone de
+livraison hors dépôt).
 
 ## État Phase 21
 
 - **21.1 FAIT** · **21.3 FAIT** · **21.4-a : APPLIQUÉ et VALIDÉ sur pige (24/11)** → observation activable quand voulu → 21.4-b (execution).
 - **Reste ensuite** : 21.2 (~1-2 j), 21.5 (~4-5 j), 21.6 (~2-3 j). GF3 (indexes) + comptage `IN_AZURACAST` restants = op DB sur .30/.39 ; GF5 partiel.
-- Points de vigilance maintenus : **miroir public — Option A VALIDÉE par test (24/11 17h11)**. Architecture (preuves dépôt) : `airvs_mirror/export_db_mirror_V4.py` (432 l. depuis le lot 2026.11.25-A, dans le repo = à jour flags 21.1) lit `radiodb` + `airvs_dashboard` sur 192.168.1.30:3306 + API AzuraCast HTTPS, écrit /tmp/airvs_db_export.json puis SCP vers **DEUX** destinations — debian12 `sebastien@192.168.1.30:/var/www/html/airvs_mirror/db.json` (LAN) et vps `ubuntu@54.37.38.117:/var/www/html/airvs_mirror/db.json` (**VPS OVH 1**, miroir public `https://miroir.db.airvs.fr`, vhost nginx `programmes-vps/install_vps_ovh_1.sh`, chargé par `app_vps_ovh_1.py` via MIRROR_JSON_PATH). Ne peut tourner ni sur AzuraCast ni sur le VPS (pas d'accès BDD LAN) ; find sur .30 vide (jamais déployé). **Test décisif réussi depuis pige** : 51300 titres exportés, « Succès vers debian12 » + « Succès vers vps » — miroir rafraîchi sur .30 ET le VPS ; accès BDD distant et clés BatchMode pige→.30 / pige→VPS prouvés. **Clé API — RÉSOLUE et VALIDÉE en exploitation (lot 2026.11.25-A déployé, 24/11 17h41)** : plus aucune clé en dur dans le script — résolution env `AIRVS_AZURA_API_KEY` → config.json worker § `azuracast` (détails en tête de CR ; Passe 2 sautée proprement si clé absente, export non bloqué) ; log d'exploitation : clé chargée du config.json worker, Passe 2 API 8828 correspondances **HTTP 200** (le 403 est révolu). Restent les fallbacks L54/L999 d'`azuracast_api.py` (ancienne clé en dur) → alignement candidat 21.2. **Restant 2 — config draineur (Option A) — FERMÉ, validé 24/11 18h28-18h30** : prérequis SSH validé (17h40 « SSH LOCAL OK » sur `sebastien@192.168.1.17`, IP pleine de pige — pas localhost) ; `"automation"` fusionnée dans les **deux** config.json (worker = déclenchement réel : 4 clés `mirror_regen_*` ajoutées aux clés sync existantes ; dashboard = badges : section minimale) ; test par `pending=1` forcé → « [MIROIR] Régénération db.json OK : export exécuté sur sebastien@192.168.1.17:22 », état « pending non / ✓ OK / 18:30:48 », panneau au vert — **chaîne miroir complète opérationnelle** (rotation/retrait/resync/push → export auto ≤ 60 s). **Texte descriptif du panneau périmé** (`index.html` L4662-4664 : « déclenche export_db_mirror_V4.py sur .30 » — réel : pige/.17 même, SSH loopback) → cosmétique candidat 21.2. **Défauts du code trompeurs** (`mirror_regen_host` par défaut azuracast:2022 — ne correspond pas à l'architecture réelle) + backoff inopérant tant qu'aucun succès (`last_regen` posé aux succès seulement) + texte panneau périmé (ci-dessus) = candidats micro-lot 21.2 (sans effet au quotidien depuis que le config.json fixe les valeurs). Commits : feat 4 fichiers 21.4-a + fix(mirror) 2026.11.25-A à pousser par l'exploitant ; docs(cr) côté session. Restent : exporteur encore sur `IN_AZURACAST`, push `AZURA_PUSHED_S6_S7` en dur, TODO cache mapping L2000 (obsolète, à nettoyer).
+- Points de vigilance maintenus : **miroir public — Option A VALIDÉE par test (24/11 17h11)**. Architecture (preuves dépôt) : `airvs_mirror/export_db_mirror_V4.py` (432 l. depuis le lot 2026.11.25-A, dans le repo = à jour flags 21.1) lit `radiodb` + `airvs_dashboard` sur 192.168.1.30:3306 + API AzuraCast HTTPS, écrit /tmp/airvs_db_export.json puis SCP vers **DEUX** destinations — debian12 `sebastien@192.168.1.30:/var/www/html/airvs_mirror/db.json` (LAN) et vps `ubuntu@54.37.38.117:/var/www/html/airvs_mirror/db.json` (**VPS OVH 1**, miroir public `https://miroir.db.airvs.fr`, vhost nginx `programmes-vps/install_vps_ovh_1.sh`, chargé par `app_vps_ovh_1.py` via MIRROR_JSON_PATH). Ne peut tourner ni sur AzuraCast ni sur le VPS (pas d'accès BDD LAN) ; find sur .30 vide (jamais déployé). **Test décisif réussi depuis pige** : 51300 titres exportés, « Succès vers debian12 » + « Succès vers vps » — miroir rafraîchi sur .30 ET le VPS ; accès BDD distant et clés BatchMode pige→.30 / pige→VPS prouvés. **Clé API — RÉSOLUE et VALIDÉE en exploitation (lot 2026.11.25-A déployé, 24/11 17h41)** : plus aucune clé en dur dans le script — résolution env `AIRVS_AZURA_API_KEY` → config.json worker § `azuracast` (détails en tête de CR ; Passe 2 sautée proprement si clé absente, export non bloqué) ; log d'exploitation : clé chargée du config.json worker, Passe 2 API 8828 correspondances **HTTP 200** (le 403 est révolu). Restent les fallbacks L54/L999 d'`azuracast_api.py` (ancienne clé en dur) → alignement candidat 21.2. **Restant 2 — config draineur (Option A) — FERMÉ, validé 24/11 18h28-18h30** : prérequis SSH validé (17h40 « SSH LOCAL OK » sur `sebastien@192.168.1.17`, IP pleine de pige — pas localhost) ; `"automation"` fusionnée dans les **deux** config.json (worker = déclenchement réel : 4 clés `mirror_regen_*` ajoutées aux clés sync existantes ; dashboard = badges : section minimale) ; test par `pending=1` forcé → « [MIROIR] Régénération db.json OK : export exécuté sur sebastien@192.168.1.17:22 », état « pending non / ✓ OK / 18:30:48 », panneau au vert — **chaîne miroir complète opérationnelle** (rotation/retrait/resync/push → export auto ≤ 60 s). **Texte descriptif du panneau périmé** (`index.html` L4662-4664 : « déclenche export_db_mirror_V4.py sur .30 » — réel : pige/.17 même, SSH loopback) → cosmétique candidat 21.2. **Défauts du code trompeurs** (`mirror_regen_host` par défaut azuracast:2022 — ne correspond pas à l'architecture réelle) + backoff inopérant tant qu'aucun succès (`last_regen` posé aux succès seulement) + texte panneau périmé (ci-dessus) = candidats micro-lot 21.2 (sans effet au quotidien depuis que le config.json fixe les valeurs). Commits : feat 4 fichiers 21.4-a (`34cc406`) + fix(mirror) 2026.11.25-A (`be9793e`) poussés sur origin/main ; docs(cr) côté session. Restent : exporteur encore sur `IN_AZURACAST`, push `AZURA_PUSHED_S6_S7` en dur, TODO cache mapping L2000 (obsolète, à nettoyer).
 
 ## Contexte persistant
 
@@ -75,5 +77,6 @@ tous PASS (voir `git show fa99d0d` et le LISEZMOI 2026.11.24-B).
 ## Règles actives
 
 - 9 consignes permanentes + **n°10 opérationnelle** : remplacer ce fichier et pousser (`docs(cr): …`, commit séparé du feat) à chaque étape importante ; `git pull` + lecture du CR avant chaque étape importante ; l'historique git fait foi.
+- **SHA vérifiables** : tout SHA cité dans un document poussé doit exister sur `origin/main` après fetch (`git cat-file -e <sha>^{commit}`) — jamais un SHA local de session non poussée (correctif du 25/11 : 2 SHA morts de ce CR remplacés par les SHA poussés).
 - `config.json` de production **jamais commités** (sections `automation`/`rotation` absentes du dépôt par conception) ; aucune donnée sensible dans les CR.
 - Nom de la machine studio : **pige** (jamais « pigeon »).
