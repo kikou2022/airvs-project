@@ -569,3 +569,222 @@ def api_system_freshness():
         return jsonify(reponse)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# T2 SYNCHRO_DIFFUSION — lancement & suivi manuels depuis le dashboard
+# (Hotfix 2026.11.24-A)
+# ═════════════════════════════════════════════════════════════════════════════
+# Même chemin que le lanceur CLI lancer_synchro_diffusion.py (D4-a) : la tâche
+# est INSÉRÉE dans taches_planifiees et le worker Ubuntu (.17) la prend en
+# charge dans les secondes qui suivent (priorité fond GF1 : derrière les
+# tâches interactives). Aucun changement worker nécessaire.
+#
+# Garde de file identique au CLI : refus si une tâche SYNCHRO_DIFFUSION est
+# déjà en_attente/en_cours. Le trigger_source « manuel:dashboard » ne compte
+# PAS pour le quota journalier du cron auto (filtre cron:quotidien côté
+# worker, worker_ubuntu.py §_verifier_synchro_diffusion).
+# ═════════════════════════════════════════════════════════════════════════════
+SYNCHRO_STATIONS_DEFAUT = [6, 7]
+
+
+def _parse_synchro_params(parametres_str):
+    """Parse la colonne parametres (JSON) d'une tâche SYNCHRO_DIFFUSION.
+    Retourne un dict stable (dry_run, trigger_source, auto_scheduled,
+    station_ids) — jamais d'exception."""
+    out = {"dry_run": False, "trigger_source": None,
+           "auto_scheduled": False, "station_ids": None}
+    try:
+        p = json.loads(parametres_str or "{}")
+        if not isinstance(p, dict):
+            return out
+        out["dry_run"] = bool(p.get("dry_run"))
+        out["trigger_source"] = p.get("trigger_source")
+        out["auto_scheduled"] = bool(p.get("auto_scheduled"))
+        sid = p.get("station_ids")
+        if isinstance(sid, list):
+            out["station_ids"] = [int(s) for s in sid if isinstance(s, (int, str)) and str(s).strip().lstrip('-').isdigit()]
+    except Exception:
+        pass
+    return out
+
+
+def _extraire_stats_journal(row_details):
+    """Extrait les chiffres d'un cycle depuis details (JSON du journal
+    journal_operations_azura, type_op='synchro_diffusion'). Dégradation
+    gracieuse : dict vide si détail illisible."""
+    champs = ("lignes_ecrites", "updates_prevus", "entrees_nouvelles",
+              "resolues", "echecs_musique", "titres_touches",
+              "deja_conforme", "delta_radio_dj_cycle", "premier_run",
+              "status", "dry_run", "triggered_by")
+    try:
+        det = json.loads(row_details or "{}")
+        st = det.get("stats") or {}
+        if not isinstance(st, dict):
+            return {}
+        return {c: st.get(c) for c in champs if st.get(c) is not None}
+    except Exception:
+        return {}
+
+
+@taches_bp.route('/api/synchro_diffusion/lancer', methods=['POST'])
+@login_requis
+def api_synchro_diffusion_lancer():
+    """Insère une tâche SYNCHRO_DIFFUSION (mode simulation ou réel).
+
+    Body JSON :
+      - mode : 'simulation' (dry-run, aucune écriture — défaut) ou 'reel'
+      - stations : liste d'IDs (défaut [6, 7])
+
+    Retour : {"status": "ok", "task_id": N, "dry_run": bool, "mode": str}
+    Codes : 400 mode/stations invalides · 409 tâche déjà en file · 500 DB.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        mode = str(data.get('mode') or 'simulation').strip().lower()
+        if mode in ('simulation', 'dry_run', 'dryrun', 'dry-run'):
+            dry_run = True
+            label = "SIMULATION (dry-run, aucune écriture)"
+        elif mode in ('reel', 'real', 'réel'):
+            dry_run = False
+            label = "RUN RÉEL"
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "mode invalide — attendu 'simulation' ou 'reel'"
+            }), 400
+
+        stations = data.get('stations')
+        if not isinstance(stations, list) or not stations:
+            stations = list(SYNCHRO_STATIONS_DEFAUT)
+        try:
+            stations = sorted({int(s) for s in stations})
+        except (TypeError, ValueError):
+            return jsonify({
+                "status": "error",
+                "message": "stations invalide — attendu une liste d'IDs (ex [6,7])"
+            }), 400
+        if not stations:
+            stations = list(SYNCHRO_STATIONS_DEFAUT)
+
+        db = get_db_connection()
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+
+        # Garde de file (identique au lanceur CLI, code de sortie 9)
+        cursor.execute(
+            "SELECT id, statut FROM taches_planifiees "
+            "WHERE type_action = 'SYNCHRO_DIFFUSION' "
+            "AND statut IN ('en_attente', 'en_cours') LIMIT 1")
+        deja = cursor.fetchone()
+        if deja:
+            cursor.close()
+            db.close()
+            return jsonify({
+                "status": "error",
+                "message": ("Une tâche SYNCHRO_DIFFUSION #%s est déjà %s — "
+                            "attendre sa fin" % (deja["id"], deja["statut"])),
+                "task_id": deja["id"],
+                "statut": deja["statut"]
+            }), 409
+
+        # Même structure de parametres que lancer_synchro_diffusion.py :
+        # le wrapper worker executer_synchro_diffusion() l'attend telle quelle.
+        params = json.dumps({
+            "station_ids": stations,
+            "auto_scheduled": False,
+            "trigger_source": "manuel:dashboard",
+            "dry_run": dry_run,
+        })
+        cursor.execute(
+            "INSERT INTO taches_planifiees "
+            "(type_action, statut, parametres, date_creation) "
+            "VALUES ('SYNCHRO_DIFFUSION', 'en_attente', %s, NOW())",
+            (params,))
+        task_id = cursor.lastrowid
+        db.commit()
+        cursor.close()
+        db.close()
+        return jsonify({
+            "status": "ok",
+            "task_id": task_id,
+            "dry_run": dry_run,
+            "mode": label,
+            "stations": stations,
+            "message": ("Tâche SYNCHRO_DIFFUSION #%s insérée — %s. "
+                        "Le worker Ubuntu la prend en charge sous quelques "
+                        "secondes à quelques minutes (priorité fond)."
+                        % (task_id, label))
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@taches_bp.route('/api/synchro_diffusion/statut')
+@login_requis
+def api_synchro_diffusion_statut():
+    """État des derniers cycles SYNCHRO_DIFFUSION pour la carte maintenance.
+
+    Retourne :
+      - en_file : tâche en_attente/en_cours (garde → boutons désactivés) ;
+      - taches  : 10 dernières tâches (statut, dates, mode, source) fusionnées
+                  avec les chiffres du journal (entrées, résolues, écritures,
+                  échecs) — dégradation gracieuse si le journal est absent.
+    """
+    try:
+        db = get_db_connection()
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+
+        # 0. Garde de file
+        cursor.execute(
+            "SELECT id, statut, date_creation FROM taches_planifiees "
+            "WHERE type_action = 'SYNCHRO_DIFFUSION' "
+            "AND statut IN ('en_attente', 'en_cours') LIMIT 1")
+        en_file = cursor.fetchone()
+        if en_file and en_file.get('date_creation') \
+                and hasattr(en_file['date_creation'], 'isoformat'):
+            en_file['date_creation'] = en_file['date_creation'].isoformat()
+
+        # 1. Dernières tâches + parametres parsés
+        cursor.execute(
+            "SELECT id, statut, parametres, date_creation, date_fin "
+            "FROM taches_planifiees WHERE type_action = 'SYNCHRO_DIFFUSION' "
+            "ORDER BY id DESC LIMIT 10")
+        taches = cursor.fetchall()
+        for t in taches:
+            t.update(_parse_synchro_params(t.pop('parametres', None)))
+            for k in ('date_creation', 'date_fin'):
+                if t.get(k) and hasattr(t[k], 'isoformat'):
+                    t[k] = t[k].isoformat()
+
+        # 2. Chiffres du journal (fusion par task_id — la plus récente gagne)
+        journal = {}
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) AS c FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() "
+                "AND table_name = 'journal_operations_azura'")
+            if (cursor.fetchone() or {}).get('c', 0) > 0:
+                cursor.execute(
+                    "SELECT task_id, details FROM journal_operations_azura "
+                    "WHERE type_op = 'synchro_diffusion' "
+                    "ORDER BY id DESC LIMIT 30")
+                for row in cursor.fetchall():
+                    tid = row.get('task_id')
+                    if tid is None or str(tid) in journal:
+                        continue
+                    st = _extraire_stats_journal(row.get('details'))
+                    if st:
+                        journal[str(tid)] = st
+        except Exception:
+            journal = {}
+
+        cursor.close()
+        db.close()
+        return jsonify({
+            "status": "ok",
+            "en_file": en_file,
+            "taches": taches,
+            "journal": journal
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
