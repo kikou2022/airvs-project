@@ -248,6 +248,14 @@ def lire_config_rotation(chemin_config=None):
     rot.setdefault('categories_elegibles', [])  # vide = toutes
     rot.setdefault('dossiers_proteges', [])
     rot.setdefault('nb_max_candidats', 2000)
+    # ── Lot 21.4-a — auto-purge RETIRED (cadrage validé 24/11) ──
+    # relu À CHAQUE exécution (config.json lu par run) → débrayable au
+    # run suivant, sans redémarrage du worker.
+    rot.setdefault('seuil_purge_jours', 90)            # âge RETIRED requis
+    rot.setdefault('auto_purge_actif', False)          # interrupteur maître du cron
+    rot.setdefault('auto_purge_mode', 'observation')   # 'observation' | 'execution'
+    rot.setdefault('auto_purge_plafond_par_run', 25)   # anti-emballement
+    rot.setdefault('titres_proteges_ids', [])          # song_ids RadioDJ jamais purgés
     return cfg
 
 
@@ -1352,3 +1360,233 @@ class MoteurRotation:
         db.commit()
         cur.close()
         db.close()
+
+    # ── Lot 21.4-a — auto-purge RETIRED > seuil (cadrage validé 24/11) ──
+
+    def candidats_auto_purge(self, log_fn=None):
+        """Titres RETIRED (hors playlists, fichier conservé) dont l'âge de
+        retrait dépasse rotation.seuil_purge_jours.
+
+        Âge = date du DERNIER événement journalisé par titre
+        (journal_operations_azura : type_op 'rotation_soft' ou
+        'playlist_remove', MAX(date_op)). Un ré-ajout ultérieur en playlist
+        repasse le titre ACTIVE : il sort du filtre flag de lui-même.
+        Âge indéterminable → titre IGNORÉ (fallback prudent validé 24/11 :
+        l'historique par titre s'accumule depuis le socle 21.1 et la
+        journalisation playlist_remove du lot 21.4-a).
+        Protections : titres_proteges_ids (jamais purgés — besoin éditorial
+        spécifique), dossiers_proteges, plafond par run (anti-emballement).
+
+        Returns: {'candidats': [{ID, artist, title, path, age_jours, stations}],
+                  'hors_plafond': int, 'ignores_age': int, 'proteges': int,
+                  'seuil_jours': int, 'plafond': int, 'mode': str}
+        """
+        rot = self.config['rotation']
+        seuil = int(rot.get('seuil_purge_jours', 90))
+        plafond = int(rot.get('auto_purge_plafond_par_run', 25))
+        try:
+            proteges_ids = {int(x) for x in (rot.get('titres_proteges_ids') or [])}
+        except (TypeError, ValueError):
+            proteges_ids = set()
+        dossiers_proteges = [str(d).rstrip('/') for d in (rot.get('dossiers_proteges') or [])]
+
+        db = pymysql.connect(**self.db_config)
+        cur = db.cursor(pymysql.cursors.DictCursor)
+        # 1. Titres actuellement RETIRED (flag mono-état AZURA_RETIRED_S*)
+        cur.execute(
+            "SELECT ID, artist, title, `path`, comments "
+            "FROM radiodb.songs "
+            "WHERE song_type = 0 AND comments LIKE 'AZURA_RETIRED_S%' "
+            "AND comments NOT LIKE '%ACTIVE%' AND comments NOT LIKE '%PUSHED%' "
+            "AND comments NOT LIKE '%REMOVED%'"
+        )
+        songs = cur.fetchall()
+        # 2. Âges : dernier événement de retrait journalisé par titre
+        ages = {}
+        try:
+            cur.execute(
+                "SELECT song_id_radiodj, MAX(date_op) AS derniere_sortie "
+                "FROM journal_operations_azura "
+                "WHERE type_op IN ('rotation_soft', 'playlist_remove') "
+                "AND song_id_radiodj IS NOT NULL "
+                "GROUP BY song_id_radiodj"
+            )
+            for row in cur.fetchall():
+                ages[row['song_id_radiodj']] = row['derniere_sortie']
+        except Exception:
+            pass  # table absente (déploiement partiel) → tous âges inconnus
+        cur.close()
+        db.close()
+
+        maintenant = datetime.now()
+        candidats, ignores_age, proteges = [], 0, 0
+        for song in songs:
+            sid = song['ID']
+            if sid in proteges_ids:
+                proteges += 1
+                continue
+            chemin = str(song.get('path') or '').replace('\\', '/')
+            if dossiers_proteges and any(
+                    chemin.startswith(d + '/') or chemin.startswith(d)
+                    for d in dossiers_proteges if d):
+                proteges += 1
+                continue
+            date_sortie = ages.get(sid)
+            if not date_sortie:
+                ignores_age += 1
+                continue  # âge indéterminable → ignoré (cadrage 24/11)
+            age_jours = (maintenant - date_sortie).total_seconds() / 86400.0
+            if age_jours < seuil:
+                continue
+            stations = sorted(st for st, etat
+                              in decomposer_flag(song.get('comments')).items()
+                              if etat == 'RETIRED')
+            candidats.append({
+                'ID': sid,
+                'artist': song.get('artist'),
+                'title': song.get('title'),
+                'path': song.get('path'),
+                'age_jours': round(age_jours, 1),
+                'stations': stations,
+            })
+        candidats.sort(key=lambda c: -c['age_jours'])  # les plus anciens d'abord
+        retenus = candidats[:plafond]
+        if log_fn:
+            log_fn(f"[AUTO PURGE] {len(candidats)} candidat(s) RETIRED > {seuil} j "
+                   f"({ignores_age} âge inconnu ignoré(s), {proteges} protégé(s)) — "
+                   f"{len(retenus)} retenu(s) (plafond {plafond})")
+        return {'candidats': retenus,
+                'hors_plafond': len(candidats) - len(retenus),
+                'ignores_age': ignores_age, 'proteges': proteges,
+                'seuil_jours': seuil, 'plafond': plafond,
+                'mode': str(rot.get('auto_purge_mode', 'observation'))}
+
+    def executer_auto_purge(self, task_id=None, log_fn=None,
+                            trigger_source=None):
+        """Lot 21.4-a — auto-purge des RETIRED > seuil_jours, mode SOFT.
+
+        Le mode est relu à chaque appel (config.json lu par run → débrayable
+        au run suivant, sans redémarrage) :
+          - 'observation' : détecte, journalise les candidats
+            (type_op='auto_purge', details.action='observation') et NE TOUCHE
+            À RIEN — zéro écriture RadioDJ/AzuraCast.
+          - 'execution'  : pour chaque candidat et chaque station RETIRED →
+            flag passe à REMOVED (le fichier est CONSERVÉ). Journalisation
+            par titre type_op='auto_purge', details.action='soft_purge' avec
+            artiste/titre/chemin/âge → la liste des titres « à supprimer
+            manuellement » est interrogeable par une requête simple sur le
+            journal, et identifiable côté RadioDJ via AZURA_REMOVED_S*.
+        AUCUN appel delete_media : la suppression physique (hard) reste hors
+        périmètre tant que la question 6 du cadrage n'est pas levée
+        (automation.rotation_hard_autorise=False). La garde resync
+        (worker 21.4-a) empêche le resync de dégrader REMOVED → RETIRED
+        tant que le fichier est présent.
+
+        Returns: dict {mode, detectes, purges, erreurs, ignores_age,
+                       proteges, seuil_jours, plafond, details}.
+        """
+        res = self.candidats_auto_purge(log_fn=log_fn)
+        mode = str(self.config['rotation'].get('auto_purge_mode', 'observation'))
+        resultats = {'mode': mode, 'detectes': len(res['candidats']),
+                     'purges': 0, 'erreurs': 0,
+                     'ignores_age': res['ignores_age'],
+                     'proteges': res['proteges'],
+                     'seuil_jours': res['seuil_jours'],
+                     'plafond': res['plafond'],
+                     'hors_plafond': res['hors_plafond'],
+                     'details': []}
+
+        if mode == 'observation':
+            # Journal d'observation : aucune écriture flag/AzuraCast
+            if res['candidats']:
+                journaliser_operation(
+                    self.db_config, 'auto_purge', station_id=None,
+                    triggered_by='auto_purge', task_id=task_id,
+                    trigger_source=trigger_source, details={
+                        'action': 'observation',
+                        'seuil_jours': res['seuil_jours'],
+                        'candidats': res['candidats'],
+                        'hors_plafond': res['hors_plafond']})
+            if log_fn:
+                log_fn(f"[AUTO PURGE] mode observation — "
+                       f"{len(res['candidats'])} candidat(s) journalisé(s), "
+                       f"aucune écriture")
+            return resultats
+
+        # mode 'execution' — soft : flag RETIRED → REMOVED, fichier conservé
+        for cand in res['candidats']:
+            sid_song = cand['ID']
+            try:
+                db = pymysql.connect(**self.db_config)
+                cur = db.cursor(pymysql.cursors.DictCursor)
+                cur.execute(
+                    "SELECT ID, artist, title, `path`, comments "
+                    "FROM radiodb.songs WHERE ID = %s", (sid_song,))
+                song = cur.fetchone()
+                cur.close()
+                db.close()
+                if not song:
+                    resultats['erreurs'] += 1
+                    resultats['details'].append(
+                        {'song_id': sid_song, 'erreur': 'song introuvable'})
+                    continue
+                etats = decomposer_flag(song.get('comments'))
+                stations_purge = [st for st, et in etats.items()
+                                  if et == 'RETIRED']
+                if not stations_purge:
+                    continue  # flag changé entre-temps (ex. ré-activé)
+                # Recomposition en UNE passe groupée : recalcule_flag_apres_op
+                # appelé station par station perdrait l'état REMOVED déjà posé
+                # (fusion prioritaire mono-état). Ici : toutes les stations
+                # RETIRED passent REMOVED d'un coup, les autres états conservés.
+                for st in stations_purge:
+                    etats[st] = 'REMOVED'
+                par_etat = {}
+                for st, et in etats.items():
+                    par_etat.setdefault(et, []).append(st)
+                nouveau_flag = song.get('comments') or ''
+                for etat_prio in ('ACTIVE', 'RETIRED', 'PUSHED', 'REMOVED'):
+                    if etat_prio in par_etat:
+                        nouveau_flag = composer_flag(etat_prio,
+                                                     par_etat[etat_prio])
+                        break
+                self._maj_flag(sid_song, nouveau_flag)
+                resultats['purges'] += 1
+                journaliser_operation(
+                    self.db_config, 'auto_purge', station_id=None,
+                    triggered_by='auto_purge', task_id=task_id,
+                    trigger_source=trigger_source, details={
+                        'action': 'soft_purge',
+                        'song_id_radiodj': sid_song,
+                        'artist': song.get('artist'),
+                        'title': song.get('title'),
+                        'path': song.get('path'),
+                        'stations': stations_purge,
+                        'age_jours': cand.get('age_jours'),
+                        'seuil_jours': res['seuil_jours'],
+                        'flag_avant': song.get('comments'),
+                        'flag_apres': nouveau_flag,
+                        'suppression_manuelle_future': True})
+                resultats['details'].append({
+                    'song_id': sid_song,
+                    'artist': song.get('artist'),
+                    'title': song.get('title'),
+                    'stations': stations_purge,
+                    'age_jours': cand.get('age_jours')})
+                if log_fn:
+                    log_fn(f"[AUTO PURGE] song {sid_song} "
+                           f"({song.get('artist')} - {song.get('title')}) : "
+                           f"RETIRED → REMOVED (stations {stations_purge}, "
+                           f"âge {cand.get('age_jours')} j) — fichier conservé")
+            except Exception as e:
+                resultats['erreurs'] += 1
+                resultats['details'].append(
+                    {'song_id': sid_song,
+                     'erreur': f"{type(e).__name__}: {e}"})
+                if log_fn:
+                    log_fn(f"[AUTO PURGE] ERREUR song {sid_song} : "
+                           f"{type(e).__name__}: {e}")
+        if log_fn:
+            log_fn(f"[AUTO PURGE] mode execution — {resultats['purges']} purgé(s) "
+                   f"(soft), {resultats['erreurs']} erreur(s)")
+        return resultats

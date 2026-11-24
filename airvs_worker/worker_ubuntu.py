@@ -44,7 +44,7 @@
 #                 • Réutilisation du moteur de matching flou de executer_prefill_sheets
 #                 • Dépendance : validation_pool_multiformat.py (même dossier)
 # ═══════════════════════════════════════════════════════════════════
-WORKER_VERSION = "2026.11.23-A"  # + D4-a bis : cycle quotidien SYNCHRO_DIFFUSION avec rattrapage au démarrage (machines studio éteintes la nuit) + fix garde journalier (manuelles exclues via trigger_source). Historique : + T2 SYNCHRO_DIFFUSION : compteurs RadioDJ depuis historique AzuraCast (D1/D2 écrasement+delta, D3 résolveur P3→P4→P5→P6→N1→N2 + ambiguïté +1 tous, D4-a cron quotidien, snapshot bak_songs_counters avant 1er run, journal synchro_diffusion). Historique antérieur : Phase 21.3 résolveur mapping/moteur rotation. B : hotfix whitelist SQL. C : hotfix cleanup orphelines (date_debut_execution)
+WORKER_VERSION = "2026.11.24-B"  # + 21.4-a : auto-purge RETIRED > seuil — cron 1x/jour 8h-20h + rattrapage GF4, modes observation/execution débrayables (config.json relu par run), plafond + titres_proteges_ids + dossiers_proteges, journal auto_purge (« à supprimer manuellement »), garde resync : REMOVED non dégradé tant que le fichier est présent, journalisation playlist_remove du retrait sticky-bar. Historique : 2026.11.23-A : + D4-a bis : cycle quotidien SYNCHRO_DIFFUSION avec rattrapage au démarrage (machines studio éteintes la nuit) + fix garde journalier (manuelles exclues via trigger_source). Historique antérieur : + T2 SYNCHRO_DIFFUSION : compteurs RadioDJ depuis historique AzuraCast (D1/D2 écrasement+delta, D3 résolveur P3→P4→P5→P6→N1→N2 + ambiguïté +1 tous, D4-a cron quotidien, snapshot bak_songs_counters avant 1er run, journal synchro_diffusion). Plus ancien : Phase 21.3 résolveur mapping/moteur rotation. B : hotfix whitelist SQL. C : hotfix cleanup orphelines (date_debut_execution)
 
 import time
 import datetime
@@ -2170,6 +2170,21 @@ def executer_azura_remove_from_playlist(tache_id, parametres):
                                               f'retrait_playlist_s{station_id}')
                     except Exception:
                         pass
+                # Lot 21.4-a — journalisation par titre : le docstring de cette
+                # fonction la promettait (« Journalise l'opération ») ; c'est la
+                # source d'âge RETIRED de l'auto-purge (avec rotation_soft).
+                if ROTATION_MODULE_DISPONIBLE:
+                    try:
+                        _journaliser_rotation(DB_CONFIG, 'playlist_remove',
+                                              station_id=station_id,
+                                              media_id_azura=media_id,
+                                              song_id_radiodj=song_id_radiodj,
+                                              triggered_by='manual',
+                                              task_id=tache_id,
+                                              details={'playlist_id': playlist_id,
+                                                       'flag_apres': nouveau_flag})
+                    except Exception:
+                        pass  # journal non bloquant (table absente, etc.)
             except Exception as e:
                 logger(tache_id, f"[ERREUR] Impossible de mettre à jour le flag RadioDJ : {e}")
 
@@ -6337,6 +6352,14 @@ def executer_sync_azura_status(tache_id, parametres):
                         etat_precedent = _get_station_state_from_flag(current_comments, sid)
                         if etat_precedent in ('ACTIVE', 'RETIRED'):
                             nouvel_etat_par_station[sid] = 'RETIRED'
+                        elif etat_precedent == 'REMOVED':
+                            # Lot 21.4-a — REMOVED posé par l'auto-purge (fichier
+                            # encore présent, hors playlists) → PAS de dégradation
+                            # vers RETIRED/PUSHED : le titre reste identifié
+                            # « à supprimer manuellement » jusqu'à action humaine
+                            # (ré-ajout en playlist → ACTIVE reprendra la main ;
+                            # suppression physique réelle → branche fichier absent).
+                            nouvel_etat_par_station[sid] = 'REMOVED'
                         else:
                             # Jamais été actif → on garde PUSHED (pas un retrait)
                             nouvel_etat_par_station[sid] = 'PUSHED'
@@ -6517,6 +6540,7 @@ TYPES_PRIORITE_FOND = (
     'SYNC_AZURA_STATUS', 'SYNC_PLAYLISTS_CACHE', 'AUTO_CHECK_SHEETS',
     'AUDIENCE_GET_DATA', 'PIGE_LIST', 'PIGE_EXTRACT',
     'PODCASTS_LIST', 'PODCASTS_EPISODES', 'SYNCHRO_DIFFUSION',
+    'AUTO_PURGE_RETIRED',  # Lot 21.4-a — cron 1x/jour, jamais prioritaire (GF1)
 )
 
 
@@ -7951,6 +7975,74 @@ def _sync_azura_automatique():
         print(f"[SYNC AUTO] Erreur : {e}")
 
 
+# ── Lot 21.4-a — cron auto-purge RETIRED (cadrage validé 24/11) ──
+INTERVALLE_VERIF_AUTO_PURGE = 3600  # vérification horaire (même plage 8h-20h)
+
+
+def _auto_purge_automatique():
+    """Lot 21.4-a : insère une tâche AUTO_PURGE_RETIRED (1x/jour) si :
+      - rotation.auto_purge_actif = true dans config.json (défaut False —
+        débrayé tant que non activé par l'exploitant) ;
+      - on est dans la plage horaire sync_azura (8h-20h, GF7, Europe/Paris) ;
+      - aucune AUTO_PURGE_RETIRED en attente/en_cours (garde de file) ;
+      - aucune AUTO_PURGE_RETIRED déjà terminée aujourd'hui (1x/jour).
+    Le mode observation/execution est relu par le MOTEUR à l'exécution
+    (config.json lu par run) : modifier le config.json débraye au run
+    suivant, sans redémarrage du worker."""
+    try:
+        cfg_rot = lire_config_rotation()['rotation']
+        if not bool(cfg_rot.get('auto_purge_actif')):
+            return  # débrayé (défaut — cadrage : activation progressive)
+        from datetime import datetime as dt
+        try:
+            import tzlocal
+            tz = tzlocal.get_localzone()
+            now_local = dt.now(tz)
+        except ImportError:
+            now_local = dt.now()  # Fallback sans timezone
+        cfg_auto = _lire_config_automation()
+        heure = now_local.hour
+        if heure < cfg_auto['sync_azura_heure_debut'] or heure >= cfg_auto['sync_azura_heure_fin']:
+            return  # Hors plage horaire (GF7)
+
+        db = pymysql.connect(**DB_CONFIG)
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        # Garde de file anti-doublon
+        cursor.execute(
+            "SELECT id FROM taches_planifiees "
+            "WHERE type_action = 'AUTO_PURGE_RETIRED' "
+            "AND statut IN ('en_attente', 'en_cours') LIMIT 1"
+        )
+        if cursor.fetchone():
+            cursor.close()
+            db.close()
+            return  # Tâche déjà en file
+        # Garde journalière : 1 seule exécution par jour
+        cursor.execute(
+            "SELECT id FROM taches_planifiees "
+            "WHERE type_action = 'AUTO_PURGE_RETIRED' AND statut = 'termine' "
+            "AND DATE(date_fin) = CURDATE() LIMIT 1"
+        )
+        if cursor.fetchone():
+            cursor.close()
+            db.close()
+            return  # Déjà passée aujourd'hui
+        cursor.execute(
+            "INSERT INTO taches_planifiees "
+            "(type_action, statut, parametres, date_creation) "
+            "VALUES ('AUTO_PURGE_RETIRED', 'en_attente', %s, NOW())",
+            (json.dumps({'auto_scheduled': True, 'trigger_source': 'cron:quotidien'}),)
+        )
+        task_purge_id = cursor.lastrowid
+        db.commit()
+        cursor.close()
+        db.close()
+        print(f"[AUTO PURGE] Tâche AUTO_PURGE_RETIRED #{task_purge_id} planifiée "
+              f"(mode relu à l'exécution : observation/execution)")
+    except Exception as e:
+        print(f"[AUTO PURGE] Erreur : {e}")
+
+
 # ── T2 2026.11.22-A — cron quotidien SYNCHRO_DIFFUSION (D4-a) ──
 INTERVALLE_VERIF_SYNCHRO_DIFFUSION = 300  # vérification toutes les 5 min
 
@@ -8753,6 +8845,40 @@ def _rattrapage_crons_au_demarrage():
                 db.commit()
                 print("  ✓ GF4 : rattrapage SYNC_AZURA_STATUS réinséré au démarrage "
                       "(dernière exécution trop ancienne)")
+
+        # ── Lot 21.4-a — rattrapage auto-purge (même logique GF4) ──
+        # Si auto_purge_actif et aucune AUTO_PURGE_RETIRED terminée depuis
+        # plus de 24 h (worker éteint pendant la plage 8h-20h) → réinsérer.
+        try:
+            _cfg_rot_purge = lire_config_rotation()['rotation']
+            if bool(_cfg_rot_purge.get('auto_purge_actif')):
+                cursor.execute(
+                    "SELECT id FROM taches_planifiees "
+                    "WHERE type_action = 'AUTO_PURGE_RETIRED' "
+                    "AND statut IN ('en_attente', 'en_cours') LIMIT 1")
+                if not cursor.fetchone():
+                    cursor.execute(
+                        "SELECT date_fin FROM taches_planifiees "
+                        "WHERE type_action = 'AUTO_PURGE_RETIRED' "
+                        "AND statut = 'termine' ORDER BY date_fin DESC LIMIT 1")
+                    _derniere_purge = cursor.fetchone()
+                    from datetime import datetime as _dt_purge
+                    from datetime import timedelta as _td_purge
+                    if (not _derniere_purge or not _derniere_purge['date_fin']
+                            or _dt_purge.now() - _derniere_purge['date_fin']
+                            > _td_purge(hours=24)):
+                        cursor.execute(
+                            "INSERT INTO taches_planifiees "
+                            "(type_action, parametres, statut) "
+                            "VALUES ('AUTO_PURGE_RETIRED', %s, 'en_attente')",
+                            (json.dumps({'auto_scheduled': True,
+                                         'trigger_source': 'cron:quotidien',
+                                         'source': 'rattrapage_demarrage'}),))
+                        db.commit()
+                        print("  ✓ GF4 : rattrapage AUTO_PURGE_RETIRED réinséré "
+                              "au démarrage (dernière > 24 h)")
+        except Exception as _e_purge:
+            print(f"  ⚠ GF4 rattrapage auto-purge ignoré (non bloquant) : {_e_purge}")
         cursor.close()
         db.close()
     except Exception as e:
@@ -8920,6 +9046,44 @@ def executer_mapping_bootstrap(tache_id, parametres):
                           task_id=tache_id, details={'stations': resume})
     logger(tache_id, f"[RÉSUMÉ] {json.dumps(resume, ensure_ascii=False, default=str)}")
     logger(tache_id, "=== TERMINÉ MAPPING BOOTSTRAP ===")
+
+
+def executer_auto_purge_retired(tache_id, parametres):
+    """Lot 21.4-a — AUTO_PURGE_RETIRED : purge SOFT des titres RETIRED dont
+    l'âge de retrait dépasse rotation.seuil_purge_jours (défaut 90 j).
+    Le mode est relu à l'exécution (config.json lu par run → débrayable au
+    run suivant, sans redémarrage) :
+      - observation : journalise les candidats, N'ÉCRIT rien ;
+      - execution  : flag RETIRED → REMOVED (fichier conservé), journalise
+        chaque titre « à supprimer manuellement » (type_op auto_purge).
+    Aucune suppression physique : le hard reste hors périmètre tant que la
+    question 6 du cadrage n'est pas levée (rotation_hard_autorise=False).
+    Après une exécution avec purges effectives : régénération du miroir
+    demandée (les comments ont changé)."""
+    logger(tache_id, "=== DÉBUT AUTO PURGE RETIRED ===")
+    if not ROTATION_MODULE_DISPONIBLE:
+        logger(tache_id, "ERREUR: module rotation_azura.py indisponible.")
+        logger(tache_id, "=== TERMINÉ === (module indisponible)")
+        return
+    trigger_source = parametres.get('trigger_source') or 'cron:quotidien'
+    if parametres.get('source'):
+        trigger_source = f"cron:{parametres.get('source')}"
+    try:
+        moteur = MoteurRotation(DB_CONFIG)
+        res = moteur.executer_auto_purge(
+            task_id=tache_id, log_fn=lambda m: logger(tache_id, m),
+            trigger_source=trigger_source)
+        resume = {k: v for k, v in res.items() if k != 'details'}
+        logger(tache_id, f"[RÉSULTAT] {json.dumps(resume, ensure_ascii=False, default=str)}")
+        if res.get('mode') == 'execution' and res.get('purges'):
+            try:
+                demander_regen_miroir(DB_CONFIG, 'auto_purge_retired')
+            except Exception:
+                pass
+        logger(tache_id, "=== TERMINÉ AUTO PURGE RETIRED ===")
+    except Exception as e:
+        logger(tache_id, f"ERREUR auto-purge: {type(e).__name__}: {e}")
+        logger(tache_id, "=== TERMINÉ AUTO PURGE RETIRED (ERREUR) ===")
 
 
 def main():
@@ -9238,6 +9402,7 @@ def main():
     dernier_check_sync_azura_auto = 0
     dernier_check_sync_vps = 0
     dernier_check_synchro_diffusion = 0  # T2 2026.11.22-A : cron quotidien D4-a
+    dernier_check_auto_purge = 0  # Lot 21.4-a : auto-purge RETIRED (1x/jour)
     dernier_check_orphelines = 0
     dernier_check_purge_terminees = 0  # 2026.09.28 : purge auto tâches terminées
     dernier_check_nowplaying = 0  # Phase 20.1 : cache nowplaying topbar (10s)
@@ -9276,6 +9441,11 @@ def main():
             if now_ts - dernier_check_sync_azura_auto >= INTERVALLE_SYNC_AZURA_AUTO:
                 _sync_azura_automatique()
                 dernier_check_sync_azura_auto = now_ts
+
+            # ── Lot 21.4-a — auto-purge RETIRED (1x/jour, même plage 8h-20h) ──
+            if now_ts - dernier_check_auto_purge >= INTERVALLE_VERIF_AUTO_PURGE:
+                _auto_purge_automatique()
+                dernier_check_auto_purge = now_ts
 
             # ── Synchronisation automatique VPS (toutes les 5 min) ──
             if now_ts - dernier_check_sync_vps >= INTERVALLE_SYNC_VPS:
@@ -9367,7 +9537,8 @@ def main():
                 "    'ROTATION_PREVIEW', "  # Phase 21.3 — candidats au retrait (sans exécuter)
                 "    'ROTATION_EXECUTE', "  # Phase 21.3 — rotation validée (soft par défaut)
                 "    'MAPPING_BOOTSTRAP', "  # Phase 21.3 — remplissage cache mapping_radiodj_azura
-                "    'SYNCHRO_DIFFUSION') "  # T2 2026.11.22-A — compteurs RadioDJ depuis history AzuraCast
+                "    'SYNCHRO_DIFFUSION', "  # T2 2026.11.22-A — compteurs RadioDJ depuis history AzuraCast
+                "    'AUTO_PURGE_RETIRED') "  # Lot 21.4-a — auto-purge soft RETIRED > seuil
                 # Phase 19.1 — A1 : respecter date_planifiee pour les tâches différées
                 # (IMPORT_M3U_RETRY programmé 60s plus tard). Les tâches sans date_planifiee
                 # sont immédiatement éligibles (comportement historique préservé).
@@ -9478,6 +9649,10 @@ def main():
                     elif type_action == 'MAPPING_BOOTSTRAP':
                         # Phase 21.3 — remplissage cache mapping_radiodj_azura
                         executer_mapping_bootstrap(tache_id, parametres)
+                    elif type_action == 'AUTO_PURGE_RETIRED':
+                        # Lot 21.4-a — auto-purge soft RETIRED > seuil
+                        # (observation/execution relu à l'exécution)
+                        executer_auto_purge_retired(tache_id, parametres)
                     elif type_action == 'SYNCHRO_DIFFUSION':
                         # T2 2026.11.22-A — compteurs RadioDJ depuis history AzuraCast
                         executer_synchro_diffusion(tache_id, parametres)

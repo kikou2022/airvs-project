@@ -564,6 +564,29 @@ def api_system_freshness():
         except Exception:
             pass
 
+        # 6. Lot 21.4-a — dernière auto-purge (journal socle 21.1, table
+        #    optionnelle ; mode observation = candidats, execution = purges)
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) AS c FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = 'journal_operations_azura'"
+            )
+            if (cursor.fetchone() or {}).get("c", 0) > 0:
+                cursor.execute(
+                    "SELECT date_op, details FROM journal_operations_azura "
+                    "WHERE type_op = 'auto_purge' ORDER BY date_op DESC LIMIT 1"
+                )
+                row = cursor.fetchone()
+                if row:
+                    reponse["derniere_auto_purge"] = {
+                        "date_op": _iso(row.get("date_op")),
+                        "age_secondes": (int((datetime.datetime.now() - row["date_op"]).total_seconds())
+                                         if row.get("date_op") else None),
+                        "details": row.get("details"),
+                    }
+        except Exception:
+            pass
+
         cursor.close()
         db.close()
         return jsonify(reponse)
