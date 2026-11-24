@@ -53,8 +53,61 @@ AZURACAST_LOCAL_PATH = "/home/sebastien/music_azuracast6_7/"
 MOT_CLE_AZURA = "AZURA_PUSHED_S6_S7" # Vocabulaire AZURA_* (Phase 19.0/R0). Écriture DB neutralisée (PATCH_20261012) : valeur utilisée uniquement pour le calcul de statut.
 MOT_CLE_SHAZAM = "VIA_SHAZAM"   # Le mot-clé exact qui sera écrit dans songs.label
 
-AZURA_API_URL = "https://azuracast.2026.airvs.fr/api/station/7/files"
-AZURA_API_KEY = "5e256834da4da4cf:1cadd3936115612949a795cd5a48e12d"
+# ── Clé API : plus AUCUNE clé en dur dans ce script (lot 2026.11.25-A) ──
+# Le script vit sur la même machine que le worker (pige) : la clé active est
+# lue dans le config.json du worker (§ azuracast.api_key / base_url), résolu
+# relativement à ce fichier → ../airvs_worker/config.json.
+# Ordre de résolution :
+#   1. variable d'environnement AIRVS_AZURA_API_KEY (écrase tout, test/cron) ;
+#      (base URL écrasable par AIRVS_AZURA_BASE_URL, chemin du config.json par
+#      AIRVS_AZURA_CONFIG)
+#   2. § azuracast du config.json du worker — source de vérité unique :
+#      renouveler la clé = éditer le config.json du worker, JAMAIS ce script ;
+#   3. rien trouvé → clé vide : Passe 2 (API) sautée proprement, export non
+#      bloqué (la Passe 1 par noms de fichiers locaux couvre l'essentiel).
+AZURA_STATION_ID = 7  # station interrogée pour la Passe 2 (flux tendu)
+_CHEMIN_CONFIG_WORKER = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    os.pardir, 'airvs_worker', 'config.json'))
+_BASE_URL_DEFAUT = "https://azuracast.2026.airvs.fr"
+
+
+def lire_config_api_azura():
+    """Résout (base_url, api_key, source) pour la Passe 2 — jamais en dur ici."""
+    cle_env = os.environ.get('AIRVS_AZURA_API_KEY', '').strip()
+    if cle_env:
+        base = (os.environ.get('AIRVS_AZURA_BASE_URL', '').strip()
+                or _BASE_URL_DEFAUT)
+        return base, cle_env, "variable d'environnement AIRVS_AZURA_API_KEY"
+
+    chemin_config = (os.environ.get('AIRVS_AZURA_CONFIG', '').strip()
+                     or _CHEMIN_CONFIG_WORKER)
+    try:
+        with open(chemin_config, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        azura = cfg.get('azuracast') if isinstance(cfg, dict) else None
+        if isinstance(azura, dict):
+            cle = str(azura.get('api_key') or '').strip()
+            base = (str(azura.get('base_url') or '').strip()
+                    or _BASE_URL_DEFAUT)
+            if cle:
+                return base, cle, chemin_config
+        print(f"[CONFIG] {chemin_config} lu mais § azuracast.api_key absent/vide.")
+    except FileNotFoundError:
+        print(f"[CONFIG] config.json worker introuvable : {chemin_config}")
+    except Exception as e:
+        print(f"[CONFIG] Lecture impossible de {chemin_config} : {e}")
+    return _BASE_URL_DEFAUT, "", "aucune (clé API non configurée)"
+
+
+AZURA_BASE_URL, AZURA_API_KEY, AZURA_CLE_SOURCE = lire_config_api_azura()
+AZURA_API_URL = (f"{AZURA_BASE_URL.rstrip('/')}"
+                 f"/api/station/{AZURA_STATION_ID}/files")
+if AZURA_API_KEY:
+    print(f"[CONFIG] Clé API AzuraCast chargée — source : {AZURA_CLE_SOURCE}")
+else:
+    print(f"[CONFIG] ATTENTION : aucune clé API trouvée "
+          f"→ Passe 2 (API) sera sautée (export non bloqué).")
 
 # ==========================================
 # FONCTIONS DE NETTOYAGE ET DE COMPARAISON
@@ -132,68 +185,71 @@ def verifier_azuracast(db):
     # PASSE 2 : Comparaison via l'API AZURACAST (Réseau, fulgurant)
     # ---------------------------------------------------------
     fichiers_azura_par_api = set()
-    print(f"[{datetime.now()}] [NIVEAU 2] Passe 2 (API) : Interrogation de l'API en cours...")
+    if not AZURA_API_KEY:
+        print(f"[{datetime.now()}] [NIVEAU 2] Passe 2 (API) : clé API non configurée — passe sautée (export non bloqué).")
+    else:
+        print(f"[{datetime.now()}] [NIVEAU 2] Passe 2 (API) : Interrogation de l'API en cours...")
     
-    try:
-        headers = {"Authorization": f"Bearer {AZURA_API_KEY}"}
-        page = 1
-        has_more = True
-        premier_log_fait = False  # Pour le diagnostic du format API
+        try:
+            headers = {"Authorization": f"Bearer {AZURA_API_KEY}"}
+            page = 1
+            has_more = True
+            premier_log_fait = False  # Pour le diagnostic du format API
         
-        while has_more:
-            # On paginate par blocs de 100 (standard et sûr pour le serveur)
-            params = {"limit": 100, "page": page} 
-            reponse = requests.get(AZURA_API_URL, headers=headers, params=params, timeout=60)
+            while has_more:
+                # On paginate par blocs de 100 (standard et sûr pour le serveur)
+                params = {"limit": 100, "page": page} 
+                reponse = requests.get(AZURA_API_URL, headers=headers, params=params, timeout=60)
             
-            if reponse.status_code == 200:
-                    data = reponse.json()
+                if reponse.status_code == 200:
+                        data = reponse.json()
                     
-                    # DIAGNOSTIC : Log du format API sur la première page
-                    if not premier_log_fait:
-                        type_reponse = "liste" if isinstance(data, list) else f"dict (clés: {list(data.keys())})"
-                        pagination = "has_more" if isinstance(data, dict) and "has_more" in data else \
-                                    "has_more_pages" if isinstance(data, dict) and "has_more_pages" in data else \
-                                    "aucun champ pagination"
-                        print(f"[{datetime.now()}] [NIVEAU 2] [DIAG] API format: {type_reponse} | pagination: {pagination}")
-                        premier_log_fait = True
+                        # DIAGNOSTIC : Log du format API sur la première page
+                        if not premier_log_fait:
+                            type_reponse = "liste" if isinstance(data, list) else f"dict (clés: {list(data.keys())})"
+                            pagination = "has_more" if isinstance(data, dict) and "has_more" in data else \
+                                        "has_more_pages" if isinstance(data, dict) and "has_more_pages" in data else \
+                                        "aucun champ pagination"
+                            print(f"[{datetime.now()}] [NIVEAU 2] [DIAG] API format: {type_reponse} | pagination: {pagination}")
+                            premier_log_fait = True
                     
-                    # SÉCURITÉ : L'API peut renvoyer une liste directe ou un dictionnaire avec "rows"
-                    if isinstance(data, list):
-                        rows = data
-                    else:
-                        rows = data.get("rows", [])
-                    
-                    if not rows:
-                        has_more = False # Plus de résultats, on arrête la boucle
-                    else:
-                        for morceau in rows:
-                            artist = str(morceau.get("artist", "") or "").strip().lower()
-                            title = str(morceau.get("title", "") or "").strip().lower()
-                            
-                            if artist and title:
-                                # On ajoute la version BRUTE (comme avant)
-                                chaine_api_brute = re.sub(r'\s+', ' ', f"{artist} - {title}")
-                                fichiers_azura_par_api.add(chaine_api_brute)
-                                # On ajoute aussi la version NORMALISÉE (accents, & , ponctuation)
-                                chaine_api_norm = normaliser_pour_comparaison(f"{artist} - {title}")
-                                fichiers_azura_par_api.add(chaine_api_norm)
-                                
-                        # Gestion de la pagination (compatible has_more ET has_more_pages)
-                        if isinstance(data, dict):
-                            if data.get("has_more", False) or data.get("has_more_pages", False):
-                                page += 1
-                            else:
-                                has_more = False
+                        # SÉCURITÉ : L'API peut renvoyer une liste directe ou un dictionnaire avec "rows"
+                        if isinstance(data, list):
+                            rows = data
                         else:
-                            has_more = False # Si c'était une liste simple, on a tout eu d'un coup
-            else:
-                print(f"[{datetime.now()}] [NIVEAU 2] Passe 2 (API) : Erreur HTTP {reponse.status_code}. Abandon de l'API.")
-                has_more = False
+                            rows = data.get("rows", [])
+                    
+                        if not rows:
+                            has_more = False # Plus de résultats, on arrête la boucle
+                        else:
+                            for morceau in rows:
+                                artist = str(morceau.get("artist", "") or "").strip().lower()
+                                title = str(morceau.get("title", "") or "").strip().lower()
+                            
+                                if artist and title:
+                                    # On ajoute la version BRUTE (comme avant)
+                                    chaine_api_brute = re.sub(r'\s+', ' ', f"{artist} - {title}")
+                                    fichiers_azura_par_api.add(chaine_api_brute)
+                                    # On ajoute aussi la version NORMALISÉE (accents, & , ponctuation)
+                                    chaine_api_norm = normaliser_pour_comparaison(f"{artist} - {title}")
+                                    fichiers_azura_par_api.add(chaine_api_norm)
+                                
+                            # Gestion de la pagination (compatible has_more ET has_more_pages)
+                            if isinstance(data, dict):
+                                if data.get("has_more", False) or data.get("has_more_pages", False):
+                                    page += 1
+                                else:
+                                    has_more = False
+                            else:
+                                has_more = False # Si c'était une liste simple, on a tout eu d'un coup
+                else:
+                    print(f"[{datetime.now()}] [NIVEAU 2] Passe 2 (API) : Erreur HTTP {reponse.status_code}. Abandon de l'API.")
+                    has_more = False
                 
-        print(f"[{datetime.now()}] [NIVEAU 2] Passe 2 (API) : {len(fichiers_azura_par_api)} correspondances trouvées via API.")
+            print(f"[{datetime.now()}] [NIVEAU 2] Passe 2 (API) : {len(fichiers_azura_par_api)} correspondances trouvées via API.")
             
-    except requests.exceptions.RequestException as e:
-        print(f"[{datetime.now()}] [NIVEAU 2] Passe 2 (API) : Impossible de joindre l'API ({e}). On ignore cette passe.")
+        except requests.exceptions.RequestException as e:
+            print(f"[{datetime.now()}] [NIVEAU 2] Passe 2 (API) : Impossible de joindre l'API ({e}). On ignore cette passe.")
 
     # ---------------------------------------------------------
     # FUSION ET MISE À JOUR SQL
