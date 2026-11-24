@@ -2,29 +2,31 @@
 
 > Fichier roulant : remplacé à chaque étape importante (jamais empilé).
 > Historique complet : `git log -p -- comptes_rendus/CR_COURANT.md`.
-> **Mis à jour** : 24/11/2026 · **Base git** : `d64d1e3` (`origin/main`) · Rédaction : session agent IA
+> **Mis à jour** : 24/11/2026 · **Base git** : `6b8695e` (`origin/main`) · Rédaction : session agent IA
 
-## Dernière étape importante — Hotfix 2026.11.24-A (SYNCHRO_DIFFUSION via dashboard)
+## Dernière étape importante — Déploiement du hotfix 2026.11.24-A VALIDÉ par l'exploitant (24/11)
 
-- **Déployé et poussé** : commit `d64d1e3` (parent `636a49e`) — 2 fichiers (`blueprints/taches.py`, `index.html`), 462 insertions, 0 suppression — md5 conformes aux sources livrées, `config.json` non touché.
-- **Vérifié** : test hors-ligne 24/24 PASS relancé sur l'état GitHub exact ; chaîne complète patch officiel → application → commit → contenu GitHub contrôlée à chaque maillon.
-- **Incident d'emballage** résolu (base attendue `a0ace69` = SHA local hors GitHub, au lieu de `origin/main` `636a49e`) : script d'application **v1.2** (base réalignée, message d'erreur clarifié, règle durable : base = `rev-parse origin/main` après fetch). Détail : CR de livraison `livraison_synchro_diffusion_dashboard_2026-11-24` §11.
-- **Reste côté exploitation** : redémarrage du service dashboard, puis test interface — carte SYNCHRO_DIFFUSION visible, lancement mode **simulation** → tâche avec `dry_run=true`, statut affiché, rien écrit dans RadioDJ.
-- Le lancement manuel utilise le lanceur CLI existant (`lancer_synchro_diffusion.py`) : le dashboard écrit une tâche avec les mêmes `parametres` que le CLI (`trigger_source: "manuel:dashboard"`) ; le comportement hors 4h00 a été validé (rattrapage par curseurs, garde de file, idempotence).
+- **Déploiement effectué, tests interface OK** : carte SYNCHRO_DIFFUSION opérationnelle en production (lancement simulation/réel + statut). Redémarrage du service réalisé.
+- Chaîne complète maîtrisée : patch officiel → script d'application v1.2 → commit `d64d1e3` (parent `636a49e`, 2 fichiers, 462 insertions, md5 conformes aux sources livrées) → test hors-ligne 24/24 PASS sur l'état GitHub.
+- Incident d'emballage du jour (base `a0ace69` locale ≠ `origin/main`) résolu par le script v1.2 ; règle durable : base d'un patch = `rev-parse origin/main` après fetch (détail : CR de livraison `livraison_synchro_diffusion_dashboard_2026-11-24` §11).
+- Fonctionnalité : le lancement manuel depuis le dashboard écrit une tâche avec les mêmes `parametres` que le lanceur CLI (`trigger_source: "manuel:dashboard"`) — comportement hors 4h00 validé (rattrapage par curseurs, garde de file, idempotence).
+
+## Vérification des doublons (24/11) — consignée
+
+- L'exploitant a contrôlé les doublons côté RadioDJ suite à la synchro : un titre diffusé à 2h31 sur AzuraCast apparaît dans RadioDJ à la même heure à la seconde près, avec un doublon du même titre à la même date.
+- La **déduplication complète reste un chantier à part, reporté** de longue date par l'exploitant ; en attendant, la détection des doublons à l'entrée en base (dashboard Windows) reste active — déjà une avancée selon l'exploitant.
 
 ## Contexte T2 SYNCHRO_DIFFUSION (clos)
 
 - Tour T2 + hotfix poussés le 23/11 (`636a49e`/`9d35c6c`) ; verdict 10/10 au 23/11 **et** au 24/11 ; rattrapage après extinction à 4h00 prouvé (CR T2 §11.5-11.6, zone de livraison 2026-11-23).
-- Vérification indépendante de l'exploitant : titre diffusé sur AzuraCast visible dans RadioDJ à la seconde près.
 
 ## Chantiers ouverts
 
-1. **Consigner au CR la vérification des doublons du 24/11** (validé par l'exploitant) — à intégrer au prochain CR.
-2. **Déduplication RadioDJ** : chantier à part, reporté de longue date par l'exploitant ; en attendant, détection des doublons à l'entrée en base active depuis le dashboard Windows.
-3. **Diagnostic réseau** : en pause (consigne). **SSHFS→SAMBA** : hors périmètre.
+1. **Déduplication RadioDJ** : chantier à part, reporté — priorisation à définir avec l'exploitant.
+2. **Diagnostic réseau** : en pause (consigne). **SSHFS→SAMBA** : hors périmètre.
 
 ## Règles actives
 
-- 9 consignes permanentes + **n°10 en ratification** : le présent fichier est remplacé et commité (`docs(cr): …`, poussé immédiatement) à chaque étape importante ; l'historique git fait foi.
+- 9 consignes permanentes + **n°10 opérationnelle depuis le 24/11** (premier remplacement du CR courant : le présent commit) : remplacer ce fichier et pousser (`docs(cr): …`) à chaque étape importante ; l'historique git fait foi.
 - Version worker attendue par le dashboard : 2026.11.23-A (le hotfix `d64d1e3` ne modifie que le dashboard).
 - `config.json` de production **jamais commités** ; aucune donnée sensible dans les CR (valeurs `<MASQUÉ>`).
