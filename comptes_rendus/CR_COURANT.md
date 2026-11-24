@@ -2,66 +2,57 @@
 
 > Fichier roulant : remplacé à chaque étape importante (jamais empilé).
 > Historique complet : `git log -p -- comptes_rendus/CR_COURANT.md`.
-> **Mis à jour** : 24/11/2026 · **Base git** : `809c984` (`origin/main`) · Rédaction : session agent IA
+> **Mis à jour** : 24/11/2026 · **Base git** : `8bd34e6` (recadrage Phase 21 — à pousser avec le présent commit) · Rédaction : session agent IA
 
-## Dernière étape — Recadrage sur la Phase 21 « Rotation éditoriale » (24/11)
+## Dernière étape — Cadrage du lot 21.4 « Auto-purge RETIRED > 90 j » VALIDÉ (24/11)
 
-- Décision exploitant : la **déduplication RadioDJ reste de côté** (chantier reporté de longue date) ; la ligne de développement reprend la logique prévue dans `CADRAGE_Phase21_rotation_editoriale_2026-11-11.md` (document exploitant, hors dépôt ; il référence `ETUDE_API_AZURACAST_RETOUR.md`, `SPEC_TECHNIQUE_IMPLEMENTATION.md`, `MEMO_CONTRAINTES_IMPLEMENTATION.md`, maquettes validées du 03/11).
-- Le présent CR **remplace** la matrice de convergence du cadrage (datée du 11/11) par l'état réellement constaté dans le dépôt au 24/11 (`809c984`) : les lots **21.1 et 21.3 sont livrés**, le lot **21.4 est le prochain** de l'enchaînement recommandé.
-- Convention de nommage maintenue : les phases de la spec rotation sont préfixées **R** (R0→R17) pour ne pas collisionner avec les phases du projet (17-20).
+L'exploitant a validé les cinq points ouverts du recadrage précédent, avec une addition : **les titres purgés en soft doivent rester clairement identifiés et loggés comme candidats à une future suppression physique** (quand la question 6 du cadrage 11/11 sera tranchée).
 
-## État d'évolution Phase 21 au 24/11 — lot par lot
+| Point | Décision validée |
+|---|---|
+| **Mode** | **Soft seul** : retrait playlists (déjà hors playlists : titres RETIRED) + flag `AZURA_RETIRED_S*` → `AZURA_REMOVED_S*`. Jamais de suppression de fichier. Le hard reste une action manuelle ponctuelle tant que Q6 non tranchée |
+| **Traçabilité pour suppression future** | Chaque purge soft journalisée : `type_op='auto_purge'`, `song_id_radiodj`, `media_id_azura`, `station_id`, `details` JSON (artiste, titre, chemin fichier, âge RETIRED, seuil appliqué), `reversible=1`. Identification double : requête journal (une ligne SQL) **et** flag `AZURA_REMOVED_S*` dans `songs.comments` |
+| **Seuil** | 90 jours, paramétrable `rotation.seuil_purge_jours` (défaut 90) |
+| **Âge RETIRED** | Source = `journal_operations_azura` (rotation_soft / flag_resync) ; **titre ignoré si âge indéterminable** (titres RETIRED antérieurs au socle 21.1 : accumulation progressive de l'historique) |
+| **Déclenchement** | Cron modèle `SYNC_AZURA_STATUS` : plage 8h-20h, garde de file anti-doublon, **+ inclusion dans le rattrapage GF4 au démarrage** |
+| **Pilotage « automatique débrayable »** | Le moteur relit `config.json` **à chaque exécution** (instanciation par run) → interrupteurs effectifs au run suivant, sans redémarrage. Nouvelles clés section `rotation` : `auto_purge_actif` (**False** défaut), `auto_purge_mode` (`'observation'` → journalise sans écrire ; `'execution'` → purge soft réelle), `auto_purge_plafond_par_run` (défaut 25), `titres_proteges_ids` (song_ids jamais purgés — besoin éditorial spécifique), `dossiers_proteges` (existe déjà) |
+| **Progression** | 21.4-a = implémentation + cycles en `'observation'` → l'exploitant valide les candidats → 21.4-b = bascule `'execution'` (une ligne de config) + confort UI si besoin |
 
-| Lot | Contenu | État | Preuves (dépot `809c984`) |
-|---|---|---|---|
-| **21.1** — Consolidation & garde-fous | GF1, GF4, pagination, tables, GF8, régénération miroir | **FAIT** | Priorité SELECT `ORDER BY CASE` (worker L6533) ; rattrapage démarrage `_rattrapage_crons_au_demarrage` (L8699, branché au boot L8992) ; pagination `list_media_all` (azuracast_api.py L332, 20 pages × 10 000 — couvre le point de vigilance « 24 000 médias ») ; tables `journal_operations_azura`/`audit_doublons_radiodj`/`mapping_radiodj_azura`/`rotation_previews`/`mirror_regen_state` créées en idempotent au démarrage (L8559+) ; GF8 endpoint `/api/system/freshness` (blueprints/taches.py L458+) ; régénération miroir câblée : `demander_regen_miroir` + thread 60 s + debounce 10 min + backoff 30 min (`rotation_azura.py` L167-L420) |
-| **21.3** — Onglet Rotation éditoriale (cœur R9-R12) | mapping + moteur + preview/execute + UI | **FAIT** | `rotation_azura.py` (1354 l. : `ResolveurMapping`, `MoteurRotation`, scoring hotfix 2026.11.13-E conditionné aux signaux réellement présents) ; blueprint `rotation.py` (10 endpoints : config/preview/preview résultat/execute/task/last/mapping stats/bootstrap) ; `rotation.js` v2 (hotfix C) branché `nav-rotation` ; carte « Rotation éditoriale » en production (index.html L681/L4576) |
-| **21.4** — Auto-purge RETIRED > 90 j | tâche `AUTO_PURGE_RETIRED` + rattrapage + confirmation | **À FAIRE — prochain de l'enchaînement recommandé** | Reporté explicitement dans le code : « l'âge RETIRED vient avec l'auto-purge, lot 21.4 » (`rotation_azura.py` L935) ; type `auto_purge` déjà préparé dans l'ENUM de `journal_operations_azura` (003_create_journal_operations.sql L27/L40 et worker L8573) |
-| **21.2** — Compléments opérations retour | R4 empty playlist, R5 rename/move, R2 move entre playlists (si encore utile) | **À FAIRE** (~1-2 j) | Seuls les ENUM `empty_playlist`/`rename` existent (worker L8572, synchro_diffusion.py L105) ; la méthode dédiée `remove_media_from_playlist` est déjà livrée (azuracast_api.py L484) ; pas d'`empty_playlist`, pas de `rename_file` |
-| **21.5** — Audit doublons (R13-R15) | détection, marquage RadioDJ, exécution | **À FAIRE** (~4-5 j) | Table `audit_doublons_radiodj` (002) en place mais « sera remplie par le lot 21.5 » (worker L8562) ; aucune logique de détection |
-| **21.6** — Push depuis rotation RadioDJ (Palier 1, R17) | automatisation du workflow M3U | **À FAIRE** (~2-3 j) | ENUM `m3u_push` préparée (worker L8573), aucune implémentation |
+Le `rotation_hard_autorise` (défaut False) reste inchangé et hors périmètre de ce lot.
 
-**Reste à faire : ~8 à 11 jours** (21.4 : 1 j · 21.2 : 1-2 j · 21.5 : 4-5 j · 21.6 : 2-3 j), hors opérations DB (GF3, vérif migration R0).
+## État Phase 21 (rappel compressé — détail au commit précédent)
 
-## État des 8 garde-fous au 24/11
+- **21.1 FAIT** · **21.3 FAIT** (détail et preuves : CR recadrage `8bd34e6`, `git show 8bd34e6`).
+- **21.4 en cours** : cadrage validé (ci-dessus) → implémentation 21.4-a.
+- **À faire ensuite** : 21.2 (~1-2 j), 21.5 (~4-5 j), 21.6 (~2-3 j).
+- Garde-fous ouverts uniquement : GF3 (indexes à vérifier en op sur .30), GF5 partiel (pas de `services_disponibles()` systématique). GF8 : l'indicateur « dernière auto-purge » complétera `/api/system/freshness` en 21.4-a.
 
-| Garde-fou | État | Détail |
-|---|---|---|
-| GF1 — priorité SELECT worker | **FAIT** | `ORDER BY CASE` en place (L6533) |
-| GF2 — optimisation resync flags | **OK / complété** | Pagination `list_media_all` livrée ; cache `mapping_radiodj_azura` livré (21.3) — le TODO L2000 (anciennement L1952) reste à nettoyer à l'occasion |
-| GF3 — indexes MySQL | **À vérifier en DB** | Op sur .30 (`idx_statut_type`, `idx_comments`) — non traçable depuis le dépôt |
-| GF4 — rattrapage démarrage | **FAIT** | L8699 : réinsertion `SYNC_AZURA_STATUS` + `SYNC_PLAYLISTS_CACHE` sous 5 min si dernière exécution > intervalle |
-| GF5 — détection de disponibilité | **PARTIEL** (inchangé) | Pas de `services_disponibles()` systématique avant crons (vérifié par absence au 24/11) ; les handlers wrappent les erreurs |
-| GF6 — file d'attente | **PARTIEL → couvert en pratique** | `date_planifiee` respectée (Phase 19.1, index L8947) ; le rattrapage ciblé GF4 couvre le besoin constaté |
-| GF7 — config `automation` | **Couvert autrement** | `lire_config_rotation` lit la section `automation` du config.json worker : `rotation_hard_autorise` (défaut **False** — cadrage Q6 en réflexion), `mirror_regen_*` ; clés de scoring section `rotation`. Le `patch_config_automation.py` (scripts_db) est l'ancien mécanisme GF7 — **ne pas lancer** |
-| GF8 — indicateurs de fraîcheur | **FAIT** (résync) | `/api/system/freshness` : `dernier_resync_azura` (+source), `derniere_tache`, `dernier_flag_resync` (journal 21.1). L'indicateur « dernier audit » suivra le lot 21.5 |
+## Plan d'implémentation 21.4-a (proposé, à lancer)
 
-## Ce qu'il reste à faire — enchaînement et cadrage du lot 21.4
+1. `airvs_worker/rotation_azura.py` : clés config nouvelles dans `lire_config_rotation` (défauts sûrs) ; `MoteurRotation.candidats_auto_purge()` (détection + âge + protections) ; `MoteurRotation.executer_auto_purge()` (modes observation/execution, plafond, journalisation).
+2. `airvs_worker/worker_ubuntu.py` : type `AUTO_PURGE_RETIRED` dans la whitelist (L6517) ; handler `executer_auto_purge_retired` ; insertion cron dans le modèle `_sync_azura_automatique` (gardes identiques) ; inclusion GF4 ; bump version worker.
+3. `airvs_dashboard_v2/config.py` : `WORKER_VERSION_ATTENDUE` alignée sur la nouvelle version worker (badge vert).
+4. `airvs_dashboard_v2/blueprints/taches.py` : champ `derniere_auto_purge` dans `/api/system/freshness` (GF8). UI carte : restes minimaux en 21.4-a (la tâche apparaît dans les logs tâches existants).
+5. Livraison : patch idempotent (motif éprouvé `patch_d4a_bis` : ancres exactes, compte 0/n → abandon, backup `.bak`, `compile()` sans .pyc, rattrapage automatique) + test hors-ligne avant application sur pige.
+6. Version worker visée : `2026.11.24-B` (la lettre A du 24/11 est déjà prise par le hotfix dashboard `d64d1e3` — à contredire si l'exploitant préfère un autre schéma).
 
-Enchaînement recommandé (cadrage §5, ajusté) : **21.4 → 21.2 → 21.5 → 21.6**. Pour démarrer 21.4, cinq points restent à valider par l'exploitant :
+## Points de vigilance maintenus (cadrage §4)
 
-1. **Mode de purge** : retrait *soft* (flag → `AZURA_REMOVED_S*`) seul ; le *hard* (suppression physique) resterait verrouillé tant que `rotation_hard_autorise=False` (Q6 cadrage en réflexion).
-2. **Seuil** : 90 j confirmé, paramétrable (`rotation.seuil_purge_jours`, défaut 90) ?
-3. **Source de l'âge RETIRED** : proposition = `journal_operations_azura` (historique fiable depuis 21.1/21.3) ; titre ignoré si âge indéterminable (principe prudent).
-4. **Déclenchement** : cron même modèle que `SYNC_AZURA_STATUS` (plage 8h-20h, garde de file anti-doublon) **+ inclusion dans le rattrapage GF4**.
-5. **Confirmation avant exécution** : cycle preview → execute depuis la carte Rotation (comme la rotation manuelle), ou automatique avec plafond de titres purgés par run.
-
-## Points de vigilance maintenus du cadrage (§4)
-
-- **Migration R0 en DB** : nombre de `IN_AZURACAST` restants à vérifier sur .30/.39 (op DB).
-- **Renommage des commentaires** « Phase 1/2/3 » → R1/R2/R3 lors des prochaines modifications (collision de numérotation).
-- **Chemin réel de `export_db_mirror_V4.py` sur .30** à renseigner dans `mirror_regen_export_path` (vide = régénération désactivée, zéro risque) ; logique interne de l'exporteur encore sur l'ancien mot-clé `IN_AZURACAST` — nettoyage à l'occasion.
-- **Push `AZURA_PUSHED_S6_S7` écrit en dur** (azuracast.py L852/L1013) : à harmoniser avec `get_default_flag_after_push_multi()` le jour où le push deviendra sélectif par station.
+- Migration R0 en DB : `IN_AZURACAST` restants à compter sur .30/.39 (op DB).
+- GF3 : `idx_statut_type`, `idx_comments` à vérifier sur .30 (op DB).
+- Chemin réel `export_db_mirror_V4.py` sur .30 à renseigner dans `mirror_regen_export_path` (vide = désactivé) ; logique interne de l'exporteur encore sur `IN_AZURACAST`.
+- Push `AZURA_PUSHED_S6_S7` écrit en dur (azuracast.py L852/L1013) : harmonisation quand le push deviendra sélectif par station.
+- TODO L2000 (cache mapping) à nettoyer à l'occasion — couvert par 21.3, commentaire obsolète.
 
 ## Contexte persistant
 
-- **T2 SYNCHRO_DIFFUSION : clos** — hotfix 2026.11.24-A déployé et **validé par l'exploitant** (24/11, tests interface OK) ; verdict 10/10 au 23/11 et au 24/11 ; rattrapage après extinction 4h00 prouvé. Détails : CR de livraison `livraison_synchro_diffusion_dashboard_2026-11-24` §11.
-- **Vérification doublons (24/11)** : cas 2h31 consigné (titre diffusé sur AzuraCast apparaît dans RadioDJ à la même heure à la seconde près, avec doublon même date) ; détection à l'entrée en base (dashboard Windows) active ; déduplication complète = chantier séparé **mis de côté** par décision exploitant.
-- **Chantiers ouverts** : 1) Phase 21 rotation éditoriale (ligne active, présent CR) ; 2) déduplication RadioDJ (de côté) ; 3) diagnostic réseau (en pause, consigne ; SSHFS→SAMBA hors périmètre).
-- **Versions** : worker `2026.11.23-A` (D4-a bis) ; dashboard attendu par config.py : `2026.11.23-A` (badge jaune jusqu'au redéploiement Windows du worker si applicable).
+- **T2 SYNCHRO_DIFFUSION : clos et validé** (hotfix 2026.11.24-A dashboard `d64d1e3`, 10/10 au 23/11 et 24/11, rattrapage 4h00 prouvé).
+- **Déduplication RadioDJ : mise de côté** (décision exploitant) ; cas 2h31 consigné ; détection à l'entrée en base active.
+- **Diagnostic réseau : en pause** (consigne) ; SSHFS→SAMBA hors périmètre.
+- **Versions** : worker `2026.11.23-A` ; dashboard attendu `2026.11.23-A` (alignées jusqu'au déploiement 21.4-a).
 
 ## Règles actives
 
-- 9 consignes permanentes + **n°10 opérationnelle** : remplacer ce fichier et pousser (`docs(cr): …`) à chaque étape importante ; l'historique git fait foi ; `git pull` + lecture du CR avant chaque étape importante.
-- `config.json` de production **jamais commités** (section `automation`/`rotation` absentes du dépôt par conception) ; aucune donnée sensible dans les CR (valeurs `<MASQUÉ>`).
+- 9 consignes permanentes + **n°10 opérationnelle** : remplacer ce fichier et pousser (`docs(cr): …`) à chaque étape importante ; `git pull` + lecture du CR avant chaque étape importante ; l'historique git fait foi.
+- `config.json` de production **jamais commités** (sections `automation`/`rotation` absentes du dépôt par conception) ; aucune donnée sensible dans les CR.
 - Nom de la machine studio : **pige** (jamais « pigeon »).
