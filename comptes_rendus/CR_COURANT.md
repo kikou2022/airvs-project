@@ -2,57 +2,78 @@
 
 > Fichier roulant : remplacé à chaque étape importante (jamais empilé).
 > Historique complet : `git log -p -- comptes_rendus/CR_COURANT.md`.
-> **Mis à jour** : 24/11/2026 · **Base git** : `8bd34e6` (recadrage Phase 21 — à pousser avec le présent commit) · Rédaction : session agent IA
+> **Mis à jour** : 25/11/2026 · **Base git** : `b7fa035` (fix miroir clé API 2026.11.25-A) · Rédaction : session agent IA
 
-## Dernière étape — Cadrage du lot 21.4 « Auto-purge RETIRED > 90 j » VALIDÉ (24/11)
+## Dernière étape — Lot 2026.11.25-A : miroir public — CLÔTURÉ (clé API dynamique + draineur, validés en exploitation 24/11)
 
-L'exploitant a validé les cinq points ouverts du recadrage précédent, avec une addition : **les titres purgés en soft doivent rester clairement identifiés et loggés comme candidats à une future suppression physique** (quand la question 6 du cadrage 11/11 sera tranchée).
+**Demande exploitant (25/11)** : « le script est sur la même machine que le worker → indiquer une
+variable plutôt que l'API en dur, éviter d'y revenir ». Fait : `export_db_mirror_V4.py` ne porte
+**plus AUCUNE clé** — il lit la clé active dans le **config.json du worker** (§ `azuracast`,
+`../airvs_worker/config.json` résolu depuis `__file__`). Renouveler la clé = éditer ce seul
+config.json, jamais le script.
 
-| Point | Décision validée |
-|---|---|
-| **Mode** | **Soft seul** : retrait playlists (déjà hors playlists : titres RETIRED) + flag `AZURA_RETIRED_S*` → `AZURA_REMOVED_S*`. Jamais de suppression de fichier. Le hard reste une action manuelle ponctuelle tant que Q6 non tranchée |
-| **Traçabilité pour suppression future** | Chaque purge soft journalisée : `type_op='auto_purge'`, `song_id_radiodj`, `media_id_azura`, `station_id`, `details` JSON (artiste, titre, chemin fichier, âge RETIRED, seuil appliqué), `reversible=1`. Identification double : requête journal (une ligne SQL) **et** flag `AZURA_REMOVED_S*` dans `songs.comments` |
-| **Seuil** | 90 jours, paramétrable `rotation.seuil_purge_jours` (défaut 90) |
-| **Âge RETIRED** | Source = `journal_operations_azura` (rotation_soft / flag_resync) ; **titre ignoré si âge indéterminable** (titres RETIRED antérieurs au socle 21.1 : accumulation progressive de l'historique) |
-| **Déclenchement** | Cron modèle `SYNC_AZURA_STATUS` : plage 8h-20h, garde de file anti-doublon, **+ inclusion dans le rattrapage GF4 au démarrage** |
-| **Pilotage « automatique débrayable »** | Le moteur relit `config.json` **à chaque exécution** (instanciation par run) → interrupteurs effectifs au run suivant, sans redémarrage. Nouvelles clés section `rotation` : `auto_purge_actif` (**False** défaut), `auto_purge_mode` (`'observation'` → journalise sans écrire ; `'execution'` → purge soft réelle), `auto_purge_plafond_par_run` (défaut 25), `titres_proteges_ids` (song_ids jamais purgés — besoin éditorial spécifique), `dossiers_proteges` (existe déjà) |
-| **Progression** | 21.4-a = implémentation + cycles en `'observation'` → l'exploitant valide les candidats → 21.4-b = bascule `'execution'` (une ligne de config) + confort UI si besoin |
+- **Résolution** (nouvelle fonction `lire_config_api_azura()`) : ① env `AIRVS_AZURA_API_KEY`
+  (écrase tout, test/cron ; `AIRVS_AZURA_BASE_URL` / `AIRVS_AZURA_CONFIG` surchargent aussi) →
+  ② config.json worker § `azuracast.api_key` + `base_url` → ③ rien trouvé = **clé vide → Passe 2
+  sautée proprement**, export non bloqué (Passe 1 noms locaux couvre l'essentiel ; comportement
+  tolérant inchangé). `AZURA_API_URL` reconstruite depuis `base_url` config + `AZURA_STATION_ID=7`
+  (URL identique à l'ancienne en dur) ; la **source** est loguée, jamais la clé.
+- **Tests hors-ligne 8/8 PASS** (env prioritaire ; chemin défaut `../airvs_worker/config.json` ;
+  clé lue + URL reconstruite ; config absent → clé vide ; ancienne clé et motif `AZURA_API_KEY = "…"`
+  absents du fichier ; garde Passe 2 présente) + `py_compile` OK.
+- **Livraison** : `fichiers_a_deployer_2026.11.25-A/` (fichier complet 432 l.,
+  md5 `b5b717474801f2e30ee19a0750b3f6a9` + LISEZMOI) — méthode fichiers complets, patch abandonné.
+- **LISEZMOI = séquence complète** : ① pré-vol — vérifier que le config.json worker de production
+  porte la clé ACTIVE (== constante L211 worker_ubuntu.py déployé ; commande auto fournie ; sinon
+  l'éditer, relu à chaque appel) ; ② dépôt sur pige + `chmod +x` + md5 ; ③ test manuel —
+  « [CONFIG] Clé API chargée (source : …/airvs_worker/config.json) », Passe 2 HTTP 200
+  (**plus de 403**), « Succès vers debian12/vps » ; ④ test négatif optionnel (`AIRVS_AZURA_CONFIG`
+  inexistant → Passe 2 sautée, export réussi quand même) ; ⑤ **Restant 2** draineur (voir État).
+- **Rappel test décisif 24/11 17h11 (Option A)** : 51300 titres, SCP debian12 + vps OK — accès BDD
+  distant et clés BatchMode pige→.30 / pige→VPS prouvés ; seul le 403 Passe 2 restait → traité ici.
+- **VALIDATION SCRIPT EN EXPLOITATION (24/11 17h41)** : « [CONFIG] Clé API AzuraCast chargée —
+  source : …/airvs_worker/config.json » → pré-vol clé production validé de fait ; Passe 2 API :
+  **8828 correspondances (HTTP 200) — le 403 est révolu** ; 51300 titres exportés, 226 matchs
+  Shazam, « Succès vers debian12 » + « Succès vers vps » (≈ 57 s au total).
+- **RESTANT 2 FERMÉ (24/11 18h28-18h30)** : prérequis SSH validé (17h40 « SSH LOCAL OK » sur
+  `sebastien@192.168.1.17` — IP pleine de pige, pas localhost) ; section `"automation"` fusionnée
+  dans les **deux** config.json (worker : 4 clés `mirror_regen_*` ajoutées aux 5 clés sync
+  existantes ; dashboard : section minimale) ; `python3 -m json.tool` OK des deux côtés ; draineur
+  testé par `pending=1` forcé → log « [MIROIR] Régénération db.json OK : export exécuté sur
+  sebastien@192.168.1.17:22 (…) », état « pending non / statut ✓ OK / dernière regen 18:30:48 » —
+  **panneau [MIROIR] au vert**. Chaîne complète opérationnelle : prochaine rotation/retrait/resync/
+  push → export automatique ≤ 60 s (debounce 10 min, ≈ 1 min/run, thread de fond, sans incidence
+  sur les tâches).
+- **Reste côté exploitant** : commit + push (`feat` 21.4-a 4 fichiers + `fix(mirror)` 2026.11.25-A) ;
+  activation observation/execution 21.4 quand voulu (config relu par exécution, sans redémarrage).
 
-Le `rotation_hard_autorise` (défaut False) reste inchangé et hors périmètre de ce lot.
+## Étape précédente — Lot 21.4-a APPLIQUÉ et VALIDÉ sur pige (24/11)
 
-## État Phase 21 (rappel compressé — détail au commit précédent)
+**Livraison par fichiers complets** (le patch `deploiement_214a_auto_purge/` est abandonné).
+Application pige 24/11 ≈ 16h09 puis validation par l'exploitant : log « version 2026.11.24-B »
+(redémarrage routine automatique) ; `py_compile` 4/4 ; **cron débrayé vérifié** (0 tâche
+AUTO_PURGE_RETIRED, garde présente cron + rattrapage GF4) ; **run d'observation manuel — tâche 45411
+→ termine** : `{"mode": "observation", "detectes": 0, "purges": 0, "erreurs": 0, "ignores_age": 3,
+"proteges": 0, "seuil_jours": 90, "plafond": 25}` — zéro écriture RadioDJ/AzuraCast ; journal
+`auto_purge` vide = cohérent (journalisation PAR CANDIDAT) ; les 3 « âge inconnu » = titres RETIRED
+antérieurs au socle 21.1 (accumulation progressive via playlist_remove). Tests T1-T5 hors-ligne
+tous PASS (voir `git show fa99d0d` et le LISEZMOI 2026.11.24-B).
 
-- **21.1 FAIT** · **21.3 FAIT** (détail et preuves : CR recadrage `8bd34e6`, `git show 8bd34e6`).
-- **21.4 en cours** : cadrage validé (ci-dessus) → implémentation 21.4-a.
-- **À faire ensuite** : 21.2 (~1-2 j), 21.5 (~4-5 j), 21.6 (~2-3 j).
-- Garde-fous ouverts uniquement : GF3 (indexes à vérifier en op sur .30), GF5 partiel (pas de `services_disponibles()` systématique). GF8 : l'indicateur « dernière auto-purge » complétera `/api/system/freshness` en 21.4-a.
+## État Phase 21
 
-## Plan d'implémentation 21.4-a (proposé, à lancer)
-
-1. `airvs_worker/rotation_azura.py` : clés config nouvelles dans `lire_config_rotation` (défauts sûrs) ; `MoteurRotation.candidats_auto_purge()` (détection + âge + protections) ; `MoteurRotation.executer_auto_purge()` (modes observation/execution, plafond, journalisation).
-2. `airvs_worker/worker_ubuntu.py` : type `AUTO_PURGE_RETIRED` dans la whitelist (L6517) ; handler `executer_auto_purge_retired` ; insertion cron dans le modèle `_sync_azura_automatique` (gardes identiques) ; inclusion GF4 ; bump version worker.
-3. `airvs_dashboard_v2/config.py` : `WORKER_VERSION_ATTENDUE` alignée sur la nouvelle version worker (badge vert).
-4. `airvs_dashboard_v2/blueprints/taches.py` : champ `derniere_auto_purge` dans `/api/system/freshness` (GF8). UI carte : restes minimaux en 21.4-a (la tâche apparaît dans les logs tâches existants).
-5. Livraison : patch idempotent (motif éprouvé `patch_d4a_bis` : ancres exactes, compte 0/n → abandon, backup `.bak`, `compile()` sans .pyc, rattrapage automatique) + test hors-ligne avant application sur pige.
-6. Version worker visée : `2026.11.24-B` (la lettre A du 24/11 est déjà prise par le hotfix dashboard `d64d1e3` — à contredire si l'exploitant préfère un autre schéma).
-
-## Points de vigilance maintenus (cadrage §4)
-
-- Migration R0 en DB : `IN_AZURACAST` restants à compter sur .30/.39 (op DB).
-- GF3 : `idx_statut_type`, `idx_comments` à vérifier sur .30 (op DB).
-- Chemin réel `export_db_mirror_V4.py` sur .30 à renseigner dans `mirror_regen_export_path` (vide = désactivé) ; logique interne de l'exporteur encore sur `IN_AZURACAST`.
-- Push `AZURA_PUSHED_S6_S7` écrit en dur (azuracast.py L852/L1013) : harmonisation quand le push deviendra sélectif par station.
-- TODO L2000 (cache mapping) à nettoyer à l'occasion — couvert par 21.3, commentaire obsolète.
+- **21.1 FAIT** · **21.3 FAIT** · **21.4-a : APPLIQUÉ et VALIDÉ sur pige (24/11)** → observation activable quand voulu → 21.4-b (execution).
+- **Reste ensuite** : 21.2 (~1-2 j), 21.5 (~4-5 j), 21.6 (~2-3 j). GF3 (indexes) + comptage `IN_AZURACAST` restants = op DB sur .30/.39 ; GF5 partiel.
+- Points de vigilance maintenus : **miroir public — Option A VALIDÉE par test (24/11 17h11)**. Architecture (preuves dépôt) : `airvs_mirror/export_db_mirror_V4.py` (432 l. depuis le lot 2026.11.25-A, dans le repo = à jour flags 21.1) lit `radiodb` + `airvs_dashboard` sur 192.168.1.30:3306 + API AzuraCast HTTPS, écrit /tmp/airvs_db_export.json puis SCP vers **DEUX** destinations — debian12 `sebastien@192.168.1.30:/var/www/html/airvs_mirror/db.json` (LAN) et vps `ubuntu@54.37.38.117:/var/www/html/airvs_mirror/db.json` (**VPS OVH 1**, miroir public `https://miroir.db.airvs.fr`, vhost nginx `programmes-vps/install_vps_ovh_1.sh`, chargé par `app_vps_ovh_1.py` via MIRROR_JSON_PATH). Ne peut tourner ni sur AzuraCast ni sur le VPS (pas d'accès BDD LAN) ; find sur .30 vide (jamais déployé). **Test décisif réussi depuis pige** : 51300 titres exportés, « Succès vers debian12 » + « Succès vers vps » — miroir rafraîchi sur .30 ET le VPS ; accès BDD distant et clés BatchMode pige→.30 / pige→VPS prouvés. **Clé API — RÉSOLUE et VALIDÉE en exploitation (lot 2026.11.25-A déployé, 24/11 17h41)** : plus aucune clé en dur dans le script — résolution env `AIRVS_AZURA_API_KEY` → config.json worker § `azuracast` (détails en tête de CR ; Passe 2 sautée proprement si clé absente, export non bloqué) ; log d'exploitation : clé chargée du config.json worker, Passe 2 API 8828 correspondances **HTTP 200** (le 403 est révolu). Restent les fallbacks L54/L999 d'`azuracast_api.py` (ancienne clé en dur) → alignement candidat 21.2. **Restant 2 — config draineur (Option A) — FERMÉ, validé 24/11 18h28-18h30** : prérequis SSH validé (17h40 « SSH LOCAL OK » sur `sebastien@192.168.1.17`, IP pleine de pige — pas localhost) ; `"automation"` fusionnée dans les **deux** config.json (worker = déclenchement réel : 4 clés `mirror_regen_*` ajoutées aux clés sync existantes ; dashboard = badges : section minimale) ; test par `pending=1` forcé → « [MIROIR] Régénération db.json OK : export exécuté sur sebastien@192.168.1.17:22 », état « pending non / ✓ OK / 18:30:48 », panneau au vert — **chaîne miroir complète opérationnelle** (rotation/retrait/resync/push → export auto ≤ 60 s). **Texte descriptif du panneau périmé** (`index.html` L4662-4664 : « déclenche export_db_mirror_V4.py sur .30 » — réel : pige/.17 même, SSH loopback) → cosmétique candidat 21.2. **Défauts du code trompeurs** (`mirror_regen_host` par défaut azuracast:2022 — ne correspond pas à l'architecture réelle) + backoff inopérant tant qu'aucun succès (`last_regen` posé aux succès seulement) + texte panneau périmé (ci-dessus) = candidats micro-lot 21.2 (sans effet au quotidien depuis que le config.json fixe les valeurs). Commits : feat 4 fichiers 21.4-a + fix(mirror) 2026.11.25-A à pousser par l'exploitant ; docs(cr) côté session. Restent : exporteur encore sur `IN_AZURACAST`, push `AZURA_PUSHED_S6_S7` en dur, TODO cache mapping L2000 (obsolète, à nettoyer).
 
 ## Contexte persistant
 
 - **T2 SYNCHRO_DIFFUSION : clos et validé** (hotfix 2026.11.24-A dashboard `d64d1e3`, 10/10 au 23/11 et 24/11, rattrapage 4h00 prouvé).
 - **Déduplication RadioDJ : mise de côté** (décision exploitant) ; cas 2h31 consigné ; détection à l'entrée en base active.
 - **Diagnostic réseau : en pause** (consigne) ; SSHFS→SAMBA hors périmètre.
-- **Versions** : worker `2026.11.23-A` ; dashboard attendu `2026.11.23-A` (alignées jusqu'au déploiement 21.4-a).
+- **Versions en production pige (24/11 16h09)** : worker `2026.11.24-B` ; dashboard `2026.11.24-B`.
 
 ## Règles actives
 
-- 9 consignes permanentes + **n°10 opérationnelle** : remplacer ce fichier et pousser (`docs(cr): …`) à chaque étape importante ; `git pull` + lecture du CR avant chaque étape importante ; l'historique git fait foi.
+- 9 consignes permanentes + **n°10 opérationnelle** : remplacer ce fichier et pousser (`docs(cr): …`, commit séparé du feat) à chaque étape importante ; `git pull` + lecture du CR avant chaque étape importante ; l'historique git fait foi.
 - `config.json` de production **jamais commités** (sections `automation`/`rotation` absentes du dépôt par conception) ; aucune donnée sensible dans les CR.
 - Nom de la machine studio : **pige** (jamais « pigeon »).
