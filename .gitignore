@@ -10,6 +10,11 @@ credentials.json
 *.pem
 *.key
 
+# Config de production : jamais dans le depot (valeurs locales uniquement).
+# Gabarits sans cle fournis sous le nom config.json.exemple
+airvs_worker/config.json
+airvs_dashboard_v2/config.json
+
 # Bases de données
 *.db
 *.db-journal
