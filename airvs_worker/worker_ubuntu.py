@@ -9189,12 +9189,21 @@ def _assurer_schema_rotation_socle():
               date_demande DATETIME,
               last_raison VARCHAR(255),
               last_regen DATETIME,
+              last_tentative DATETIME,
               last_statut ENUM('ok', 'erreur_ssh', 'erreur_script', 'non_configure', 'en_cours') DEFAULT NULL,
               last_message VARCHAR(500),
               nb_regen_ok INT NOT NULL DEFAULT 0
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
         cur.execute("INSERT IGNORE INTO mirror_regen_state (id, pending) VALUES (1, 0)")
+        # Lot 21.2 — colonne last_tentative (backoff miroir opérationnel même
+        # sans succès préalable) : le CREATE TABLE ne la rajoute pas aux
+        # tables déjà existantes → ALTER idempotent (MariaDB 10.2+), non bloquant.
+        try:
+            cur.execute("ALTER TABLE mirror_regen_state "
+                        "ADD COLUMN IF NOT EXISTS last_tentative DATETIME")
+        except Exception:
+            pass  # déjà ajoutée, ou version DB sans IF NOT EXISTS
         # ENUM journal élargi (Phase 21.3 : mapping_bootstrap, mirror_regen,
         # rotation_preview) — MODIFY idempotent, non bloquant si déjà élargi.
         try:

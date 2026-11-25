@@ -202,11 +202,14 @@ def lire_config_rotation(chemin_config=None):
       - rotation_hard_autorise   : bool, défaut False (cadrage item 6 en
         réflexion → hard refusé, fallback soft, tant que non validé)
       - mirror_regen_actif       : bool, défaut True
-      - mirror_regen_host        : défaut 'sebastien@azuracast.2026.airvs.fr'
-      - mirror_regen_port        : défaut '2022' (canal SSH BatchMode existant)
+      - mirror_regen_host        : défaut 'sebastien@192.168.1.17' (Lot 21.2 :
+        aligné sur l'architecture réelle — l'export tourne sur pige même,
+        SSH loopback ; l'ancien défaut azuracast:2022 était trompeur)
+      - mirror_regen_port        : défaut '22' (SSH loopback pige)
       - mirror_regen_export_path : chemin du script export_db_mirror_V4.py
-        SUR .30 — défaut '' (VIDE = déclenchement désactivé, zéro risque ;
-        à renseigner après vérification du chemin réel sur .30)
+        SUR PIGE (même machine que le worker) — défaut '' (VIDE =
+        déclenchement désactivé, zéro risque) ; l'export pousse ensuite
+        db.json vers debian12 (.30) ET le VPS OVH (miroir public)
       - mirror_regen_debounce_min : défaut 10 (anti-spam exports)
       - mirror_regen_retry_min    : défaut 30 (backoff après échec SSH)
     Clés de scoring (section 'rotation') : ratio_rotation (0.10),
@@ -234,8 +237,10 @@ def lire_config_rotation(chemin_config=None):
     auto = cfg['automation']
     auto.setdefault('rotation_hard_autorise', False)
     auto.setdefault('mirror_regen_actif', True)
-    auto.setdefault('mirror_regen_host', 'sebastien@azuracast.2026.airvs.fr')
-    auto.setdefault('mirror_regen_port', '2022')
+    # Lot 21.2 — défauts alignés sur l'architecture réelle (export sur pige
+    # même, SSH loopback ; l'ancien azuracast:2022 ne correspondait à rien).
+    auto.setdefault('mirror_regen_host', 'sebastien@192.168.1.17')
+    auto.setdefault('mirror_regen_port', '22')
     auto.setdefault('mirror_regen_export_path', '')  # vide = désactivé
     auto.setdefault('mirror_regen_debounce_min', 10)
     auto.setdefault('mirror_regen_retry_min', 30)
@@ -260,15 +265,18 @@ def lire_config_rotation(chemin_config=None):
 
 
 def _miroir_ssh_exec(cfg_auto, timeout=600):
-    """Exécute export_db_mirror_V4.py sur .30 via SSH BatchMode (canal existant).
+    """Exécute export_db_mirror_V4.py via SSH BatchMode (Lot 21.2 — docstring
+    corrigée : l'export tourne sur pige même, même machine que le worker,
+    via SSH loopback ; le script pousse ensuite db.json vers debian12 (.30)
+    ET le VPS OVH — cf. CR lot 2026.11.25-A).
 
     Returns: (True, message) ou (False, message).
     """
     chemin = (cfg_auto.get('mirror_regen_export_path') or '').strip()
     if not chemin:
         return False, "mirror_regen_export_path vide (déclenchement désactivé)"
-    host = cfg_auto.get('mirror_regen_host') or 'sebastien@azuracast.2026.airvs.fr'
-    port = str(cfg_auto.get('mirror_regen_port') or '2022')
+    host = cfg_auto.get('mirror_regen_host') or 'sebastien@192.168.1.17'
+    port = str(cfg_auto.get('mirror_regen_port') or '22')
     cmd = [
         'ssh', '-p', port,
         '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
@@ -291,7 +299,8 @@ def _miroir_ssh_exec(cfg_auto, timeout=600):
 
 
 def drainer_regen_miroir(db_config, cfg=None, print_fn=print):
-    """Un passage du drainer : si pending → déclenche l'export sur .30.
+    """Un passage du drainer : si pending → déclenche l'export sur pige même
+    (SSH loopback ; l'export pousse db.json vers .30 et le VPS — Lot 21.2).
 
     Appelé par le thread de fond du worker (toutes les 60 s) — JAMAIS dans la
     boucle principale (SSH + export ≈ 1-2 min ne doivent pas retarder les
@@ -318,11 +327,21 @@ def drainer_regen_miroir(db_config, cfg=None, print_fn=print):
         return
     if not etat or not etat.get('pending'):
         return
+
+    maintenant = datetime.now()
+
+    # Lot 21.2 — garde 'en_cours' avec réveil : un statut en_cours qui dure
+    # plus de 15 min (timeout SSH 600 s + marge) signifie un worker coupé
+    # pendant l'export → on reprend le drain (pending reste à 1, la demande
+    # n'est pas perdue). En vol réel (< 15 min) → sortie, thread unique.
     if etat.get('last_statut') == 'en_cours':
-        return  # un export est déjà en vol (thread unique)
+        _lt_en_cours = etat.get('last_tentative')
+        if _lt_en_cours and (maintenant - _lt_en_cours).total_seconds() < 900:
+            return  # export réellement en vol (thread unique)
+        print_fn("[MIROIR] statut 'en_cours' obsolète (> 15 min) — reprise du "
+                 "drain (le worker avait probablement été coupé pendant l'export).")
 
     # Debounce : si une regen OK a eu lieu APRÈS la dernière demande → couvert.
-    maintenant = datetime.now()
     last_regen = etat.get('last_regen')
     date_demande = etat.get('date_demande')
     if (last_regen and date_demande and date_demande <= last_regen
@@ -332,14 +351,22 @@ def drainer_regen_miroir(db_config, cfg=None, print_fn=print):
                           message="déjà couvert par regen récente (debounce)")
         return
     # Backoff après échec : retenter seulement après retry_min.
+    # Lot 21.2 — FIX : l'ancien test portait sur last_regen (posé aux SUCCÈS
+    # uniquement) → le backoff était inopérant après un échec (retry toutes
+    # les 60 s, voire immédiat si aucun succès préalable). Il porte désormais
+    # sur last_tentative, posé à CHAQUE tentative (succès comme échec).
+    last_tentative = etat.get('last_tentative')
     if (etat.get('last_statut') in ('erreur_ssh', 'erreur_script')
-            and last_regen
-            and (maintenant - last_regen).total_seconds()
+            and last_tentative
+            and (maintenant - last_tentative).total_seconds()
                 < int(auto.get('mirror_regen_retry_min', 30)) * 60):
         return  # on attend le backoff, pending reste à 1
 
+    # Lot 21.2 — last_tentative posé AU DÉBUT de la tentative (succès comme
+    # échec) : base correcte pour le backoff et la garde en_cours.
     _miroir_set_state(db_config, statut='en_cours',
-                      message=f"regen demandée ({etat.get('last_raison')})")
+                      message=f"regen demandée ({etat.get('last_raison')})",
+                      date_tentative=True)
     ok, message = _miroir_ssh_exec(auto)
     if ok:
         _miroir_set_state(db_config, pending=0, statut='ok',
@@ -358,7 +385,7 @@ def drainer_regen_miroir(db_config, cfg=None, print_fn=print):
 
 
 def _miroir_set_state(db_config, pending=None, statut=None, message=None,
-                      date_regen=False, incr_ok=False):
+                      date_regen=False, incr_ok=False, date_tentative=False):
     """Met à jour mirror_regen_state (non bloquant)."""
     try:
         sets, params = [], []
@@ -373,6 +400,8 @@ def _miroir_set_state(db_config, pending=None, statut=None, message=None,
             params.append(str(message)[:500])
         if date_regen:
             sets.append("last_regen = NOW()")
+        if date_tentative:
+            sets.append("last_tentative = NOW()")
         if incr_ok:
             sets.append("nb_regen_ok = nb_regen_ok + 1")
         if not sets:
