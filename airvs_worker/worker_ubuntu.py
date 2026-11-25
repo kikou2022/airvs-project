@@ -44,7 +44,7 @@
 #                 • Réutilisation du moteur de matching flou de executer_prefill_sheets
 #                 • Dépendance : validation_pool_multiformat.py (même dossier)
 # ═══════════════════════════════════════════════════════════════════
-WORKER_VERSION = "2026.11.24-B"  # + 21.4-a : auto-purge RETIRED > seuil — cron 1x/jour 8h-20h + rattrapage GF4, modes observation/execution débrayables (config.json relu par run), plafond + titres_proteges_ids + dossiers_proteges, journal auto_purge (« à supprimer manuellement »), garde resync : REMOVED non dégradé tant que le fichier est présent, journalisation playlist_remove du retrait sticky-bar. Historique : 2026.11.23-A : + D4-a bis : cycle quotidien SYNCHRO_DIFFUSION avec rattrapage au démarrage (machines studio éteintes la nuit) + fix garde journalier (manuelles exclues via trigger_source). Historique antérieur : + T2 SYNCHRO_DIFFUSION : compteurs RadioDJ depuis historique AzuraCast (D1/D2 écrasement+delta, D3 résolveur P3→P4→P5→P6→N1→N2 + ambiguïté +1 tous, D4-a cron quotidien, snapshot bak_songs_counters avant 1er run, journal synchro_diffusion). Plus ancien : Phase 21.3 résolveur mapping/moteur rotation. B : hotfix whitelist SQL. C : hotfix cleanup orphelines (date_debut_execution)
+WORKER_VERSION = "2026.11.25-A"  # + Lot 21.2 : opérations retour (R2 move inter-playlists, R4 vidage playlist, R5 renommage fichier) + résolution media_id mutualisée (cache mapping 21.3 d'abord, fallback list_media) ; 2026.11.25-B : plus aucune clé API dans le dépôt (config.json sanitizés + fallbacks azuracast_api alignés env/config). 2026.11.24-B : 21.4-a : auto-purge RETIRED > seuil — cron 1x/jour 8h-20h + rattrapage GF4, modes observation/execution débrayables (config.json relu par run), plafond + titres_proteges_ids + dossiers_proteges, journal auto_purge (« à supprimer manuellement »), garde resync : REMOVED non dégradé tant que le fichier est présent, journalisation playlist_remove du retrait sticky-bar. Historique : 2026.11.23-A : + D4-a bis : cycle quotidien SYNCHRO_DIFFUSION avec rattrapage au démarrage (machines studio éteintes la nuit) + fix garde journalier (manuelles exclues via trigger_source). Historique antérieur : + T2 SYNCHRO_DIFFUSION : compteurs RadioDJ depuis historique AzuraCast (D1/D2 écrasement+delta, D3 résolveur P3→P4→P5→P6→N1→N2 + ambiguïté +1 tous, D4-a cron quotidien, snapshot bak_songs_counters avant 1er run, journal synchro_diffusion). Plus ancien : Phase 21.3 résolveur mapping/moteur rotation. B : hotfix whitelist SQL. C : hotfix cleanup orphelines (date_debut_execution)
 
 import time
 import datetime
@@ -1916,6 +1916,144 @@ DEBIAN_SSH_USER = "sebastien"
 # Retrait d'un titre d'une playlist AzuraCast
 # ═══════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════
+# LOT 21.2 — Résolution song RadioDJ → média AzuraCast, MUTUALISÉE
+# (ex-bloc dupliqué dans les exécuteurs azura + ex-TODO « Phase 6 »)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _resoudre_media_id_azura(tache_id, api, song_id_radiodj, station_id=None,
+                             utiliser_cache=True):
+    """
+    Lot 21.2 — Résolution song_id_radiodj → media_id AzuraCast.
+
+    Ordre de résolution :
+      1. Cache mapping_radiodj_azura (lot 21.3) : ligne active avec confiance
+         ≥ 0.75 → media_id immédiat, SANS list_media_all() (~35 s évitées ;
+         concrétise l'ex-TODO « Phase 6 » du bloc de Phase 1)
+      2. Fallback list_media_all() : passe 1 = basename du path exact
+         (path_exact), passe 2 = artist+title normalisé
+
+    Args:
+        tache_id: ID de la tâche (pour le journal)
+        api: instance AzuraCastAPI
+        song_id_radiodj: ID du song RadioDJ (obligatoire pour la résolution)
+        station_id: ID de la station (filtre du cache mapping)
+        utiliser_cache: False pour forcer le passage par l'API (diagnostic)
+
+    Returns:
+        media_id (int) si résolu, sinon None — les logs d'erreur sont déjà
+        posés dans le journal de la tâche, l'appelant n'a qu'à marquer la fin.
+    """
+    if not song_id_radiodj:
+        logger(tache_id, "ERREUR: Impossible de résoudre media_id "
+                         "(song_id_radiodj manquant).")
+        return None
+
+    # 1. Lire le song RadioDJ (contexte de logs + données de matching)
+    try:
+        db = pymysql.connect(**DB_CONFIG)
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            "SELECT ID, artist, title, `path` FROM radiodb.songs WHERE ID = %s",
+            (song_id_radiodj,)
+        )
+        song = cursor.fetchone()
+        cursor.close()
+        db.close()
+    except Exception as e:
+        logger(tache_id, f"ERREUR: Impossible de lire song RadioDJ {song_id_radiodj}: {e}")
+        return None
+
+    if not song:
+        logger(tache_id, f"ERREUR: Song RadioDJ {song_id_radiodj} introuvable.")
+        return None
+
+    artist = song.get('artist', '') or ''
+    title = song.get('title', '') or ''
+    song_path = song.get('path', '') or ''
+    logger(tache_id, f"Song RadioDJ: {artist} - {title} (path={song_path})")
+
+    # 2. Cache mapping_radiodj_azura (lot 21.3) — tenté en premier, jamais
+    #    bloquant : toute anomalie → fallback list_media_all ci-dessous.
+    if utiliser_cache:
+        try:
+            db = pymysql.connect(**DB_CONFIG)
+            cursor = db.cursor(pymysql.cursors.DictCursor)
+            cursor.execute(
+                "SELECT media_id_azura, methode_matching, confiance "
+                "FROM mapping_radiodj_azura "
+                "WHERE song_id_radiodj = %s AND station_id = %s AND actif = 1",
+                (song_id_radiodj, station_id)
+            )
+            row = cursor.fetchone()
+            cursor.close()
+            db.close()
+        except Exception as e:
+            row = None
+            logger(tache_id, f"[INFO] Cache mapping illisible "
+                             f"(fallback list_media) : {e}")
+        if row and (row.get('confiance') or 0) >= 0.75:
+            logger(tache_id, f"[OK] media_id résolu via cache mapping: "
+                             f"{row['media_id_azura']} "
+                             f"(méthode: {row.get('methode_matching')}, "
+                             f"confiance: {row.get('confiance')})")
+            try:
+                return int(row['media_id_azura'])
+            except (TypeError, ValueError):
+                pass  # valeur de cache incohérente → fallback
+        elif row:
+            logger(tache_id, f"[INFO] Cache mapping présent mais confiance "
+                             f"insuffisante ({row.get('confiance')}) — "
+                             f"fallback list_media")
+
+    # 3. Fallback list_media_all() — passes basename exact puis artist+title
+    try:
+        all_media = api.list_media_all()
+        rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
+        logger(tache_id, f"Recherche dans {len(rows)} médias AzuraCast...")
+
+        # Extraire basename du path RadioDJ (format Windows)
+        basename_radiodj = song_path.rsplit('\\', 1)[-1] if '\\' in song_path else song_path.rsplit('/', 1)[-1]
+        basename_radiodj_lower = basename_radiodj.lower().strip()
+
+        media_id_trouve = None
+        methode_match = None
+
+        # Passe 1 : matching par basename exact
+        for m in rows:
+            azura_path = m.get('path', '') or ''
+            basename_azura = azura_path.rsplit('/', 1)[-1] if '/' in azura_path else azura_path
+            if basename_azura.lower().strip() == basename_radiodj_lower:
+                media_id_trouve = m.get('id')
+                methode_match = 'path_exact'
+                break
+
+        # Passe 2 : matching par artist+title normalisé
+        if not media_id_trouve and artist and title:
+            cle_radiodj = normaliser_pour_recherche(f"{artist} - {title}")
+            for m in rows:
+                azura_artist = m.get('artist', '') or ''
+                azura_title = m.get('title', '') or ''
+                if azura_artist and azura_title:
+                    cle_azura = normaliser_pour_recherche(f"{azura_artist} - {azura_title}")
+                    if cle_radiodj == cle_azura:
+                        media_id_trouve = m.get('id')
+                        methode_match = 'artist_title_normalized'
+                        break
+
+        if not media_id_trouve:
+            logger(tache_id, f"ERREUR: Aucun média AzuraCast trouvé pour "
+                             f"'{artist} - {title}' (song_id={song_id_radiodj})")
+            return None
+
+        logger(tache_id, f"[OK] media_id résolu: {media_id_trouve} (méthode: {methode_match})")
+        return int(media_id_trouve)
+
+    except Exception as e:
+        logger(tache_id, f"ERREUR lors de la résolution media_id: {e}")
+        return None
+
+
 def executer_azura_remove_from_playlist(tache_id, parametres):
     """
     Phase 1 — Retire un média d'une playlist AzuraCast sans supprimer le fichier.
@@ -1962,87 +2100,14 @@ def executer_azura_remove_from_playlist(tache_id, parametres):
     # Le dashboard ne connaît que le song_id RadioDJ, pas le media_id AzuraCast.
     # On doit donc retrouver le media_id en cherchant dans la liste des médias AzuraCast.
     if not media_id or media_id == 0:
-        logger(tache_id, f"media_id manquant — résolution depuis song_id_radiodj={song_id_radiodj}")
-
-        if not song_id_radiodj:
-            logger(tache_id, "ERREUR: Impossible de résoudre media_id (ni media_id ni song_id_radiodj fourni).")
-            logger(tache_id, "=== TERMINÉ === (paramètres insuffisants)")
-            return
-
-        # 1. Lire le song RadioDJ pour récupérer artist + title + path
-        try:
-            db = pymysql.connect(**DB_CONFIG)
-            cursor = db.cursor(pymysql.cursors.DictCursor)
-            cursor.execute(
-                "SELECT ID, artist, title, `path` FROM radiodb.songs WHERE ID = %s",
-                (song_id_radiodj,)
-            )
-            song = cursor.fetchone()
-            cursor.close()
-            db.close()
-        except Exception as e:
-            logger(tache_id, f"ERREUR: Impossible de lire song RadioDJ {song_id_radiodj}: {e}")
-            logger(tache_id, "=== TERMINÉ === (erreur DB)")
-            return
-
-        if not song:
-            logger(tache_id, f"ERREUR: Song RadioDJ {song_id_radiodj} introuvable.")
-            logger(tache_id, "=== TERMINÉ === (song introuvable)")
-            return
-
-        artist = song.get('artist', '') or ''
-        title = song.get('title', '') or ''
-        song_path = song.get('path', '') or ''
-        logger(tache_id, f"Song RadioDJ: {artist} - {title} (path={song_path})")
-
-        # 2. Lister tous les médias AzuraCast et chercher un match
-        #    Stratégie : d'abord par basename du fichier, puis par artist+title
-        # TODO Phase 6: utiliser cache mapping_radiodj_azura (évite le list_media() à ~35s)
-        try:
-            all_media = api.list_media_all()
-            rows = all_media if isinstance(all_media, list) else all_media.get('rows', [])
-            logger(tache_id, f"Recherche dans {len(rows)} médias AzuraCast...")
-
-            # Extraire basename du path RadioDJ (format Windows)
-            basename_radiodj = song_path.rsplit('\\', 1)[-1] if '\\' in song_path else song_path.rsplit('/', 1)[-1]
-            basename_radiodj_lower = basename_radiodj.lower().strip()
-
-            media_id_trouve = None
-            methode_match = None
-
-            # Passe 1 : matching par basename exact
-            for m in rows:
-                azura_path = m.get('path', '') or ''
-                basename_azura = azura_path.rsplit('/', 1)[-1] if '/' in azura_path else azura_path
-                if basename_azura.lower().strip() == basename_radiodj_lower:
-                    media_id_trouve = m.get('id')
-                    methode_match = 'path_exact'
-                    break
-
-            # Passe 2 : matching par artist+title normalisé
-            if not media_id_trouve and artist and title:
-                cle_radiodj = normaliser_pour_recherche(f"{artist} - {title}")
-                for m in rows:
-                    azura_artist = m.get('artist', '') or ''
-                    azura_title = m.get('title', '') or ''
-                    if azura_artist and azura_title:
-                        cle_azura = normaliser_pour_recherche(f"{azura_artist} - {azura_title}")
-                        if cle_radiodj == cle_azura:
-                            media_id_trouve = m.get('id')
-                            methode_match = 'artist_title_normalized'
-                            break
-
-            if not media_id_trouve:
-                logger(tache_id, f"ERREUR: Aucun média AzuraCast trouvé pour '{artist} - {title}' (song_id={song_id_radiodj})")
-                logger(tache_id, "=== TERMINÉ === (media_id non résolu)")
-                return
-
-            media_id = media_id_trouve
-            logger(tache_id, f"[OK] media_id résolu: {media_id} (méthode: {methode_match})")
-
-        except Exception as e:
-            logger(tache_id, f"ERREUR lors de la résolution media_id: {e}")
-            logger(tache_id, "=== TERMINÉ === (erreur résolution)")
+        # Lot 21.2 — résolution mutualisée (_resoudre_media_id_azura) :
+        # cache mapping 21.3 d'abord (confiance ≥ 0.75), fallback
+        # list_media_all (basename exact puis artist+title) — remplace
+        # l'ex-bloc en ligne et l'ex-TODO « Phase 6 » (anciennement L2000).
+        media_id = _resoudre_media_id_azura(tache_id, api, song_id_radiodj,
+                                            station_id=station_id)
+        if not media_id:
+            logger(tache_id, "=== TERMINÉ === (media_id non résolu)")
             return
 
     logger(tache_id, f"Média AzuraCast ID: {media_id}")
@@ -3151,6 +3216,369 @@ def executer_azura_remove_from_playlist_batch(tache_id, parametres):
     logger(tache_id, f"Erreurs: {nb_erreurs}")
     logger(tache_id, f"Flags mis à jour: {len(updates_flag)}")
     logger(tache_id, "=== TERMINÉ === (succès)")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# LOT 21.2 — Opérations "retour" complémentaires (R2 move / R4 empty / R5 rename)
+# Implémentation conforme à ETUDE_API_AZURACAST_RETOUR.md (§2.2/§2.4/§2.5).
+# RadioDJ = référence ultime : aucune de ces opérations ne modifie RadioDJ.
+# ═══════════════════════════════════════════════════════════════════════
+
+def executer_azura_move_media(tache_id, parametres):
+    """
+    Lot 21.2 (R2) — Déplace un média d'une playlist AzuraCast à une autre.
+
+    Parametres attendus :
+      - from_playlist_id: ID de la playlist source (obligatoire)
+      - to_playlist_id:   ID de la playlist cible (obligatoire, ≠ source)
+      - media_id:         ID du média AzuraCast (optionnel)
+      - song_id_radiodj:  ID RadioDJ (optionnel — résolution media_id sinon)
+      - station_id:       ID de la station (résolu via _resoudre_station_id_tache)
+
+    Workflow :
+      1. Résoudre media_id (cache mapping 21.3 → list_media_all)
+      2. Valider que source et cible appartiennent à la station (garde 2026.11.21-A)
+      3. Appeler api.move_media_between_playlists(media_id, from, to)
+         (re-lecture de vérification intégrée, garde folder-based)
+      4. Journal 'move' + regen miroir
+    Le flag RadioDJ ne change pas : le média reste dans au moins une playlist.
+    """
+    from_playlist_id = parametres.get('from_playlist_id')
+    to_playlist_id = parametres.get('to_playlist_id')
+    media_id = parametres.get('media_id')
+    song_id_radiodj = parametres.get('song_id_radiodj')
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_azura_move_media')
+
+    if not from_playlist_id or not to_playlist_id:
+        logger(tache_id, "ERREUR: from_playlist_id et to_playlist_id obligatoires.")
+        logger(tache_id, "=== TERMINÉ === (paramètres manquants)")
+        return
+
+    try:
+        station_id = int(station_id)
+    except (ValueError, TypeError):
+        station_id = _DEFAULT_STATION_ID
+
+    logger(tache_id, "=== DÉBUT DÉPLACEMENT PLAYLIST → PLAYLIST ===")
+    logger(tache_id, f"De: playlist {from_playlist_id} → Vers: playlist {to_playlist_id}")
+    logger(tache_id, f"Station: {station_id}")
+
+    api = get_azura_api(station_id)
+    if not api:
+        logger(tache_id, "ERREUR FATALE: Module azuracast_api non disponible.")
+        logger(tache_id, "=== TERMINÉ === (module API indisponible)")
+        return
+
+    try:
+        if not media_id or int(media_id) == 0:
+            media_id = _resoudre_media_id_azura(tache_id, api, song_id_radiodj,
+                                                station_id=station_id)
+            if not media_id:
+                logger(tache_id, "=== TERMINÉ === (media_id non résolu)")
+                return
+        media_id = int(media_id)
+        logger(tache_id, f"Média AzuraCast ID: {media_id}")
+
+        # Garde station (cf. Hotfix 2026.11.21-A) : source ET cible doivent
+        # appartenir à la station demandée (playlists homonymes cross-station).
+        try:
+            _pl_station = api.list_playlists() or []
+            _ids_station = set()
+            for _pl in _pl_station:
+                try:
+                    _ids_station.add(int(_pl.get('id')))
+                except (TypeError, ValueError):
+                    continue
+            _hors = []
+            if _ids_station:
+                for _pid in (int(from_playlist_id), int(to_playlist_id)):
+                    if _pid not in _ids_station:
+                        _hors.append(_pid)
+            if _hors:
+                logger(tache_id, f"ERREUR: playlist(s) {_hors} absente(s) de la station {station_id}.")
+                logger(tache_id, f"Playlists connues de la station {station_id} : {sorted(_ids_station)}")
+                logger(tache_id, "=== TERMINÉ === (playlist hors station)")
+                return
+        except Exception as _e:
+            logger(tache_id, f"[ATTENTION] Validation station impossible: {_e} — poursuite sans ce garde-fou.")
+
+        result = api.move_media_between_playlists(media_id, from_playlist_id,
+                                                  to_playlist_id)
+
+        if result.get('status') == 'no_change':
+            logger(tache_id, f"[INFO] {result.get('message')}")
+            logger(tache_id, "=== TERMINÉ === (aucun changement nécessaire)")
+            return
+
+        logger(tache_id, f"[OK] Média {media_id} déplacé : "
+                         f"playlist {from_playlist_id} → playlist {to_playlist_id}")
+        logger(tache_id, f"Playlists restantes (re-fetch API): "
+                         f"{result.get('playlists_restantes')}")
+
+        # Journal (type_op 'move' déjà dans l'ENUM) + regen miroir
+        if ROTATION_MODULE_DISPONIBLE:
+            try:
+                _journaliser_rotation(DB_CONFIG, 'move',
+                                      station_id=station_id,
+                                      media_id_azura=media_id,
+                                      song_id_radiodj=song_id_radiodj,
+                                      triggered_by='manual',
+                                      task_id=tache_id,
+                                      details={'from_playlist_id': int(from_playlist_id),
+                                               'to_playlist_id': int(to_playlist_id)})
+            except Exception:
+                pass  # journal non bloquant
+            try:
+                demander_regen_miroir(DB_CONFIG, f'move_media_s{station_id}')
+            except Exception:
+                pass
+
+        logger(tache_id, "=== TERMINÉ === (succès)")
+
+    except AzuraCastAPIError as e:
+        logger(tache_id, f"[ERREUR API] {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur API)")
+    except Exception as e:
+        logger(tache_id, f"[ERREUR INATTENDUE] {type(e).__name__}: {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur)")
+
+
+def executer_azura_empty_playlist(tache_id, parametres):
+    """
+    Lot 21.2 (R4) — Vide le contenu d'une playlist AzuraCast (sans la supprimer).
+
+    Parametres attendus :
+      - playlist_id: ID de la playlist à vider (obligatoire)
+      - station_id:  ID de la station (résolu via _resoudre_station_id_tache)
+
+    Workflow :
+      1. Valider que la playlist appartient à la station (garde 2026.11.21-A)
+      2. Appeler api.empty_playlist(playlist_id) — DELETE /playlist/{id}/empty
+      3. Enchaîner un resync des flags AZURA_* : les titres de la playlist
+         viennent de perdre leur association → leurs flags AZURA_ACTIVE_S*
+         sont périmés (resync en file si aucune déjà en cours)
+      4. Journal 'empty_playlist' + regen miroir
+    """
+    playlist_id = parametres.get('playlist_id')
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_azura_empty_playlist')
+
+    if not playlist_id:
+        logger(tache_id, "ERREUR: playlist_id obligatoire.")
+        logger(tache_id, "=== TERMINÉ === (paramètres manquants)")
+        return
+
+    try:
+        station_id = int(station_id)
+    except (ValueError, TypeError):
+        station_id = _DEFAULT_STATION_ID
+
+    logger(tache_id, "=== DÉBUT VIDAGE PLAYLIST ===")
+    logger(tache_id, f"Playlist ID: {playlist_id}")
+    logger(tache_id, f"Station: {station_id}")
+
+    api = get_azura_api(station_id)
+    if not api:
+        logger(tache_id, "ERREUR FATALE: Module azuracast_api non disponible.")
+        logger(tache_id, "=== TERMINÉ === (module API indisponible)")
+        return
+
+    try:
+        # Garde station (cf. Hotfix 2026.11.21-A) : la playlist doit appartenir
+        # à la station demandée (homonymes cross-station possibles).
+        try:
+            _pl_station = api.list_playlists() or []
+            _ids_station = set()
+            for _pl in _pl_station:
+                try:
+                    _ids_station.add(int(_pl.get('id')))
+                except (TypeError, ValueError):
+                    continue
+            if _ids_station and int(playlist_id) not in _ids_station:
+                logger(tache_id, f"ERREUR: La playlist {playlist_id} n'appartient pas à la station {station_id}.")
+                logger(tache_id, f"Playlists connues de la station {station_id} : {sorted(_ids_station)}")
+                logger(tache_id, "=== TERMINÉ === (playlist hors station)")
+                return
+        except Exception as _e:
+            logger(tache_id, f"[ATTENTION] Validation station impossible: {_e} — poursuite sans ce garde-fou.")
+
+        result = api.empty_playlist(playlist_id)
+        logger(tache_id, f"[OK] Playlist {playlist_id} vidée "
+                         f"(les fichiers restent dans AzuraCast)")
+        if isinstance(result, dict) and result:
+            logger(tache_id, f"Réponse API: {result}")
+
+        # ── Rattrapage des flags : les titres de la playlist viennent de
+        #    perdre leur association → resync AZURA_STATUS en file si aucune
+        #    n'est déjà en attente/en cours (pas de doublon).
+        try:
+            db = pymysql.connect(**DB_CONFIG)
+            cursor = db.cursor()
+            cursor.execute(
+                "SELECT id FROM taches_planifiees "
+                "WHERE type_action = 'SYNC_AZURA_STATUS' "
+                "AND statut IN ('en_attente', 'en_cours') LIMIT 1"
+            )
+            deja = cursor.fetchone()
+            if not deja:
+                cursor.execute(
+                    "INSERT INTO taches_planifiees "
+                    "(type_action, statut, parametres, date_creation) "
+                    "VALUES ('SYNC_AZURA_STATUS', 'en_attente', %s, NOW())",
+                    (json.dumps({'station_ids': [station_id],
+                                 'raison': f'empty_playlist_{playlist_id}'}),)
+                )
+                logger(tache_id, "[OK] Resync des flags AZURA enchaîné "
+                                 "(SYNC_AZURA_STATUS en file)")
+            else:
+                logger(tache_id, "[INFO] Resync des flags déjà en file — pas de doublon.")
+            db.commit()
+            cursor.close()
+            db.close()
+        except Exception as e:
+            logger(tache_id, f"[ATTENTION] Enchaînement resync impossible : {e} "
+                             f"— relancer un SYNC_AZURA_STATUS manuellement")
+
+        # Journal (type_op 'empty_playlist' déjà dans l'ENUM) + regen miroir
+        if ROTATION_MODULE_DISPONIBLE:
+            try:
+                _journaliser_rotation(DB_CONFIG, 'empty_playlist',
+                                      station_id=station_id,
+                                      song_id_radiodj=None,
+                                      triggered_by='manual',
+                                      task_id=tache_id,
+                                      details={'playlist_id': int(playlist_id)})
+            except Exception:
+                pass  # journal non bloquant
+            try:
+                demander_regen_miroir(DB_CONFIG, f'empty_playlist_s{station_id}')
+            except Exception:
+                pass
+
+        logger(tache_id, "=== TERMINÉ === (succès)")
+
+    except AzuraCastAPIError as e:
+        logger(tache_id, f"[ERREUR API] {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur API)")
+    except Exception as e:
+        logger(tache_id, f"[ERREUR INATTENDUE] {type(e).__name__}: {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur)")
+
+
+def executer_azura_rename_media(tache_id, parametres):
+    """
+    Lot 21.2 (R5) — Renomme/déplace un fichier média dans l'arborescence AzuraCast.
+
+    Parametres attendus :
+      - to_path:   chemin cible, relatif à la racine média de la station
+                   (ex: "CHRONIQUES/MERCREDI/titre.mp3") — obligatoire
+      - from_path: chemin actuel (optionnel — lu depuis AzuraCast sinon)
+      - media_id / song_id_radiodj / station_id (cf. executer_azura_move_media)
+
+    Workflow :
+      1. Résoudre media_id ; from_path = paramètre ou path courant du média
+      2. Appeler api.rename_media_file(from_path, to_path) — PUT /files/rename
+      3. Mettre à jour le chemin du cache mapping (best effort, non bloquant)
+      4. Journal 'rename' + regen miroir
+    Le flag RadioDJ ne change pas (le fichier reste dans AzuraCast).
+    """
+    to_path = (parametres.get('to_path') or '').strip()
+    from_path = (parametres.get('from_path') or '').strip()
+    media_id = parametres.get('media_id')
+    song_id_radiodj = parametres.get('song_id_radiodj')
+    station_id = _resoudre_station_id_tache(tache_id, parametres, 'executer_azura_rename_media')
+
+    if not to_path:
+        logger(tache_id, "ERREUR: to_path obligatoire "
+                         "(chemin cible complet, ex: CHRONIQUES/titre.mp3).")
+        logger(tache_id, "=== TERMINÉ === (paramètres manquants)")
+        return
+
+    try:
+        station_id = int(station_id)
+    except (ValueError, TypeError):
+        station_id = _DEFAULT_STATION_ID
+
+    logger(tache_id, "=== DÉBUT RENOMMAGE / DÉPLACEMENT FICHIER ===")
+    logger(tache_id, f"Chemin cible: {to_path}")
+    logger(tache_id, f"Station: {station_id}")
+
+    api = get_azura_api(station_id)
+    if not api:
+        logger(tache_id, "ERREUR FATALE: Module azuracast_api non disponible.")
+        logger(tache_id, "=== TERMINÉ === (module API indisponible)")
+        return
+
+    try:
+        if not media_id or int(media_id) == 0:
+            media_id = _resoudre_media_id_azura(tache_id, api, song_id_radiodj,
+                                                station_id=station_id)
+            if not media_id:
+                logger(tache_id, "=== TERMINÉ === (media_id non résolu)")
+                return
+        media_id = int(media_id)
+        logger(tache_id, f"Média AzuraCast ID: {media_id}")
+
+        # from_path : paramètre explicite, sinon lecture réelle du média
+        if not from_path:
+            media = api.get_media(media_id)
+            from_path = (media.get('path') or '').strip()
+            logger(tache_id, f"Chemin actuel (re-fetch AzuraCast): {from_path}")
+        if not from_path:
+            logger(tache_id, "ERREUR: from_path indéterminable (média sans path ?).")
+            logger(tache_id, "=== TERMINÉ === (paramètres insuffisants)")
+            return
+
+        result = api.rename_media_file(from_path, to_path)
+        logger(tache_id, f"[OK] Fichier renommé/déplacé : {from_path} → {to_path}")
+
+        # Cache mapping : le chemin AzuraCast est périmé après rename
+        # (best effort, non bloquant — le resync/bootstrap le recalculera)
+        if ROTATION_MODULE_DISPONIBLE:
+            try:
+                db = pymysql.connect(**DB_CONFIG)
+                cursor = db.cursor()
+                cursor.execute(
+                    "UPDATE mapping_radiodj_azura SET path_azura = %s, "
+                    "date_derniere_verif = NOW() "
+                    "WHERE media_id_azura = %s AND station_id = %s",
+                    (to_path, media_id, station_id)
+                )
+                db.commit()
+                if cursor.rowcount:
+                    logger(tache_id, f"[OK] Cache mapping mis à jour "
+                                     f"({cursor.rowcount} ligne(s))")
+                cursor.close()
+                db.close()
+            except Exception as e:
+                logger(tache_id, f"[INFO] Cache mapping non mis à jour "
+                                 f"(non bloquant) : {e}")
+
+        # Journal (type_op 'rename' déjà dans l'ENUM) + regen miroir
+        if ROTATION_MODULE_DISPONIBLE:
+            try:
+                _journaliser_rotation(DB_CONFIG, 'rename',
+                                      station_id=station_id,
+                                      media_id_azura=media_id,
+                                      song_id_radiodj=song_id_radiodj,
+                                      triggered_by='manual',
+                                      task_id=tache_id,
+                                      details={'from_path': from_path,
+                                               'to_path': to_path})
+            except Exception:
+                pass  # journal non bloquant
+            try:
+                demander_regen_miroir(DB_CONFIG, f'rename_media_s{station_id}')
+            except Exception:
+                pass
+
+        logger(tache_id, "=== TERMINÉ === (succès)")
+
+    except AzuraCastAPIError as e:
+        logger(tache_id, f"[ERREUR API] {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur API)")
+    except Exception as e:
+        logger(tache_id, f"[ERREUR INATTENDUE] {type(e).__name__}: {e}")
+        logger(tache_id, "=== TERMINÉ === (erreur)")
 
 
 def executer_suspect_reject(tache_id, parametres):
@@ -9634,6 +10062,15 @@ def main():
                         executer_azura_delete_media(tache_id, parametres)
                     elif type_action == 'AZURA_DELETE_MEDIA_BATCH':
                         executer_azura_delete_media_batch(tache_id, parametres)
+                    elif type_action == 'AZURA_MOVE_MEDIA':
+                        # Lot 21.2 (R2) — déplacement entre playlists
+                        executer_azura_move_media(tache_id, parametres)
+                    elif type_action == 'AZURA_EMPTY_PLAYLIST':
+                        # Lot 21.2 (R4) — vidage de playlist
+                        executer_azura_empty_playlist(tache_id, parametres)
+                    elif type_action == 'AZURA_RENAME_MEDIA':
+                        # Lot 21.2 (R5) — renommage/déplacement fichier
+                        executer_azura_rename_media(tache_id, parametres)
                     elif type_action == 'GET_MEDIA_PLAYLISTS':
                         executer_get_media_playlists(tache_id, parametres)
                     elif type_action == 'GET_BATCH_MEDIA_PLAYLISTS':

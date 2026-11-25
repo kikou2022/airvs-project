@@ -267,7 +267,7 @@ PIGES_ARTWORK_WINDOWS_DIR = os.getenv('PIGES_ARTWORK_WINDOWS_DIR', r"U:\airvs_ar
 # Worker
 # ═══════════════════════════════════════════════════════════════════════
 
-WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.11.24-B')  # 21.4-a : auto-purge RETIRED (cron 1x/j + GF4, observation/execution, garde resync REMOVED). Historique : 2026.11.23-A (D4-a bis : cycle quotidien SYNCHRO_DIFFUSION avec rattrapage au démarrage), 2026.11.22-A (T2 SYNCHRO_DIFFUSION), + Phase 21.3 : rotation éditoriale (mapping + preview/execute) + regen miroir, C : hotfix cleanup orphelines
+WORKER_VERSION_ATTENDUE = os.getenv('WORKER_VERSION_ATTENDUE', '2026.11.25-A')  # Lot 21.2 : opérations retour (R2 move inter-playlists, R4 vidage playlist, R5 renommage fichier) + résolution media_id mutualisée (cache mapping). 2026.11.24-B : 21.4-a : auto-purge RETIRED (cron 1x/j + GF4, observation/execution, garde resync REMOVED). Historique : 2026.11.23-A (D4-a bis : cycle quotidien SYNCHRO_DIFFUSION avec rattrapage au démarrage), 2026.11.22-A (T2 SYNCHRO_DIFFUSION), + Phase 21.3 : rotation éditoriale (mapping + preview/execute) + regen miroir, C : hotfix cleanup orphelines
 
 
 # ═══════════════════════════════════════════════════════════════════════

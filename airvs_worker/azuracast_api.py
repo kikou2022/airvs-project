@@ -569,6 +569,162 @@ class AzuraCastAPI:
         return result
 
     # ═══════════════════════════════════════════════
+    # OPÉRATIONS "RETOUR" — Lot 21.2 (R2 move / R4 empty / R5 rename)
+    # ═══════════════════════════════════════════════
+    # Implémentation conforme à ETUDE_API_AZURACAST_RETOUR.md §2.2 / §2.4 / §2.5.
+    # Principe architectural (étude §6) : RadioDJ = référence ultime — ces
+    # opérations ne touchent JAMAIS la base RadioDJ locale.
+
+    def empty_playlist(self, playlist_id):
+        """
+        R4 — Vide le contenu d'une playlist SANS supprimer la playlist elle-même.
+
+        Endpoint : DELETE /station/{id}/playlist/{playlist_id}/empty
+        (AzuraCast gère la cascade : associations retirées, fichiers physiques
+        conservés — cf. étude §2.4).
+
+        Args:
+            playlist_id: ID de la playlist à vider
+
+        Returns:
+            dict: réponse de l'API (peut être vide si 204 No Content)
+
+        Raises:
+            AzuraCastAPIError: playlist_id invalide ou échec HTTP
+        """
+        try:
+            playlist_id = int(playlist_id)
+        except (TypeError, ValueError):
+            raise AzuraCastAPIError(
+                f"empty_playlist: playlist_id invalide ({playlist_id!r})")
+        response = self.session.delete(
+            self._url(f'/playlist/{playlist_id}/empty'),
+            timeout=self.timeout
+        )
+        return self._handle_response(response, f"Vider la playlist {playlist_id}")
+
+    def move_media_between_playlists(self, media_id, from_playlist_id, to_playlist_id):
+        """
+        R2 — Déplace un média d'une playlist à une autre (un seul PUT).
+
+        Workflow (variante de remove_media_from_playlist, étude §2.2) :
+          1. GET  /file/{media_id} → liste courante des playlists
+          2. Retirer from_playlist_id, ajouter to_playlist_id (idempotent)
+          3. PUT  /file/{media_id} avec { playlists: [...] }
+          4. Re-lecture de vérification (même garde folder-based que le retrait :
+             AzuraCast peut ignorer le PUT sur les playlists par dossier)
+
+        Args:
+            media_id: ID du média dans AzuraCast
+            from_playlist_id: ID de la playlist source
+            to_playlist_id: ID de la playlist cible
+
+        Returns:
+            dict: {'status': 'no_change', 'message': ...} si le média est déjà
+                  absent de la playlist source (contrat identique au retrait) ;
+                  sinon {'status': 'ok', 'playlists_restantes': [...]} après
+                  re-lecture réelle.
+
+        Raises:
+            AzuraCastAPIError: identifiants invalides, échec HTTP, ou PUT ignoré
+                               (cible absente après re-lecture)
+        """
+        try:
+            media_id = int(media_id)
+            from_playlist_id = int(from_playlist_id)
+            to_playlist_id = int(to_playlist_id)
+        except (TypeError, ValueError):
+            raise AzuraCastAPIError(
+                f"move_media_between_playlists: identifiants invalides "
+                f"(media={media_id!r}, from={from_playlist_id!r}, "
+                f"to={to_playlist_id!r})")
+        if from_playlist_id == to_playlist_id:
+            return {
+                'status': 'no_change',
+                'message': (f"Playlist source et cible identiques "
+                            f"({to_playlist_id}) — rien à faire"),
+            }
+
+        # 1. Liste courante (dicts ou entiers selon la version de l'API)
+        media = self.get_media(media_id)
+        current = []
+        for p in (media.get('playlists') or []):
+            pid = p.get('id') if isinstance(p, dict) else p
+            try:
+                current.append(int(pid))
+            except (TypeError, ValueError):
+                continue
+
+        # 2. Déjà absent de la source → no_change (contrat du retrait)
+        if from_playlist_id not in current:
+            return {
+                'status': 'no_change',
+                'message': (f"Média {media_id} déjà absent de la playlist source "
+                            f"{from_playlist_id} (playlists courantes: "
+                            f"{current if current else 'aucune'})"),
+            }
+
+        # 3. PUT : source retirée, cible ajoutée
+        new_playlists = [pid for pid in current if pid != from_playlist_id]
+        if to_playlist_id not in new_playlists:
+            new_playlists.append(to_playlist_id)
+        self.update_media(media_id, playlists=new_playlists)
+
+        # 4. Re-lecture de vérification (garde folder-based)
+        media_apres = self.get_media(media_id)
+        apres = []
+        for p in (media_apres.get('playlists') or []):
+            pid = p.get('id') if isinstance(p, dict) else p
+            try:
+                apres.append(int(pid))
+            except (TypeError, ValueError):
+                continue
+
+        if to_playlist_id not in apres:
+            raise AzuraCastAPIError(
+                f"Déplacement ignoré par AzuraCast : média {media_id} absent de "
+                f"la playlist cible {to_playlist_id} après PUT. "
+                f"Playlist folder-based probable. "
+                f"(playlists réelles: {apres if apres else 'aucune'})")
+
+        return {'status': 'ok', 'playlists_restantes': apres}
+
+    def rename_media_file(self, from_path, to_path):
+        """
+        R5 — Renomme ou déplace un fichier dans l'arborescence AzuraCast.
+
+        Endpoint : PUT /station/{id}/files/rename
+        Body : { "from": "imports_push/titre.mp3", "to": "CHRONIQUES/titre.mp3" }
+        (chemins relatifs à la racine média de la station — cf. étude §2.5)
+
+        Args:
+            from_path: chemin actuel du fichier
+            to_path:   chemin cible (dossier(s) + nom)
+
+        Returns:
+            dict: réponse de l'API
+
+        Raises:
+            AzuraCastAPIError: chemins invalides (vide, identiques) ou échec HTTP
+        """
+        from_path = (from_path or '').strip()
+        to_path = (to_path or '').strip()
+        if not from_path or not to_path:
+            raise AzuraCastAPIError(
+                f"rename_media_file: from_path et to_path obligatoires "
+                f"(from={from_path!r}, to={to_path!r})")
+        if from_path == to_path:
+            raise AzuraCastAPIError(
+                f"rename_media_file: from_path == to_path ({from_path}) — "
+                f"rien à faire")
+        response = self.session.put(
+            self._url('/files/rename'),
+            json={'from': from_path, 'to': to_path},
+            timeout=self.timeout
+        )
+        return self._handle_response(response, f"Renommer {from_path} → {to_path}")
+
+    # ═══════════════════════════════════════════════
     # OPÉRATIONS COMPOSITES (HAUT NIVEAU)
     # ═══════════════════════════════════════════════
 
