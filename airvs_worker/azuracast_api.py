@@ -694,8 +694,14 @@ class AzuraCastAPI:
         R5 — Renomme ou déplace un fichier dans l'arborescence AzuraCast.
 
         Endpoint : PUT /station/{id}/files/rename
-        Body : { "from": "imports_push/titre.mp3", "to": "CHRONIQUES/titre.mp3" }
-        (chemins relatifs à la racine média de la station — cf. étude §2.5)
+        Body : { "file": "imports_push/titre.mp3", "newPath": "CHRONIQUES/titre.mp3" }
+        (chemins relatifs à la racine média de la station)
+
+        FIX 25/11 (retour exploitation) : le contrat réel d'AzuraCast lit
+        `file` et `newPath` (RenameAction.php 0.24.0 — erreur "File not
+        specified." si `file` absent, renvoyée en HTTP 500) ; l'étude §2.5
+        annonçait `from`/`to` — corrigé et vérifié contre la source du tag
+        0.24.0 (backend/src/Controller/Api/Stations/Files/RenameAction.php).
 
         Args:
             from_path: chemin actuel du fichier
@@ -719,7 +725,7 @@ class AzuraCastAPI:
                 f"rien à faire")
         response = self.session.put(
             self._url('/files/rename'),
-            json={'from': from_path, 'to': to_path},
+            json={'file': from_path, 'newPath': to_path},
             timeout=self.timeout
         )
         return self._handle_response(response, f"Renommer {from_path} → {to_path}")
