@@ -1,4 +1,5 @@
 {
+  "_note": "Gabarit commité — valeurs sensibles masquées (Hotfix 2026.11.25-B). Le config.json de production vit LOCALEMENT sur chaque machine et n'est JAMAIS commité. La clé API peut aussi venir de la variable d'environnement AIRVS_AZURA_API_KEY (prioritaire).",
   "sheets": {
     "titres_mary":   "1pItBk1boYtu2yKCmdFFeWpayuzKYEVBd-eFtjS8059E",
     "lives_mary":    "1W7Z88CALqMn6DH4Nwm7Gjd_64T-fW3m7kbLRPABIFqY",
@@ -8,7 +9,7 @@
   },
   "azuracast": {
     "base_url":   "https://azuracast.2026.airvs.fr",
-    "api_key":    "5e256834da4da4cf:1cadd3936115612949a795cd5a48e12d",
+    "api_key":    "<MASQUÉ>",
     "ssh_host":   "sebastien@azuracast.2026.airvs.fr",
     "ssh_port":   "2022",
     "sshfs_root": "/home/sebastien/music_azuracast6_7",
@@ -19,7 +20,7 @@
   },
   "azuracast2": {
     "base_url": "https://web.podcast.2026.airvs.fr",
-    "api_key": "213186118c1d8cd6:5ad777fa054807b4d4d88c0de56f9968",
+    "api_key":  "<MASQUÉ>",
     "station_id": 7
   }
 }

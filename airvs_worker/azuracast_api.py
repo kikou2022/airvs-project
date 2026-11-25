@@ -51,7 +51,7 @@ class AzuraCastAPI:
     Usage :
         api = AzuraCastAPI(
             base_url="https://azuracast.2026.airvs.fr/api",
-            api_key="5e256834da4da4cf:1cadd3936115612949a795cd5a48e12d",
+            api_key="<clé_api_azuracast>",  # Hotfix 2026.11.25-B : plus aucune clé dans le dépôt
             station_id=7
         )
 
@@ -994,9 +994,12 @@ def generer_m3u_pour_azuracast(fichiers, dossier_cible='imports_push'):
 # ═══════════════════════════════════════════════════
 
 # Valeurs par défaut (fallback si config.json absent/corrompu).
-# Conservées pour rétrocompatibilité avec les déploiements existants.
+# Hotfix 2026.11.25-B — plus AUCUNE clé dans le dépôt : _DEFAULT_API_KEY est
+# None ; la clé doit venir du config.json LOCAL (jamais commité) ou de la
+# variable d'environnement AIRVS_AZURA_API_KEY (prioritaire, cf. lot 2026.11.25-A
+# sur export_db_mirror_V4.py — même philosophie).
 _DEFAULT_BASE_URL = "https://azuracast.2026.airvs.fr/api"
-_DEFAULT_API_KEY  = "5e256834da4da4cf:1cadd3936115612949a795cd5a48e12d"
+_DEFAULT_API_KEY  = None
 _DEFAULT_STATION_ID = 7
 _CONFIG_JSON_PATH = "config.json"  # À côté du script Python (worker_ubuntu.py)
 
@@ -1031,7 +1034,8 @@ def get_api_for_station(station_id=None):
       - api_key  : clé API (commune à toutes les stations d'une même installation)
       - stations : liste des stations connues [{id, nom}, ...]
 
-    Fallback sur les constantes par défaut si config.json est absent.
+    Fallback sur les constantes par défaut si config.json est absent
+    (base_url/station_id uniquement — JAMAIS la clé, cf. Hotfix 2026.11.25-B).
     """
     azura = _charger_config_azuracast()
 
@@ -1040,7 +1044,18 @@ def get_api_for_station(station_id=None):
     if not base_url.endswith("/api"):
         base_url = base_url.rstrip("/") + "/api"
 
-    api_key = azura.get("api_key", _DEFAULT_API_KEY)
+    # Hotfix 2026.11.25-B — résolution de la clé SANS valeur en dur dans le
+    # dépôt : ① variable d'environnement AIRVS_AZURA_API_KEY (écrase tout,
+    # pratique test/cron — même nom que export_db_mirror_V4.py) →
+    # ② config.json local § azuracast.api_key → ③ rien trouvée = erreur
+    # explicite (les tâches seront marquées 'erreur' avec ce message).
+    api_key = os.environ.get("AIRVS_AZURA_API_KEY") or azura.get("api_key")
+    if not api_key or str(api_key).startswith("<MASQU"):
+        raise AzuraCastAPIError(
+            "Clé API AzuraCast introuvable : ni la variable d'environnement "
+            "AIRVS_AZURA_API_KEY, ni config.json § azuracast.api_key. Le dépôt "
+            "ne porte aucune clé depuis le Hotfix 2026.11.25-B — renseigner le "
+            "config.json LOCAL (jamais commité) puis relancer.")
 
     # Résolution de station_id
     if station_id is None:
