@@ -662,10 +662,15 @@ function retirerTitrePlaylistAzura() {
  * Quand le worker a terminé, le résultat JSON est dans log_resultat
  * avec le marqueur __RESULT__.
  */
-function pollMediaPlaylists(taskId, songId, stationId) {
+function pollMediaPlaylists(taskId, songId, stationId, areaId, onResult) {
+    // Lot 21.2 — areaId/onResult paramétrables (défauts : zone du retrait +
+    // showPlaylistDropdown) pour réutiliser ce flux GET/poll dans le
+    // déplacement inter-playlists (R2). Les appels existants sont inchangés.
+    areaId = areaId || 'retire_playlist_area';
+    onResult = onResult || showPlaylistDropdown;
     var attempts = 0;
     var maxAttempts = 60;  // 60 tentatives × 2 sec = 120 sec max
-    var dropdownArea = document.getElementById('retire_playlist_area');
+    var dropdownArea = document.getElementById(areaId);
 
     function poll() {
         fetch('/lire_log_push?task_id=' + encodeURIComponent(taskId))
@@ -689,7 +694,7 @@ function pollMediaPlaylists(taskId, songId, stationId) {
                         }
                         return;
                     }
-                    showPlaylistDropdown(result, songId, stationId, taskId);
+                    onResult(result, songId, stationId, taskId);
                     return;
                 }
             }
@@ -920,6 +925,278 @@ function supprimerTitreAzuraCast() {
 }
 
 window.supprimerTitreAzuraCast = supprimerTitreAzuraCast;
+
+
+// ════════════════════════════════════════════════════════════════════════
+// LOT 21.2 — Opérations "retour" complémentaires (R2 move / R4 empty / R5 rename)
+// Pattern journal : viderJournaux + journalLabel + surveillerActionLog (21-B).
+// RadioDJ = référence ultime : aucune de ces actions ne touche RadioDJ.
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * Charge la liste des playlists de la station (cache SQL) dans le select
+ * passé en argument (panneau « Vider PLS » et cible du « Déplacer »).
+ */
+function chargerPlaylistsStationAzura(targetSelectId) {
+    var stationId = getActionStationId();
+    if (!stationValideOuMessage(stationId, 'Chargement des playlists', 'terminal_action_output')) return;
+    var el = document.getElementById(targetSelectId);
+    if (!el) return;
+    el.innerHTML = '<option value="">⏳ Chargement…</option>';
+    fetch('/api/azuracast/playlists?station_id=' + encodeURIComponent(stationId), { method: 'GET' })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        var list = Array.isArray(data) ? data : (data.playlists || []);
+        if (!list.length) {
+            el.innerHTML = '<option value="">(aucune playlist connue en cache — lancez un SYNC_PLAYLISTS_CACHE)</option>';
+            return;
+        }
+        var html = '<option value="">— Choisir une playlist —</option>';
+        list.forEach(function(p) {
+            var pid = p.id || p.playlist_id;
+            var name = p.name || p.nom || ('Playlist ' + pid);
+            html += '<option value="' + pid + '">' + name + ' (ID ' + pid + ')</option>';
+        });
+        el.innerHTML = html;
+    })
+    .catch(function(err) {
+        el.innerHTML = '<option value="">Erreur de chargement</option>';
+        alert('Erreur réseau : ' + err.message);
+    });
+}
+window.chargerPlaylistsStationAzura = chargerPlaylistsStationAzura;
+
+/**
+ * Lot 21.2 (R2) — Déplace le titre d'une playlist à une autre.
+ * 1. Récupère les playlists ACTUELLES du média (même flux GET/poll que le retrait)
+ * 2. Propose source (playlists du titre) + cible (playlists de la station)
+ */
+function deplacerTitrePlaylistAzura() {
+    if (!actionTrack || !actionTrack.inAzura) {
+        alert('Ce titre n\'est pas dans AzuraCast, impossible de le déplacer.');
+        return;
+    }
+    var stationId = getActionStationId();
+    if (!stationValideOuMessage(stationId, '↔ Déplacer entre playlists', 'terminal_action_output')) return;
+    var songId = actionTrack.ID;
+    var area = document.getElementById('deplacer_area');
+    if (area) {
+        area.innerHTML = '<div class="alert alert-info py-2 small">' +
+            '⏳ Récupération des playlists AzuraCast...<br>' +
+            'Titre : ' + (actionTrack.artist || '?') + ' - ' + (actionTrack.title || '?') + '<br>' +
+            'Station : ' + stationId + ' · Song ID : ' + songId + '</div>';
+    }
+    fetch('/api/azura/media/' + encodeURIComponent(songId) + '/playlists?station_id=' + encodeURIComponent(stationId), { method: 'GET' })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.status === 'pending' && data.task_id) {
+            pollMediaPlaylists(data.task_id, songId, stationId, 'deplacer_area', renderMoveArea);
+        } else if (area) {
+            area.innerHTML = '<div class="alert alert-danger py-2 small">❌ Erreur : ' + (data.message || 'réponse inattendue') + '</div>';
+        }
+    })
+    .catch(function(err) { alert('Erreur réseau : ' + err.message); });
+}
+
+/**
+ * Lot 21.2 (R2) — Rendu de la zone de déplacement (source + cible + confirmation).
+ */
+function renderMoveArea(result, songId, stationId, fetchTaskId) {
+    var playlists = result.playlists || [];
+    var mediaId = result.media_id;
+    var area = document.getElementById('deplacer_area');
+    if (!area) return;
+    if (!playlists.length) {
+        area.innerHTML = '<div class="alert alert-secondary py-2 small">ℹ️ Ce titre n\'est dans aucune playlist AzuraCast — rien à déplacer.</div>';
+        return;
+    }
+    var html = '<div class="card card-body p-2 mb-2">';
+    html += '<label class="form-label small fw-bold mb-1">Playlist source (actuelle du titre) :</label>';
+    html += '<select class="form-select form-select-sm mb-2" id="move_source_select">';
+    html += '<option value="">— Choisir la playlist source —</option>';
+    playlists.forEach(function(p) {
+        var typeStr = p.is_folder_based ? ' (⚠️ folder-based)' : '';
+        var name = p.name || ('Playlist ' + p.id);
+        html += '<option value="' + p.id + '">' + name + ' (ID ' + p.id + ')' + typeStr + '</option>';
+    });
+    html += '</select>';
+    html += '<label class="form-label small fw-bold mb-1">Playlist cible :</label>';
+    html += '<div class="d-flex gap-2 mb-2">';
+    html += '<select class="form-select form-select-sm" id="move_target_select"><option value="">⏳ Chargement…</option></select>';
+    html += '<button type="button" class="btn btn-outline-secondary btn-sm text-nowrap" onclick="chargerPlaylistsStationAzura(\'move_target_select\')">⟳</button>';
+    html += '</div>';
+    html += '<button class="btn btn-info btn-sm" id="btn_confirm_move" disabled>↔ Déplacer vers cette playlist</button>';
+    html += '</div>';
+    area.innerHTML = html;
+    chargerPlaylistsStationAzura('move_target_select');
+
+    // Hotfix 2026.11.21-B — journal contextuel : vidage des zones à chaque opération
+    viderJournaux('');
+
+    var srcSel = document.getElementById('move_source_select');
+    var tgtSel = document.getElementById('move_target_select');
+    var btn = document.getElementById('btn_confirm_move');
+    if (!srcSel || !tgtSel || !btn) return;
+    function majBouton() {
+        btn.disabled = !(srcSel.value && tgtSel.value && (srcSel.value !== tgtSel.value));
+    }
+    srcSel.addEventListener('change', majBouton);
+    tgtSel.addEventListener('change', majBouton);
+    btn.addEventListener('click', function() {
+        var fromId = parseInt(srcSel.value);
+        var toId = parseInt(tgtSel.value);
+        if (!fromId || !toId || fromId === toId) return;
+        var fromName = ((playlists.find(function(p) { return p.id === fromId; })) || {}).name || ('Playlist ' + fromId);
+        var toName = (tgtSel.options[tgtSel.selectedIndex] || {}).text || ('Playlist ' + toId);
+        if (!confirm(
+            'Confirmer le déplacement ?\n\n' +
+            'Titre : ' + (actionTrack.artist || '?') + ' - ' + (actionTrack.title || '?') + '\n' +
+            'Source : ' + fromName + ' (ID ' + fromId + ')\n' +
+            'Cible : ' + toName + '\n' +
+            'Station : ' + stationId + '\n\n' +
+            'Le fichier n\'est ni supprimé ni dupliqué.\n' +
+            'RadioDJ n\'est pas affecté.'
+        )) return;
+        fetch('/api/azura/media/' + encodeURIComponent(songId) + '/playlists/move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                station_id: stationId,
+                from_playlist_id: fromId,
+                to_playlist_id: toId,
+                media_id: mediaId
+            })
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data.status === 'ok') {
+                area.innerHTML = '<div class="alert alert-success py-2 small">' +
+                    '✅ Tâche de déplacement créée (ID ' + data.task_id + ')<br>' +
+                    '⏳ Le worker va traiter la tâche prochainement.</div>';
+                journalLabel('action', 'Journal · ↔ Déplacer PLS :');
+                if (typeof surveillerActionLog === 'function') {
+                    surveillerActionLog(data.task_id, [], journalActionHeader('↔ Déplacer PLS',
+                        fromName + ' → ' + toName + ' · Station ' + stationId));
+                }
+            } else {
+                alert('Erreur : ' + (data.message || 'réponse inattendue'));
+            }
+        })
+        .catch(function(err) { alert('Erreur réseau : ' + err.message); });
+    });
+}
+window.deplacerTitrePlaylistAzura = deplacerTitrePlaylistAzura;
+
+/**
+ * Lot 21.2 (R4) — Vide une playlist AzuraCast (double confirmation).
+ * Le worker enchaîne un resync des flags AZURA et demande la regen miroir.
+ */
+function viderPlaylistAzura() {
+    var stationId = getActionStationId();
+    if (!stationValideOuMessage(stationId, '🧹 Vider une playlist', 'terminal_action_output')) return;
+    var sel = document.getElementById('vider_playlist_select');
+    if (!sel || !sel.value) {
+        alert('Choisissez d\'abord la playlist à vider (bouton ⟳ Recharger si la liste est vide).');
+        return;
+    }
+    var playlistId = parseInt(sel.value);
+    var playlistName = (sel.options[sel.selectedIndex] || {}).text || ('Playlist ' + playlistId);
+    if (!confirm(
+        '⚠️ VIDAGE DE PLAYLIST ⚠️\n\n' +
+        'Playlist : ' + playlistName + '\n' +
+        'Station : ' + stationId + '\n\n' +
+        'TOUS les titres de cette playlist seront retirés de celle-ci :\n' +
+        '• Les fichiers restent dans AzuraCast (aucune suppression)\n' +
+        '• La playlist elle-même n\'est pas supprimée\n' +
+        '• Les flags AZURA_* seront réalignés automatiquement (resync enchaîné)\n' +
+        '• RadioDJ n\'est pas affecté\n\n' +
+        'Confirmer le vidage ?'
+    )) return;
+    if (!confirm('Dernière confirmation : vider TOUT le contenu de « ' + playlistName + ' » ?')) return;
+    var resultArea = document.getElementById('vider_result_area');
+    if (resultArea) resultArea.innerHTML = '<div class="alert alert-info py-2 small">⏳ Vidage en cours...</div>';
+    viderJournaux('action');
+    fetch('/api/azura/playlist/' + encodeURIComponent(playlistId) + '/empty', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ station_id: stationId })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.status === 'ok') {
+            if (resultArea) resultArea.innerHTML = '<div class="alert alert-success py-2 small">' +
+                '✅ Tâche de vidage créée (ID ' + data.task_id + ')<br>' +
+                'Un resync des flags AZURA est enchaîné automatiquement.</div>';
+            journalLabel('action', 'Journal · 🧹 Vider PLS :');
+            if (typeof surveillerActionLog === 'function') {
+                surveillerActionLog(data.task_id, [], journalActionHeader('🧹 Vider PLS',
+                    playlistName + ' · Station ' + stationId));
+            }
+        } else if (resultArea) {
+            resultArea.innerHTML = '<div class="alert alert-danger py-2 small">❌ Erreur : ' + (data.message || 'réponse inattendue') + '</div>';
+        }
+    })
+    .catch(function(err) {
+        if (resultArea) resultArea.innerHTML = '<div class="alert alert-danger py-2 small">❌ Erreur réseau : ' + err.message + '</div>';
+    });
+}
+window.viderPlaylistAzura = viderPlaylistAzura;
+
+/**
+ * Lot 21.2 (R5) — Renomme/déplace le fichier du titre dans l'arborescence AzuraCast.
+ * Le worker résout le media_id, lit le chemin actuel si absent, met à jour
+ * le cache de mapping et demande la regen miroir.
+ */
+function renommerFichierAzura() {
+    if (!actionTrack || !actionTrack.inAzura) {
+        alert('Ce titre n\'est pas dans AzuraCast, impossible de renommer le fichier.');
+        return;
+    }
+    var stationId = getActionStationId();
+    if (!stationValideOuMessage(stationId, '📁 Renommer fichier', 'terminal_action_output')) return;
+    var songId = actionTrack.ID;
+    var toPath = ((document.getElementById('renommer_chemin_cible') || {}).value || '').trim();
+    if (!toPath) {
+        alert('Indiquez le chemin cible complet (ex : CHRONIQUES/MERCREDI/titre.mp3).');
+        return;
+    }
+    if (!confirm(
+        'Confirmer le renommage/déplacement du fichier ?\n\n' +
+        'Titre : ' + (actionTrack.artist || '?') + ' - ' + (actionTrack.title || '?') + '\n' +
+        'Chemin cible : ' + toPath + '\n' +
+        'Station : ' + stationId + '\n\n' +
+        'Le fichier sera renommé/déplacé côté AzuraCast.\n' +
+        'Le cache de mapping sera mis à jour.\n' +
+        'RadioDJ n\'est pas affecté.'
+    )) return;
+    var resultArea = document.getElementById('renommer_result_area');
+    if (resultArea) resultArea.innerHTML = '<div class="alert alert-info py-2 small">⏳ Renommage en cours...</div>';
+    viderJournaux('action');
+    fetch('/api/azura/media/' + encodeURIComponent(songId) + '/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ station_id: stationId, to_path: toPath })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.status === 'ok') {
+            if (resultArea) resultArea.innerHTML = '<div class="alert alert-success py-2 small">' +
+                '✅ Tâche de renommage créée (ID ' + data.task_id + ')<br>' +
+                '⏳ Le worker va traiter la tâche prochainement.</div>';
+            journalLabel('action', 'Journal · 📁 Renommer fichier :');
+            if (typeof surveillerActionLog === 'function') {
+                surveillerActionLog(data.task_id, [], journalActionHeader('📁 Renommer fichier',
+                    toPath + ' · Station ' + stationId));
+            }
+        } else if (resultArea) {
+            resultArea.innerHTML = '<div class="alert alert-danger py-2 small">❌ Erreur : ' + (data.message || 'réponse inattendue') + '</div>';
+        }
+    })
+    .catch(function(err) {
+        if (resultArea) resultArea.innerHTML = '<div class="alert alert-danger py-2 small">❌ Erreur réseau : ' + err.message + '</div>';
+    });
+}
+window.renommerFichierAzura = renommerFichierAzura;
 
 
 // ════════════════════════════════════════════════════════════════════════

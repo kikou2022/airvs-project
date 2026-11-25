@@ -1740,6 +1740,10 @@
                             <button class="btn btn-primary btn-sm" onclick="showActionPanel('ajouter')">➕ Ajouter PLS</button>
                             <button class="btn btn-warning btn-sm" onclick="showActionPanel('retirer')">➖ Retirer PLS</button>
                             <button class="btn btn-danger btn-sm" onclick="showActionPanel('supprimer')">🗑️ Supprimer</button>
+                            <!-- Lot 21.2 — opérations retour complémentaires (R2/R4/R5) -->
+                            <button class="btn btn-info btn-sm" onclick="showActionPanel('deplacer')">↔ Déplacer PLS</button>
+                            <button class="btn btn-secondary btn-sm" onclick="showActionPanel('vider'); chargerPlaylistsStationAzura('vider_playlist_select')">🧹 Vider PLS</button>
+                            <button class="btn btn-outline-secondary btn-sm" onclick="showActionPanel('renommer')">📁 Renommer fichier</button>
                         </div>
     
                         <div id="action_dynamic_panel">
@@ -1857,6 +1861,74 @@
                                     🗑️ Supprimer ce titre d'AzuraCast
                                 </button>
                                 <div id="supprimer_result_area" class="mt-3"></div>
+                            </div>
+
+                            <!-- PANNEAU : Déplacement entre playlists (Lot 21.2 — R2) -->
+                            <div class="dynamic-panel" id="action-panel-deplacer">
+                                <div class="alert alert-info py-2 small">
+                                    <strong>Déplacer le titre d'une playlist à une autre</strong><br>
+                                    Le fichier n'est ni supprimé ni dupliqué : il quitte la playlist source
+                                    et rejoint la playlist cible. RadioDJ n'est <strong>pas affecté</strong>.
+                                </div>
+                                <button class="btn btn-info btn-sm" onclick="deplacerTitrePlaylistAzura()">
+                                    🔍 Charger les playlists du titre
+                                </button>
+                                <div id="deplacer_area" class="mt-3"></div>
+                            </div>
+
+                            <!-- PANNEAU : Vidage de playlist (Lot 21.2 — R4) -->
+                            <div class="dynamic-panel" id="action-panel-vider">
+                                <div class="alert alert-warning py-2 small">
+                                    <strong>Vider une playlist AzuraCast</strong><br>
+                                    Retire <strong>TOUS les titres</strong> de la playlist choisie (les fichiers
+                                    restent dans AzuraCast, la playlist n'est pas supprimée). Un resync des
+                                    flags AZURA est enchaîné automatiquement par le worker.
+                                    RadioDJ n'est <strong>pas affecté</strong>.
+                                </div>
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-md-6">
+                                        <label class="form-label small fw-bold">Playlist à vider :</label>
+                                        <select class="form-select form-select-sm" id="vider_playlist_select">
+                                            <option value="">-- Charger les playlists --</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <button class="btn btn-outline-secondary btn-sm w-100"
+                                                onclick="chargerPlaylistsStationAzura('vider_playlist_select')">
+                                            ⟳ Recharger
+                                        </button>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <button class="btn btn-danger btn-sm w-100" onclick="viderPlaylistAzura()">
+                                            🧹 Vider cette playlist
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="vider_result_area" class="mt-3"></div>
+                            </div>
+
+                            <!-- PANNEAU : Renommage/déplacement fichier (Lot 21.2 — R5) -->
+                            <div class="dynamic-panel" id="action-panel-renommer">
+                                <div class="alert alert-info py-2 small">
+                                    <strong>Renommer / déplacer le fichier dans l'arborescence AzuraCast</strong><br>
+                                    Chemin cible <strong>complet</strong> relatif à la racine média de la station
+                                    (ex : <code>CHRONIQUES/MERCREDI/titre.mp3</code>). Le cache de mapping est
+                                    mis à jour automatiquement par le worker.
+                                    RadioDJ n'est <strong>pas affecté</strong>.
+                                </div>
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-md-8">
+                                        <label class="form-label small fw-bold">Chemin cible :</label>
+                                        <input type="text" class="form-control form-control-sm"
+                                               id="renommer_chemin_cible" placeholder="ex: CHRONIQUES/MERCREDI/titre.mp3">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <button class="btn btn-secondary btn-sm w-100" onclick="renommerFichierAzura()">
+                                            📁 Renommer / déplacer
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="renommer_result_area" class="mt-3"></div>
                             </div>
                         </div>
                     </div>
@@ -4659,9 +4731,12 @@
                             <div class="card-body small">
                                 <div id="rot-mirror-state">chargement…</div>
                                 <div class="text-muted mt-2">
-                                    Après toute opération modifiant les flags (rotation, retrait,
-                                    suppression, resync, push), le worker .17 déclenche
-                                    export_db_mirror_V4.py sur .30 via SSH (canal BatchMode existant).
+                                    Après toute opération modifiant les flags ou les playlists (rotation, retrait,
+                                    suppression, déplacement, vidage, renommage, resync, push), le worker
+                                    (pige, .17) déclenche export_db_mirror_V4.py sur pige même via SSH
+                                    loopback (BatchMode) ; l'export lit radiodb + airvs_dashboard sur .30 puis
+                                    pousse db.json vers debian12 (.30) et le VPS OVH (miroir public).
+                                    <em>Lot 21.2 — libellé réel corrigé (avant : « sur .30 »).</em>
                                 </div>
                             </div>
                         </div>

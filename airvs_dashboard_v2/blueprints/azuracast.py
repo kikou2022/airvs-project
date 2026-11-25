@@ -1330,6 +1330,201 @@ def api_remove_media_from_playlist(media_id, playlist_id):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# LOT 21.2 — Opérations "retour" complémentaires (R2 move / R4 empty / R5 rename)
+# Pattern identique aux opérations existantes : insertion d'une tâche dans
+# taches_planifiees, le worker la consomme (station explicite obligatoire,
+# cf. Hotfix 2026.11.21-C). RadioDJ = référence ultime : ces routes ne
+# modifient jamais la base RadioDJ (cf. ETUDE_API_AZURACAST_RETOUR.md §6).
+# ═══════════════════════════════════════════════════════════════════════
+
+@azuracast_bp.route('/api/azura/media/<int:song_id_radiodj>/playlists/move', methods=['POST'])
+@login_requis
+def api_move_media_between_playlists(song_id_radiodj):
+    """
+    Lot 21.2 (R2) — Déplace un média d'une playlist AzuraCast à une autre.
+
+    Insère une tâche AZURA_MOVE_MEDIA dans la file d'attente ; le worker
+    appelle api.move_media_between_playlists (avec re-lecture de vérification).
+
+    Body JSON :
+      - station_id:       ID de la station AzuraCast (obligatoire — Hotfix 21-C)
+      - from_playlist_id: ID de la playlist source (obligatoire)
+      - to_playlist_id:   ID de la playlist cible (obligatoire, ≠ source)
+      - media_id:         ID du média AzuraCast (optionnel — résolution worker)
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        raw_station_id = data.get('station_id')
+        if raw_station_id is None:
+            return jsonify({'status': 'error', 'message': 'station_id manquant — sélectionnez une station cible'}), 400
+        try:
+            station_id = int(raw_station_id)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'station_id invalide'}), 400
+        from_playlist_id = data.get('from_playlist_id')
+        to_playlist_id = data.get('to_playlist_id')
+        if not from_playlist_id or not to_playlist_id:
+            return jsonify({'status': 'error', 'message': 'from_playlist_id et to_playlist_id obligatoires'}), 400
+        try:
+            from_playlist_id = int(from_playlist_id)
+            to_playlist_id = int(to_playlist_id)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'identifiants de playlists invalides'}), 400
+        if from_playlist_id == to_playlist_id:
+            return jsonify({'status': 'error', 'message': 'La playlist source et la playlist cible sont identiques'}), 400
+
+        db = get_db_connection()
+        if not db:
+            return jsonify({'status': 'error', 'message': 'Connexion DB impossible'}), 500
+        cursor = db.cursor()
+
+        parametres = {
+            'media_id': data.get('media_id'),
+            'song_id_radiodj': song_id_radiodj,
+            'from_playlist_id': from_playlist_id,
+            'to_playlist_id': to_playlist_id,
+            'station_id': station_id,
+        }
+        cursor.execute(
+            "INSERT INTO taches_planifiees (type_action, statut, parametres, date_creation) "
+            "VALUES ('AZURA_MOVE_MEDIA', 'en_attente', %s, NOW())",
+            (json.dumps(parametres),)
+        )
+        db.commit()
+        task_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            'status': 'ok',
+            'message': (f'Tâche de déplacement créée '
+                        f'(playlist {from_playlist_id} → playlist {to_playlist_id})'),
+            'task_id': task_id,
+            'song_id_radiodj': song_id_radiodj,
+            'from_playlist_id': from_playlist_id,
+            'to_playlist_id': to_playlist_id,
+            'station_id': station_id
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@azuracast_bp.route('/api/azura/playlist/<int:playlist_id>/empty', methods=['DELETE'])
+@login_requis
+def api_empty_playlist(playlist_id):
+    """
+    Lot 21.2 (R4) — Vide le contenu d'une playlist AzuraCast (sans la supprimer).
+
+    Insère une tâche AZURA_EMPTY_PLAYLIST ; le worker enchaîne un resync des
+    flags AZURA (les titres de la playlist perdent leur association) et
+    demande la régénération du miroir.
+
+    Body JSON :
+      - station_id: ID de la station AzuraCast (obligatoire — Hotfix 21-C)
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        raw_station_id = data.get('station_id')
+        if raw_station_id is None:
+            return jsonify({'status': 'error', 'message': 'station_id manquant — sélectionnez une station cible'}), 400
+        try:
+            station_id = int(raw_station_id)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'station_id invalide'}), 400
+
+        db = get_db_connection()
+        if not db:
+            return jsonify({'status': 'error', 'message': 'Connexion DB impossible'}), 500
+        cursor = db.cursor()
+
+        parametres = {
+            'playlist_id': playlist_id,
+            'station_id': station_id,
+        }
+        cursor.execute(
+            "INSERT INTO taches_planifiees (type_action, statut, parametres, date_creation) "
+            "VALUES ('AZURA_EMPTY_PLAYLIST', 'en_attente', %s, NOW())",
+            (json.dumps(parametres),)
+        )
+        db.commit()
+        task_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            'status': 'ok',
+            'message': f'Tâche de vidage créée (playlist {playlist_id}, station {station_id})',
+            'task_id': task_id,
+            'playlist_id': playlist_id,
+            'station_id': station_id
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@azuracast_bp.route('/api/azura/media/<int:song_id_radiodj>/rename', methods=['POST'])
+@login_requis
+def api_rename_media_file(song_id_radiodj):
+    """
+    Lot 21.2 (R5) — Renomme/déplace le fichier média dans l'arborescence AzuraCast.
+
+    Insère une tâche AZURA_RENAME_MEDIA ; le worker résout le media_id,
+    lit le chemin actuel si from_path est absent, met à jour le cache de
+    mapping et demande la régénération du miroir.
+
+    Body JSON :
+      - station_id: ID de la station AzuraCast (obligatoire — Hotfix 21-C)
+      - to_path:    chemin cible complet relatif à la racine média (obligatoire)
+      - from_path:  chemin actuel (optionnel — lu depuis AzuraCast sinon)
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        raw_station_id = data.get('station_id')
+        if raw_station_id is None:
+            return jsonify({'status': 'error', 'message': 'station_id manquant — sélectionnez une station cible'}), 400
+        try:
+            station_id = int(raw_station_id)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'station_id invalide'}), 400
+        to_path = (data.get('to_path') or '').strip()
+        if not to_path:
+            return jsonify({'status': 'error', 'message': 'to_path obligatoire (chemin cible complet, ex: CHRONIQUES/titre.mp3)'}), 400
+
+        db = get_db_connection()
+        if not db:
+            return jsonify({'status': 'error', 'message': 'Connexion DB impossible'}), 500
+        cursor = db.cursor()
+
+        parametres = {
+            'song_id_radiodj': song_id_radiodj,
+            'media_id': data.get('media_id'),
+            'from_path': (data.get('from_path') or '').strip(),
+            'to_path': to_path,
+            'station_id': station_id,
+        }
+        cursor.execute(
+            "INSERT INTO taches_planifiees (type_action, statut, parametres, date_creation) "
+            "VALUES ('AZURA_RENAME_MEDIA', 'en_attente', %s, NOW())",
+            (json.dumps(parametres),)
+        )
+        db.commit()
+        task_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            'status': 'ok',
+            'message': f'Tâche de renommage créée (→ {to_path})',
+            'task_id': task_id,
+            'song_id_radiodj': song_id_radiodj,
+            'to_path': to_path,
+            'station_id': station_id
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # PHASE 3 — Suppression définitive d'un média AzuraCast
 # ═══════════════════════════════════════════════════════════════════════
 
